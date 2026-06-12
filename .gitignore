@@ -1,0 +1,17 @@
+node_modules/
+out/
+cache/
+artifacts/
+broadcast/
+.env
+typechain-types/
+
+# Local deployment artifacts
+deployments/localhost/
+deployments/hardhat/
+deployments/*/solcInputs/
+deployments/*/.chainId
+
+# Optional local outputs
+coverage/
+coverage.json

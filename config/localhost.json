@@ -1,0 +1,7 @@
+{
+  "admin": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "proposer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "owner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "rootHistorySize": 256,
+  "l1ChainIndex": 0
+}

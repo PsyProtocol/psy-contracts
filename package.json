@@ -1,0 +1,33 @@
+{
+  "name": "psy-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "hardhat compile",
+    "test": "hardhat test",
+    "clean": "hardhat clean",
+    "test:hardhat": "hardhat test",
+    "test:foundry": "forge test -C .",
+    "deploy:hardhat": "hardhat deploy --network hardhat",
+    "deploy:localhost": "hardhat deploy --network localhost",
+    "deploy:devnet": "hardhat deploy --network devnet",
+    "deploy:keystore": "node scripts/deploy-with-keystore.mjs deploy",
+    "deploy:keystore:localhost": "node scripts/deploy-with-keystore.mjs deploy --network localhost --reset",
+    "deploy:keystore:sepolia": "node scripts/deploy-with-keystore.mjs deploy --network sepolia --reset",
+    "deploy:keystore:ethereum": "node scripts/deploy-with-keystore.mjs deploy --network ethereum --reset"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^2.0.2",
+    "@nomiclabs/hardhat-ethers": "^2.2.3",
+    "dotenv": "^16.4.5",
+    "hardhat": "^2.26.3",
+    "hardhat-deploy": "^0.12.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.6.1",
+    "@openzeppelin/contracts-upgradeable": "^5.6.1",
+    "ethers": "^5.8.0"
+  }
+}
