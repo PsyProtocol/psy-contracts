@@ -50,20 +50,20 @@ All settings are read from env vars:
 
 ### How It Works
 
-1. **Deploy**脚本结束时，`deployments/<network>/` 下的 JSON 文件包含每个合约的部署元数据（address、constructorArgs、libraries）
-2. **Verify**时，`verify-contracts` task 自动扫描 `deployments/<network>/` 目录，读取部署信息
-3. 对每个合约（含 `_Implementation`，自动跳过 `_Proxy`），按以下方式验证：
-   - **Hardhat**（默认）：调用 `verify:verify` task，带自动重试
-   - **Foundry**（`ETHERSCAN_VERIFICATION_PROVIDER=foundry`）：构建 `forge verify-contract` 命令，用 `cast abi-encode` 编码构造参数
+1. **Deploy** scripts write per-contract metadata (`address`, `constructorArgs`, `libraries`) to JSON files under `deployments/<network>/`.
+2. **Verify** reads those deployment files from `deployments/<network>/` and auto-detects which contracts to verify.
+3. Each contract (including `_Implementation` variants; `_Proxy` contracts are skipped) is verified via:
+   - **Hardhat** (default): runs `verify:verify` with automatic retries
+   - **Foundry** (`ETHERSCAN_VERIFICATION_PROVIDER=foundry`): constructs a `forge verify-contract` command with ABI-encoded constructor args via `cast abi-encode`
 
-验证覆盖的合约类型：
-| 类型 | 例子 | 说明 |
-|------|------|------|
-| 普通合约 | StateManager, Bridge | 单独部署，直接验证 |
-| 代理合约 | PsyAddressesProvider_Proxy | OpenZeppelin Transparent Proxy，验证构造函数参数(impl, admin, data) |
-| 实现合约 | PsyAddressesProvider_Implementation | 验证实现合约的构造函数参数 |
+Contract types covered:
+| Type | Example | Notes |
+|------|---------|-------|
+| Standalone | StateManager, Bridge | Deployed and verified directly |
+| Proxy | PsyAddressesProvider_Proxy | OpenZeppelin Transparent Proxy; constructor args include (impl, admin, data) |
+| Implementation | PsyAddressesProvider_Implementation | Verified against the implementation constructor args only |
 
-> 参考实现：paraspace-core 的 `tasks/dev/verifyContracts.ts` → `helpers/contracts-helpers.ts:verifyContracts()`，支持 Hardhat 和 Foundry 双模式。
+> Reference: paraspace-core `tasks/dev/verifyContracts.ts` → `helpers/contracts-helpers.ts:verifyContracts()`, supporting both Hardhat and Foundry modes.
 
 ## Deploy Runbook
 
