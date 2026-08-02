@@ -61,7 +61,7 @@ contract Router is Initializable, OwnableUpgradeable {
         l2ToL1Token[l2Token] = l1Token;
     }
 
-    function deposit(address token, uint256 amount, bytes32 shieldAddress, bytes32 noteSecretHash)
+    function deposit(address token, uint256 amount, bytes32 shieldAddress, bytes32 noteCommitment)
         external
         payable
         returns (uint32 index, bytes32 newRoot)
@@ -73,7 +73,7 @@ contract Router is Initializable, OwnableUpgradeable {
         if (token == address(0)) {
             if (ethGateway == address(0)) revert GatewayNotConfigured();
             if (msg.value != amount) revert InvalidMsgValue();
-            return ITokenGateway(ethGateway).deposit{value: msg.value}(msg.sender, token, amount, shieldAddress, noteSecretHash);
+            return ITokenGateway(ethGateway).deposit{value: msg.value}(msg.sender, token, amount, shieldAddress, noteCommitment);
         }
 
         if (msg.value != 0) revert InvalidMsgValue();
@@ -84,6 +84,6 @@ contract Router is Initializable, OwnableUpgradeable {
         }
         if (gateway == address(0)) revert GatewayNotConfigured();
 
-        return ITokenGateway(gateway).deposit(msg.sender, token, amount, shieldAddress, noteSecretHash);
+        return ITokenGateway(gateway).deposit(msg.sender, token, amount, shieldAddress, noteCommitment);
     }
 }

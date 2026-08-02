@@ -66,6 +66,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     "USDTToken",
     "WETH9",
     "Multicall3",
+    "ExecutorWithTimelock",
   ];
   const core: AddressMap = {};
   for (const name of coreNames) {
@@ -119,5 +120,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 };
 
 export default func;
-func.tags = ["export_deployed_contracts"];
-func.dependencies = ["token_faucet"];
+func.dependencies = ["token_faucet", "timelock"];

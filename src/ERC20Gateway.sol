@@ -12,7 +12,7 @@ interface IBridgeGateway {
         bytes32 l2TokenContractId,
         uint256 amount,
         bytes32 shieldAddress,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     )
         external
         returns (uint32 index, bytes32 newRoot);
@@ -58,7 +58,7 @@ contract ERC20Gateway is Initializable, OwnableUpgradeable {
         return VERSION;
     }
 
-    function deposit(address depositor, address token, uint256 amount, bytes32 shieldAddress, bytes32 noteSecretHash)
+    function deposit(address depositor, address token, uint256 amount, bytes32 shieldAddress, bytes32 noteCommitment)
         external
         payable
         onlyRouter
@@ -73,7 +73,7 @@ contract ERC20Gateway is Initializable, OwnableUpgradeable {
 
         IERC20(token).safeTransferFrom(depositor, bridgeAddr, amount);
         return IBridgeGateway(bridgeAddr).recordDepositFromGateway(
-            token, l2TokenContractId, amount, shieldAddress, noteSecretHash
+            token, l2TokenContractId, amount, shieldAddress, noteCommitment
         );
     }
 }

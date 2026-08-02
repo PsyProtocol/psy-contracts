@@ -12,46 +12,45 @@ export type DeploymentContracts = {
   implementations?: Record<string, string>
 }
 
-const localhostModules = import.meta.glob('./localhost/deployed-contracts.json', {
-  eager: true,
-  import: 'default',
-}) as Record<string, DeploymentContracts>
+let localhostModules: Record<string, DeploymentContracts> = {}
+let sepoliaModules: Record<string, DeploymentContracts> = {}
+let ethereumModules: Record<string, DeploymentContracts> = {}
 
-const sepoliaModules = import.meta.glob('./sepolia/deployed-contracts.json', {
-  eager: true,
-  import: 'default',
-}) as Record<string, DeploymentContracts>
-
-const bscModules = import.meta.glob('./bsc/deployed-contracts.json', {
-  eager: true,
-  import: 'default',
-}) as Record<string, DeploymentContracts>
-
-const ethereumModules = import.meta.glob('./ethereum/deployed-contracts.json', {
-  eager: true,
-  import: 'default',
-}) as Record<string, DeploymentContracts>
+try {
+  localhostModules = import.meta.glob('./localhost/deployed-contracts.json', {
+    eager: true,
+    import: 'default',
+  }) as Record<string, DeploymentContracts>
+  sepoliaModules = import.meta.glob('./sepolia/deployed-contracts.json', {
+    eager: true,
+    import: 'default',
+  }) as Record<string, DeploymentContracts>
+  ethereumModules = import.meta.glob('./ethereum/deployed-contracts.json', {
+    eager: true,
+    import: 'default',
+  }) as Record<string, DeploymentContracts>
+} catch {
+  // Bun/Node do not provide Vite's import.meta.glob. Consumers fall back to
+  // protocol-config when no generated deployment is available.
+}
 
 const localhost = localhostModules['./localhost/deployed-contracts.json']
 const sepolia = sepoliaModules['./sepolia/deployed-contracts.json']
-const bsc = bscModules['./bsc/deployed-contracts.json']
 const ethereum = ethereumModules['./ethereum/deployed-contracts.json']
 
-const configuredNetwork = String(import.meta.env.VITE_NETWORK ?? 'localhost').trim().toLowerCase()
-const isFork = String(import.meta.env.VITE_FORK ?? 'false').trim().toLowerCase() === 'true'
+const importMetaEnv = import.meta.env
+
+const configuredNetwork = String(importMetaEnv?.VITE_NETWORK ?? 'localhost').trim().toLowerCase()
+const isFork = String(importMetaEnv?.VITE_FORK ?? 'false').trim().toLowerCase() === 'true'
 const selectedNetwork = (isFork || configuredNetwork === 'localhost')
   ? 'localhost'
-  : configuredNetwork === 'sepolia' ? 'sepolia'
-  : configuredNetwork === 'bsc' ? 'bsc'
-  : 'ethereum'
+  : (configuredNetwork === 'sepolia' ? 'sepolia' : 'ethereum')
 
 const selectedDeployment =
   selectedNetwork === 'localhost'
     ? localhost
     : selectedNetwork === 'sepolia'
       ? sepolia
-      : selectedNetwork === 'bsc'
-        ? bsc
-        : ethereum
+      : ethereum
 
 export const currentDeployment: DeploymentContracts | undefined = selectedDeployment

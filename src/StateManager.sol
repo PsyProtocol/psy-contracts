@@ -12,6 +12,7 @@ interface IPsyAddressesProviderSM {
 
 interface IPsyACLManagerSM {
     function isProposer(address account) external view returns (bool);
+    function isStateManagerAdmin(address account) external view returns (bool);
 }
 
 interface IZKVerifierProof {
@@ -19,14 +20,13 @@ interface IZKVerifierProof {
 }
 
 contract StateManager is OwnableUpgradeable {
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
     uint64 public constant BRIDGE_USER_ID = 524288;
 
     address public addressesProvider;
     uint8 public l1ChainIndex;
 
     uint64 public lastFinalizedCheckpointId;
-    uint32 public nextConsumedDepositIndex;
     bytes32 public lastVerifiedCheckpointRoot;
     bytes32 public lastVerifiedDepositTreeRoot;
     bytes32 public lastVerifiedWithdrawalTreeRoot;
@@ -39,8 +39,15 @@ contract StateManager is OwnableUpgradeable {
         uint64 indexed newLastFinalizedCheckpointId,
         bytes32 indexed newLastVerifiedCheckpointRoot,
         bytes32 depositTreeRoot,
-        bytes32 withdrawalTreeRoot,
-        uint32 depositsConsumed
+        bytes32 withdrawalTreeRoot
+    );
+    event ForceSetState(
+        uint64 indexed newLastFinalizedCheckpointId,
+        bytes32 indexed newLastVerifiedCheckpointRoot,
+        bytes32 newLastVerifiedDepositTreeRoot,
+        bytes32 newDepositSubtreeRoot,
+        bytes32 newLastVerifiedWithdrawalTreeRoot,
+        bytes32 newWithdrawalSubtreeRoot
     );
 
     error OnlyBridge();
@@ -51,7 +58,11 @@ contract StateManager is OwnableUpgradeable {
     error InvalidCheckpointContinuity();
     error InvalidDepositMerkleProof();
     error InvalidWithdrawalMerkleProof();
+    error InvalidProvenChainIndex();
+    error WithdrawalBootstrapExpired();
 
+    error UnauthorizedStateManagerAdmin();
+    error InvalidForceSetState();
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         if (msg.sender != provider.getAddress(provider.BRIDGE_ID())) revert OnlyBridge();
@@ -62,6 +73,14 @@ contract StateManager is OwnableUpgradeable {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         address aclManager = provider.getAddress(provider.ACL_MANAGER_ID());
         if (!IPsyACLManagerSM(aclManager).isProposer(msg.sender)) revert OnlyProposer();
+        _;
+    }
+    modifier onlyStateManagerAdmin() {
+        IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
+        address aclManager = provider.getAddress(provider.ACL_MANAGER_ID());
+        if (!IPsyACLManagerSM(aclManager).isStateManagerAdmin(msg.sender)) {
+            revert UnauthorizedStateManagerAdmin();
+        }
         _;
     }
 
@@ -82,8 +101,36 @@ contract StateManager is OwnableUpgradeable {
         knownWithdrawalSubtreeRoots[bytes32(0)] = true;
     }
 
-    function getRevision() external pure returns (uint256) {
+    function getRevision() external pure virtual returns (uint256) {
         return VERSION;
+    }
+
+    function forceSetState(
+        uint64 newLastFinalizedCheckpointId,
+        bytes32 newLastVerifiedCheckpointRoot,
+        bytes32 newLastVerifiedDepositTreeRoot,
+        bytes32 newDepositSubtreeRoot,
+        bytes32 newLastVerifiedWithdrawalTreeRoot,
+        bytes32 newWithdrawalSubtreeRoot
+    ) external onlyStateManagerAdmin {
+        if (newLastFinalizedCheckpointId < lastFinalizedCheckpointId) revert InvalidForceSetState();
+
+        lastFinalizedCheckpointId = newLastFinalizedCheckpointId;
+        lastVerifiedCheckpointRoot = newLastVerifiedCheckpointRoot;
+        lastVerifiedDepositTreeRoot = newLastVerifiedDepositTreeRoot;
+        lastVerifiedWithdrawalTreeRoot = newLastVerifiedWithdrawalTreeRoot;
+        withdrawalSubtreeRoot = newWithdrawalSubtreeRoot;
+        knownDepositSubtreeRoots[newDepositSubtreeRoot] = true;
+        knownWithdrawalSubtreeRoots[newWithdrawalSubtreeRoot] = true;
+
+        emit ForceSetState(
+            newLastFinalizedCheckpointId,
+            newLastVerifiedCheckpointRoot,
+            newLastVerifiedDepositTreeRoot,
+            newDepositSubtreeRoot,
+            newLastVerifiedWithdrawalTreeRoot,
+            newWithdrawalSubtreeRoot
+        );
     }
 
     function finalize(
@@ -91,7 +138,7 @@ contract StateManager is OwnableUpgradeable {
         bytes32 depositTreeRoot,
         bytes32[2] calldata checkpointRoots,
         bytes32 withdrawalTreeRoot,
-        uint32 depositsConsumed,
+        uint8 provenChainIndex,
         uint64 newCheckpointId,
         bytes32[9] calldata depositMerkleProof,
         bytes32[9] calldata withdrawalMerkleProof
@@ -99,7 +146,9 @@ contract StateManager is OwnableUpgradeable {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         address zkVerifier = provider.getAddress(provider.ZK_VERIFIER_ID());
         if (zkVerifier == address(0)) revert VerifierNotSet();
-        bool isFirstFinalize = lastFinalizedCheckpointId == 0 && lastVerifiedCheckpointRoot == bytes32(0);
+        if (provenChainIndex != l1ChainIndex) revert InvalidProvenChainIndex();
+
+        bool isFirstFinalize = lastFinalizedCheckpointId == 0;
 
         if (!isFirstFinalize) {
             if (checkpointRoots[0] != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
@@ -108,13 +157,20 @@ contract StateManager is OwnableUpgradeable {
         require(newCheckpointId > lastFinalizedCheckpointId, "newCheckpointId must advance past lastFinalizedCheckpointId");
         uint64 numCheckpointsAggregated = newCheckpointId - lastFinalizedCheckpointId;
 
-        _validateBridgeTreeProofs(depositTreeRoot, withdrawalTreeRoot, depositMerkleProof, withdrawalMerkleProof);
+        _validateBridgeTreeProofs(
+            depositTreeRoot,
+            withdrawalTreeRoot,
+            depositMerkleProof,
+            withdrawalMerkleProof,
+            isFirstFinalize
+        );
         _verifyFinalizeProof(
             zkVerifier,
             proof,
             checkpointRoots,
             depositTreeRoot,
             withdrawalTreeRoot,
+            newCheckpointId,
             numCheckpointsAggregated
         );
 
@@ -124,10 +180,14 @@ contract StateManager is OwnableUpgradeable {
         lastVerifiedDepositTreeRoot = depositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = withdrawalTreeRoot;
         withdrawalSubtreeRoot = withdrawalMerkleProof[0];
-        nextConsumedDepositIndex += depositsConsumed;
         lastFinalizedCheckpointId = newCheckpointId;
 
-        emit Finalized(lastFinalizedCheckpointId, lastVerifiedCheckpointRoot, depositTreeRoot, withdrawalTreeRoot, depositsConsumed);
+        emit Finalized(
+            lastFinalizedCheckpointId,
+            lastVerifiedCheckpointRoot,
+            depositTreeRoot,
+            withdrawalTreeRoot
+        );
     }
 
     function _verifyTopTreeProof(bytes32 expectedRoot, bytes32[9] calldata proof, uint8 index) internal pure returns (bool) {
@@ -158,18 +218,25 @@ contract StateManager is OwnableUpgradeable {
         bytes32 depositTreeRoot,
         bytes32 withdrawalTreeRoot,
         bytes32[9] calldata depositMerkleProof,
-        bytes32[9] calldata withdrawalMerkleProof
+        bytes32[9] calldata withdrawalMerkleProof,
+        bool isFirstFinalize
     ) internal view {
         if (!_verifyTopTreeProof(depositTreeRoot, depositMerkleProof, l1ChainIndex)) {
             revert InvalidDepositMerkleProof();
         }
-        if (
-            withdrawalTreeRoot != bytes32(0) &&
-            !_verifyTopTreeProof(withdrawalTreeRoot, withdrawalMerkleProof, l1ChainIndex)
-        ) {
+        if (withdrawalTreeRoot == bytes32(0)) {
+            // Keep empty-withdrawal bootstrap open until a non-zero withdrawal root has
+            // been finalized. Catch-up finalizes with no withdrawals must not brick.
+            if (!isFirstFinalize && lastVerifiedWithdrawalTreeRoot != bytes32(0)) {
+                revert WithdrawalBootstrapExpired();
+            }
+            return;
+        }
+        if (!_verifyTopTreeProof(withdrawalTreeRoot, withdrawalMerkleProof, l1ChainIndex)) {
             revert InvalidWithdrawalMerkleProof();
         }
     }
+
 
     function _verifyFinalizeProof(
         address zkVerifier,
@@ -177,12 +244,14 @@ contract StateManager is OwnableUpgradeable {
         bytes32[2] calldata checkpointRoots,
         bytes32 depositTreeRoot,
         bytes32 withdrawalTreeRoot,
+        uint64 newCheckpointId,
         uint64 numCheckpointsAggregated
     ) internal view {
         bytes32 msgHash = _computeGnarkPublicInputsHash(
             checkpointRoots,
             depositTreeRoot,
             withdrawalTreeRoot,
+            newCheckpointId,
             numCheckpointsAggregated
         );
         uint256 pub0 = uint256(uint128(uint256(msgHash) >> 128));
@@ -215,6 +284,7 @@ contract StateManager is OwnableUpgradeable {
         bytes32[2] calldata checkpointRoots,
         bytes32 depositTreeRoot,
         bytes32 withdrawalTreeRoot,
+        uint64 newCheckpointId,
         uint64 numCheckpointsAggregated
     ) internal pure returns (bytes32) {
         // BridgeWrap hashes the original BridgeAgg public inputs with mixed widths:
@@ -222,19 +292,11 @@ contract StateManager is OwnableUpgradeable {
         // [4..12): deposit tree root limbs as eight uint32 values
         // [12..20): withdrawal tree root limbs as eight uint32 values
         // [20..24): new checkpoint root limbs as four uint64 values in PI order
-        // [24]: bridge user id as uint64, constrained at the L1 contract layer
-        // via BRIDGE_USER_ID rather than inside the BridgeAgg circuit.
+        // [24]: terminal checkpoint id (end_checkpoint_index / to_checkpoint) as uint64.
         // [25]: number of aggregated checkpoint proofs as uint64.
-        //
-        // The bytes32 checkpoint root representation is f3|f2|f1|f0, while the
-        // original public input order is f0,f1,f2,f3, so we must repack the
-        // checkpoint roots limb-by-limb rather than hash the raw bytes32.
-        //
-        // BridgeWrap exposes the eight u32 deposit/withdrawal limbs as 32-bit LE
-        // bit slices, and gnark-worker later repacks the public-input bitstream in
-        // 64-bit chunks before hashing. That means each adjacent u32 pair is
-        // serialized as (w1 || w0), not (w0 || w1), so we must pair-swap the
-        // bytes32 roots before hashing on-chain.
+        // The L1 chain index is no longer a public input: a single finalize proof
+        // can be reused across chains. The L1-side guard (provenChainIndex ==
+        // l1ChainIndex) is enforced in finalize() via calldata.
         uint256 oldRoot = uint256(checkpointRoots[0]);
         uint256 newRoot = uint256(checkpointRoots[1]);
         return keccak256(
@@ -249,7 +311,7 @@ contract StateManager is OwnableUpgradeable {
                 uint64(newRoot >> 64),
                 uint64(newRoot >> 128),
                 uint64(newRoot >> 192),
-                BRIDGE_USER_ID,
+                newCheckpointId,
                 numCheckpointsAggregated
             )
         );

@@ -1,4 +1,4 @@
-import { execSync } from "child_process";
+import { execFileSync } from "child_process";
 import type { Artifact } from "hardhat/types";
 import {
   ETHERSCAN_KEY,
@@ -7,6 +7,13 @@ import {
 } from "./hardhat-constants";
 
 export type LibraryAddresses = Record<string, string>;
+
+export type CompilerSettings = {
+  compilerVersion?: string;
+  optimizerRuns?: number;
+  evmVersion?: string;
+  viaIR?: boolean;
+};
 
 /**
  * Build and execute a `forge verify-contract` command.
@@ -22,6 +29,7 @@ export async function forgeVerifyContract(
   constructorArgs: unknown[],
   libraries?: LibraryAddresses,
   verifierUrl?: string,
+  compilerSettings: CompilerSettings = {},
 ): Promise<void> {
   const etherscanApiKey = ETHERSCAN_KEY;
   if (!etherscanApiKey) {
@@ -36,18 +44,32 @@ export async function forgeVerifyContract(
     ? `${artifact.sourceName}:${artifact.contractName}`
     : contractId;
 
-  // Build the forge verify-contract command
-  let cmd = `ETHERSCAN_API_KEY=${etherscanApiKey} ETH_RPC_URL=${rpcUrl}`;
-  if (verifierUrl) {
-    cmd += ` VERIFIER_URL=${verifierUrl}`;
+  const compilerVersion = compilerSettings.compilerVersion ?? COMPILER_VERSION;
+  const normalizedCompilerVersion = compilerVersion.includes("+")
+    ? compilerVersion.slice(0, compilerVersion.indexOf("+"))
+    : compilerVersion;
+  const args = [
+    "verify-contract",
+    address,
+    "--chain-id",
+    String(chainId),
+    "--num-of-optimizations",
+    String(compilerSettings.optimizerRuns ?? COMPILER_OPTIMIZER_RUNS),
+    "--watch",
+    "--compiler-version",
+    `v${normalizedCompilerVersion}`,
+    "--evm-version",
+    compilerSettings.evmVersion ?? "paris",
+    "--verifier",
+    "etherscan",
+  ];
+  if (compilerSettings.viaIR) {
+    args.push("--via-ir");
   }
-  cmd += ` forge verify-contract ${address}`;
-
-  cmd += ` --chain-id ${chainId}`;
-  cmd += ` --num-of-optimizations ${COMPILER_OPTIMIZER_RUNS}`;
-  cmd += ` --watch`;
-  cmd += ` --compiler-version v${COMPILER_VERSION}`;
-  cmd += ` ${contractFQN}`;
+  args.push(contractFQN);
+  if (verifierUrl && !verifierUrl.includes("etherscan.io")) {
+    args.push("--verifier-url", verifierUrl);
+  }
 
   // Constructor args via cast abi-encode
   if (constructorArgs.length > 0 && artifact) {
@@ -56,24 +78,24 @@ export async function forgeVerifyContract(
     );
     if (ctorAbi && ctorAbi.inputs && ctorAbi.inputs.length > 0) {
       const argTypes = ctorAbi.inputs.map((x: any) => x.type).join(",");
-      const argValues = constructorArgs
-        .map((x) => (Array.isArray(x) ? `"[${x.join(",")}"]` : `"${x}"`))
-        .join(" ");
+      const argValues = constructorArgs.map((x) => (
+        Array.isArray(x) ? `[${x.join(",")}]` : String(x)
+      ));
 
-      const encoded = execSync(
-        `cast abi-encode "constructor(${argTypes})" ${argValues}`,
+      const encoded = execFileSync(
+        "cast",
+        ["abi-encode", `constructor(${argTypes})`, ...argValues],
         { encoding: "utf8" },
       ).trim();
-      cmd += ` --constructor-args ${encoded}`;
+      args.push("--constructor-args", encoded);
     }
   }
 
   // Libraries (forge format: --libraries sourceName:LibName:0x...)
   if (libraries && Object.keys(libraries).length > 0) {
-    const libFlags = Object.entries(libraries)
-      .map(([libName, libAddress]) => `--libraries ${libName}:${libAddress}`)
-      .join(" ");
-    cmd += ` ${libFlags}`;
+    Object.entries(libraries).forEach(([libName, libAddress]) => {
+      args.push("--libraries", `${libName}:${libAddress}`);
+    });
   }
 
   console.log(`\n[VERIFY] ${contractId}`);
@@ -82,7 +104,15 @@ export async function forgeVerifyContract(
   console.log(`  running: forge verify-contract ...`);
 
   try {
-    execSync(cmd, { stdio: "inherit", encoding: "utf8" });
+    execFileSync("forge", args, {
+      stdio: "inherit",
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ETHERSCAN_API_KEY: etherscanApiKey,
+        ETH_RPC_URL: rpcUrl,
+      },
+    });
     console.log(`  ✅ ${contractId} verified successfully`);
   } catch (err: any) {
     console.error(`  ❌ Failed to verify ${contractId}: ${err.message}`);

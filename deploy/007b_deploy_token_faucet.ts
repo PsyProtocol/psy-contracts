@@ -1,6 +1,7 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { loadDeployConfig } from "./deploy-config";
+import { protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
 import { deploy } from "../helpers/deploy-helper";
 
 const USDT_DRIP_AMOUNT = 10_000n * 10n ** 6n;
@@ -11,6 +12,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { get, log } = deployments;
   const { deployer } = await getNamedAccounts();
   const cfg = await loadDeployConfig(hre);
+  const protocolNetwork = resolveProtocolNetworkName(hre.network.name);
   const faucetOwner = cfg.admin || deployer;
 
   log("Running 007b_deploy_token_faucet");
@@ -32,10 +34,14 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
   log(`TokenFaucetManager deployed at ${deployed.address}`);
 
-  const usdt = await get("USDTToken");
-
-  await configureToken(hre, faucetOwner, usdt.address, USDT_DRIP_AMOUNT);
-  await transferTokenOwnership(hre, "USDTToken", deployed.address);
+  const usdtDeployment = protocolConfig.tokens.USDT.deployments[protocolNetwork];
+  if (!usdtDeployment?.l1Address) {
+    const usdt = await get("USDTToken");
+    await configureToken(hre, faucetOwner, usdt.address, USDT_DRIP_AMOUNT);
+    await transferTokenOwnership(hre, "USDTToken", deployed.address);
+  } else {
+    log(`Skipping faucet ownership for external USDTToken: ${usdtDeployment.l1Address}`);
+  }
 
   await removeLegacyPsyFaucetToken(hre, faucetOwner);
 };

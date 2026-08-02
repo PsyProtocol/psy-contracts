@@ -203,15 +203,16 @@ contract BridgeTest is Test {
         address recipient,
         address token,
         uint256 amount,
-        uint32 nonce,
-        uint32 destChainId
+        bytes32 nonce,
+        uint32 destinationChainIndex
     ) internal pure returns (uint256[] memory out) {
-        out = new uint256[](44);
+        out = new uint256[](51);
         uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
         uint256[] memory leafWords = _bytes32ToWords(leafHash);
         uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(recipient))));
         uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(token))));
         uint256[] memory amountWords = _uint256ToWords(amount);
+        uint256[] memory nonceWords = _bytes32ToWords(nonce);
 
         for (uint256 i = 0; i < 8; ++i) {
             out[i] = rootWords[i];
@@ -219,38 +220,41 @@ contract BridgeTest is Test {
             out[16 + i] = recipientWords[i];
             out[24 + i] = tokenWords[i];
             out[32 + i] = amountWords[i];
+            out[40 + i] = nonceWords[i];
         }
-        out[40] = nonce;
-        out[41] = destChainId;
-        out[42] = 0;
-        out[43] = 524288;
+        out[48] = destinationChainIndex;
+        out[49] = 0;
+        out[50] = 524288;
     }
 
     function _buildWithdrawalBatchClaimPublicInputsSingle(
         bytes32 withdrawalRoot,
+        uint32 senderUserId,
         address recipient,
         address token,
         uint256 amount,
-        uint32 nonce,
-        uint32 destChainId,
+        bytes32 nonce,
+        uint32 destinationChainIndex,
         uint32 leafIndex
-    ) internal pure returns (uint256[18] memory out, uint256[832] memory slotData) {
+    ) internal pure returns (uint256[18] memory out, uint256[1088] memory slotData) {
         uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
         uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(recipient))));
         uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(token))));
         uint256[] memory amountWords = _uint256ToWords(amount);
+        uint256[] memory nonceWords = _bytes32ToWords(nonce);
         for (uint256 i = 0; i < 8; ++i) {
             out[i] = rootWords[i];
         }
         out[8] = 1;
         out[9] = 524288;
+        slotData[0] = senderUserId;
         for (uint256 i = 0; i < 8; ++i) {
-            slotData[i] = recipientWords[i];
-            slotData[8 + i] = tokenWords[i];
-            slotData[16 + i] = amountWords[i];
+            slotData[1 + i] = recipientWords[i];
+            slotData[9 + i] = tokenWords[i];
+            slotData[17 + i] = amountWords[i];
+            slotData[25 + i] = nonceWords[i];
         }
-        slotData[24] = nonce;
-        slotData[25] = destChainId;
+        slotData[33] = destinationChainIndex;
         uint256[] memory batchCommitWords = _bytes32ToWords(_computeWithdrawalBatchSlotDataCommit(slotData));
         for (uint256 i = 0; i < 8; ++i) {
             out[10 + i] = batchCommitWords[i];
@@ -278,10 +282,10 @@ contract BridgeTest is Test {
     }
 
     function _computeWithdrawalBatchSlotDataCommit(
-        uint256[832] memory slotData
+        uint256[1088] memory slotData
     ) internal pure returns (bytes32) {
-        bytes memory buf = new bytes(832 * 4);
-        for (uint256 k = 0; k < 832; ++k) {
+        bytes memory buf = new bytes(1088 * 4);
+        for (uint256 k = 0; k < 1088; ++k) {
             uint256 word = slotData[k];
             uint256 offset = k * 4;
             buf[offset] = bytes1(uint8(word >> 24));
@@ -355,7 +359,7 @@ contract BridgeTest is Test {
         bytes32 l2TokenContractId,
         uint256 amount,
         uint32 chainIndex,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     ) internal pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
@@ -364,7 +368,7 @@ contract BridgeTest is Test {
                 l2TokenContractId,
                 amount,
                 chainIndex,
-                noteSecretHash
+                noteCommitment
             )
         );
     }
@@ -375,7 +379,7 @@ contract BridgeTest is Test {
         bytes32 l2TokenContractId,
         uint256 amount,
         uint32 chainIndex,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     ) internal pure returns (uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData) {
         uint256[] memory shieldWords = _bytes32ToWords(shieldAddress);
         uint256[] memory tokenWords = _bytes32ToWords(tokenBytes32);
@@ -386,7 +390,7 @@ contract BridgeTest is Test {
             slotData[8 + i] = tokenWords[i];
             slotData[16 + i] = l2TokenWords[i];
             slotData[24 + i] = amountWords[i];
-            slotData[33 + i] = _bytes32ToWords(noteSecretHash)[i];
+            slotData[33 + i] = _bytes32ToWords(noteCommitment)[i];
         }
         slotData[32] = chainIndex;
     }
@@ -425,18 +429,8 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
 
         uint256 amount = 123;
-        uint64 nonce = 77;
+        bytes32 nonce = bytes32(uint256(77));
         token.mint(address(bridge), amount);
-
-        bytes32 leafHash = keccak256(
-            abi.encodePacked(
-                bytes32(uint256(uint160(user))),
-                bytes32(uint256(uint160(address(token)))),
-                amount,
-                uint32(nonce),
-                uint32(0)
-            )
-        );
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
         (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
@@ -446,8 +440,8 @@ contract BridgeTest is Test {
         sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
 
         uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[832] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], user, address(token), amount, uint32(nonce), 0, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifierBatch =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
         vm.prank(owner);
@@ -477,18 +471,8 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         uint256 amount = 123;
-        uint64 nonce = 77;
+        bytes32 nonce = bytes32(uint256(77));
         token.mint(address(bridge), amount);
-
-        bytes32 leafHash = keccak256(
-            abi.encodePacked(
-                bytes32(uint256(uint160(user))),
-                bytes32(uint256(uint160(address(token)))),
-                amount,
-                uint32(nonce),
-                uint32(0)
-            )
-        );
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
         (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
@@ -498,9 +482,9 @@ contract BridgeTest is Test {
         sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
 
         uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[832] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], user, address(token), amount, uint32(nonce), 0, 0);
-        slotData[0] = 1;
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
+        slotData[1] = 1;
         WithdrawalBatchHashVerifier verifierBatch =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
         vm.prank(owner);
@@ -529,18 +513,8 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         uint256 amount = 123;
-        uint64 nonce = 77;
+        bytes32 nonce = bytes32(uint256(77));
         token.mint(address(bridge), amount);
-
-        bytes32 leafHash = keccak256(
-            abi.encodePacked(
-                bytes32(uint256(uint160(user))),
-                bytes32(uint256(uint160(address(token)))),
-                amount,
-                uint32(nonce),
-                uint32(0)
-            )
-        );
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
         (bytes32[9] memory depositProofA, bytes32 depositRootA) = _mkTopProof(depositLeaf, 0);
@@ -557,8 +531,8 @@ contract BridgeTest is Test {
         sm.finalize(_dummyGnarkProof(), depositRootB, _roots(bytes32(uint256(2)), bytes32(uint256(3))), withdrawalRootB, 0, 2, depositProofB, withdrawalProofB);
 
         uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[832] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProofA[0], user, address(token), amount, uint32(nonce), 0, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProofA[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifierBatch =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
         vm.prank(owner);
@@ -588,18 +562,8 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         uint256 amount = 123;
-        uint32 nonce = 88;
+        bytes32 nonce = bytes32(uint256(88));
         token.mint(address(bridge), amount);
-
-        bytes32 leafHash = keccak256(
-            abi.encodePacked(
-                bytes32(uint256(uint160(user))),
-                bytes32(uint256(uint160(address(token)))),
-                amount,
-                nonce,
-                uint32(0)
-            )
-        );
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
         (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
@@ -608,8 +572,8 @@ contract BridgeTest is Test {
         vm.prank(owner);
         sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
 
-        (uint256[18] memory publicInputs, uint256[832] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], user, address(token), amount, nonce, 0, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
         vm.prank(owner);
@@ -620,7 +584,7 @@ contract BridgeTest is Test {
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
         assertEq(token.balanceOf(user), amount);
-        assertTrue(bridge.claimedNullifiers(leafHash));
+        assertTrue(bridge.claimedNullifiers(nonce));
     }
 
     function testBatchClaimWithdrawalRejectsZeroRealCount() public {
@@ -640,7 +604,7 @@ contract BridgeTest is Test {
         vm.stopPrank();
 
         uint256[18] memory publicInputs;
-        uint256[832] memory slotData;
+        uint256[1088] memory slotData;
         for (uint256 i = 0; i < 8; ++i) {
             publicInputs[i] = _bytes32ToWords(bytes32(uint256(1)))[i];
         }
@@ -811,7 +775,7 @@ contract BridgeTest is Test {
         );
     }
 
-    function testBatchAppendRejectsNoteSecretHashMutation() public {
+    function testBatchAppendRejectsNoteCommitmentMutation() public {
         _assertSingleDepositFieldMutationReverts(
             bytes32(uint256(2)),
             address(0x1234),
@@ -868,7 +832,7 @@ contract BridgeTest is Test {
         bytes32 mutatedL2TokenContractId,
         uint256 mutatedAmount,
         uint32 mutatedChainIndex,
-        bytes32 mutatedNoteSecretHash
+        bytes32 mutatedNoteCommitment
     ) internal {
         (Bridge bridge,) = _setupBridgeSystem();
 
@@ -881,7 +845,7 @@ contract BridgeTest is Test {
             mutatedL2TokenContractId,
             mutatedAmount,
             mutatedChainIndex,
-            mutatedNoteSecretHash
+            mutatedNoteCommitment
         );
         uint256[] memory publicInputs =
             _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));

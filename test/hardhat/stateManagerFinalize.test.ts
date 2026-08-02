@@ -40,7 +40,7 @@ describe("StateManager.finalize", function () {
         deposit.root,
         roots(ethers.utils.hexZeroPad("0x01", 32), ethers.utils.hexZeroPad("0x02", 32)),
         withdrawal.root,
-        5,
+        0,
         10,
         deposit.proof,
         withdrawal.proof
@@ -48,7 +48,6 @@ describe("StateManager.finalize", function () {
     ).to.not.be.reverted;
 
     expect(await sm.lastFinalizedCheckpointId()).to.equal(10n);
-    expect(await sm.nextConsumedDepositIndex()).to.equal(5n);
     expect(await sm.lastVerifiedDepositTreeRoot()).to.equal(deposit.root);
     expect(await sm.lastVerifiedWithdrawalTreeRoot()).to.equal(withdrawal.root);
     expect(await sm.withdrawalSubtreeRoot()).to.equal(withdrawal.proof[0]);

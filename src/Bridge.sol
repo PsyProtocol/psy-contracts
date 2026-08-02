@@ -7,6 +7,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 interface IPsyAddressesProviderView {
+    function ACL_MANAGER_ID() external view returns (bytes32);
     function STATE_MANAGER_ID() external view returns (bytes32);
     function ROUTER_ID() external view returns (bytes32);
     function ERC20_GATEWAY_ID() external view returns (bytes32);
@@ -34,15 +35,19 @@ interface IWETHWithdraw {
     function withdraw(uint256) external;
 }
 
+interface IPsyACLManagerBridge {
+    function isBridgeAdmin(address account) external view returns (bool);
+}
+
 interface IGnarkGroth16Verifier {
     function verifyProof(uint256[8] calldata proof, uint256[2] calldata input) external view;
 }
 
 contract Bridge is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_PUBLIC_INPUTS_LEN = 18;
-    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 26;
+    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 34;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT = 32;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_DATA_WORDS =
         WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS * WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT;
@@ -72,11 +77,11 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 l2TokenContractId,
         uint256 amount,
         uint8 chainIndex,
-        bytes32 noteSecretHash,
+        bytes32 noteCommitment,
         bytes32 leafHash
     );
     event WithdrawalClaimed(
-        bytes32 indexed nullifier,
+        bytes32 indexed nonce,
         address indexed recipient,
         address indexed token,
         uint256 amount
@@ -90,6 +95,9 @@ contract Bridge is Initializable, OwnableUpgradeable {
     );
     event DepositBatchVerifierUpdated(address indexed verifier);
     event WithdrawalClaimVerifierUpdated(address indexed verifier);
+    event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
+    event NativeRescued(address indexed to, uint256 amount);
+    event WETHUnwrappedAndRescued(address indexed weth, address indexed to, uint256 amount);
 
     error ZeroAddress();
     error ZeroAmount();
@@ -110,6 +118,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error AddressHighBitsNonZero();
     error InvalidRealCount();
 
+    error UnauthorizedBridgeAdmin();
     constructor() {
         _disableInitializers();
     }
@@ -132,7 +141,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         depositRoot = EMPTY_DEPOSIT_ROOT;
     }
 
-    function getRevision() external pure returns (uint256) {
+    function getRevision() external pure virtual returns (uint256) {
         return VERSION;
     }
 
@@ -150,6 +159,39 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if (verifier == address(0)) revert ZeroAddress();
         withdrawalClaimVerifier = verifier;
         emit WithdrawalClaimVerifierUpdated(verifier);
+    }
+    modifier onlyBridgeAdmin() {
+        IPsyAddressesProviderView provider = IPsyAddressesProviderView(addressesProvider);
+        address aclManager = provider.getAddress(provider.ACL_MANAGER_ID());
+        if (!IPsyACLManagerBridge(aclManager).isBridgeAdmin(msg.sender)) {
+            revert UnauthorizedBridgeAdmin();
+        }
+        _;
+    }
+
+    function rescueERC20(address token, address to, uint256 amount) external onlyBridgeAdmin {
+        if (token == address(0) || to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        IERC20(token).safeTransfer(to, amount);
+        emit ERC20Rescued(token, to, amount);
+    }
+
+    function rescueNative(address payable to, uint256 amount) external onlyBridgeAdmin {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert TransferFailed();
+        emit NativeRescued(to, amount);
+    }
+
+    function rescueWETHAsNative(address payable to, uint256 amount) external onlyBridgeAdmin {
+        if (to == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        address wethAddr = _nativeWithdrawalAsset();
+        IWETHWithdraw(wethAddr).withdraw(amount);
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert TransferFailed();
+        emit WETHUnwrappedAndRescued(wethAddr, to, amount);
     }
 
     function _stateManager() internal view returns (IStateManager) {
@@ -186,7 +228,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 l2TokenContractId,
         uint256 amount,
         bytes32 shieldAddress,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     )
         internal
         returns (uint32 index, bytes32 newRoot)
@@ -203,7 +245,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 l2TokenContractId,
                 amount,
                 uint32(chainIndex),
-                noteSecretHash
+                noteCommitment
             )
         );
 
@@ -219,16 +261,16 @@ contract Bridge is Initializable, OwnableUpgradeable {
             l2TokenContractId,
             amount,
             chainIndex,
-            noteSecretHash,
+            noteCommitment,
             leafHash
         );
     }
 
-    function recordDeposit(address token, uint256 amount, bytes32 shieldAddress, bytes32 noteSecretHash) external pure returns (uint32, bytes32) {
+    function recordDeposit(address token, uint256 amount, bytes32 shieldAddress, bytes32 noteCommitment) external pure returns (uint32, bytes32) {
         token;
         amount;
         shieldAddress;
-        noteSecretHash;
+        noteCommitment;
         revert DirectDepositDisabled();
     }
 
@@ -237,7 +279,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 l2TokenContractId,
         uint256 amount,
         bytes32 shieldAddress,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     )
         external
         returns (uint32 index, bytes32 newRoot)
@@ -245,7 +287,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if (!_isAuthorizedGateway(token)) revert UnauthorizedGateway();
         if (amount == 0) revert ZeroAmount();
 
-        return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteSecretHash);
+        return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
     }
 
     function batchAppend(
@@ -298,7 +340,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
             bytes32 l2TokenContractId = _u32x8ToBytes32Concat(slotData, slotOffset + 16);
             bytes32 amountBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 24);
             uint32 chainIndex = uint32(slotData[slotOffset + 32]);
-            bytes32 noteSecretHash = _u32x8ToBytes32Concat(slotData, slotOffset + 33);
+            bytes32 noteCommitment = _u32x8ToBytes32Concat(slotData, slotOffset + 33);
 
             if (i >= n) {
                 if (
@@ -307,7 +349,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
                     l2TokenContractId != bytes32(0) ||
                     amountBytes32 != bytes32(0) ||
                     chainIndex != 0 ||
-                    noteSecretHash != bytes32(0)
+                    noteCommitment != bytes32(0)
                 ) revert InvalidPublicInputs();
                 continue;
             }
@@ -318,7 +360,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 l2TokenContractId,
                 uint256(amountBytes32),
                 chainIndex,
-                noteSecretHash
+                noteCommitment
             );
             if (expectedLeafHash != depositLeafHashes[uint256(fromIndex) + i]) {
                 revert DepositBatchCommitMismatch();
@@ -377,19 +419,21 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
         for (uint256 i = 0; i < WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT; ++i) {
             uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
-            bytes32 recipientBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset);
-            bytes32 tokenBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 8);
-            bytes32 amountBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 16);
-            uint32 nonce = uint32(slotData[slotOffset + 24]);
-            uint32 destChainId = uint32(slotData[slotOffset + 25]);
+            uint32 senderUserId = uint32(slotData[slotOffset]);
+            bytes32 recipientBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 1);
+            bytes32 tokenBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 9);
+            bytes32 amountBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 17);
+            bytes32 nonce = _u32x8ToBytes32Concat(slotData, slotOffset + 25);
+            uint32 destinationChainIndex = uint32(slotData[slotOffset + 33]);
 
             if (i >= realCount) {
                 if (
+                    senderUserId != 0 ||
                     recipientBytes32 != bytes32(0) ||
                     tokenBytes32 != bytes32(0) ||
                     amountBytes32 != bytes32(0) ||
-                    nonce != 0 ||
-                    destChainId != 0
+                    nonce != bytes32(0) ||
+                    destinationChainIndex != 0
                 ) revert InvalidPublicInputs();
                 continue;
             }
@@ -400,15 +444,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
             address tokenAddr = address(uint160(uint256(tokenBytes32)));
             uint256 amount = uint256(amountBytes32);
 
-            if (destChainId != sm.l1ChainIndex()) revert WrongDestinationChain();
+            if (destinationChainIndex != sm.l1ChainIndex()) revert WrongDestinationChain();
             if (recipientAddr == address(0)) revert ZeroAddress();
             if (amount == 0) revert ZeroAmount();
 
-            bytes32 leafHashBytes =
-                keccak256(abi.encodePacked(recipientBytes32, tokenBytes32, uint256(amountBytes32), nonce, destChainId));
-            bytes32 nullifier = leafHashBytes;
-            if (claimedNullifiers[nullifier]) revert NullifierAlreadyClaimed();
-            claimedNullifiers[nullifier] = true;
+            if (claimedNullifiers[nonce]) revert NullifierAlreadyClaimed();
+            claimedNullifiers[nonce] = true;
 
             if (tokenAddr == address(0)) {
                 address wethAddr = _nativeWithdrawalAsset();
@@ -419,7 +460,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 IERC20(tokenAddr).safeTransfer(recipientAddr, amount);
             }
 
-            emit WithdrawalClaimed(nullifier, recipientAddr, tokenAddr, amount);
+            emit WithdrawalClaimed(nonce, recipientAddr, tokenAddr, amount);
         }
 
         if (computedBatchCommit != proofBatchCommit) revert InvalidWithdrawalProof();
@@ -551,7 +592,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 l2TokenContractId,
         uint256 amount,
         uint32 chainIndex,
-        bytes32 noteSecretHash
+        bytes32 noteCommitment
     ) internal pure returns (bytes32) {
         return keccak256(
             abi.encodePacked(
@@ -560,7 +601,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 l2TokenContractId,
                 amount,
                 chainIndex,
-                noteSecretHash
+                noteCommitment
             )
         );
     }

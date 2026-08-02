@@ -50,20 +50,20 @@ All settings are read from env vars:
 
 ### How It Works
 
-1. **Deploy** scripts write per-contract metadata (`address`, `constructorArgs`, `libraries`) to JSON files under `deployments/<network>/`.
-2. **Verify** reads those deployment files from `deployments/<network>/` and auto-detects which contracts to verify.
-3. Each contract (including `_Implementation` variants; `_Proxy` contracts are skipped) is verified via:
-   - **Hardhat** (default): runs `verify:verify` with automatic retries
-   - **Foundry** (`ETHERSCAN_VERIFICATION_PROVIDER=foundry`): constructs a `forge verify-contract` command with ABI-encoded constructor args via `cast abi-encode`
+1. **Deploy**脚本结束时，`deployments/<network>/` 下的 JSON 文件包含每个合约的部署元数据（address、constructorArgs、libraries）
+2. **Verify**时，`verify-contracts` task 自动扫描 `deployments/<network>/` 目录，读取部署信息
+3. 对每个合约（含 `_Implementation`，自动跳过 `_Proxy`），按以下方式验证：
+   - **Hardhat**（默认）：调用 `verify:verify` task，带自动重试
+   - **Foundry**（`ETHERSCAN_VERIFICATION_PROVIDER=foundry`）：构建 `forge verify-contract` 命令，用 `cast abi-encode` 编码构造参数
 
-Contract types covered:
-| Type | Example | Notes |
-|------|---------|-------|
-| Standalone | StateManager, Bridge | Deployed and verified directly |
-| Proxy | PsyAddressesProvider_Proxy | OpenZeppelin Transparent Proxy; constructor args include (impl, admin, data) |
-| Implementation | PsyAddressesProvider_Implementation | Verified against the implementation constructor args only |
+验证覆盖的合约类型：
+| 类型 | 例子 | 说明 |
+|------|------|------|
+| 普通合约 | StateManager, Bridge | 单独部署，直接验证 |
+| 代理合约 | PsyAddressesProvider_Proxy | OpenZeppelin Transparent Proxy，验证构造函数参数(impl, admin, data) |
+| 实现合约 | PsyAddressesProvider_Implementation | 验证实现合约的构造函数参数 |
 
-> Reference: paraspace-core `tasks/dev/verifyContracts.ts` → `helpers/contracts-helpers.ts:verifyContracts()`, supporting both Hardhat and Foundry modes.
+> 参考实现：paraspace-core 的 `tasks/dev/verifyContracts.ts` → `helpers/contracts-helpers.ts:verifyContracts()`，支持 Hardhat 和 Foundry 双模式。
 
 ## Deploy Runbook
 
@@ -78,8 +78,8 @@ Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-
 ### 2) Config files
 - Network deploy config is loaded from `config/<network>.json`
 - For non-local networks, do not use placeholder governance addresses (`0x...01`, `0x...02`)
-- `admin` should be timelock/proxy-admin owner; `proposer` should be finalize operator
-
+- `admin` is the initial `DefaultProxyAdmin` owner and ACL default admin.
+- Set `owner`, `bridgeAdmin`, `routerAdmin`, and `stateManagerAdmin` explicitly; do not assume they are interchangeable with `admin`.
 ### 3) Local deploy
 - `KEYSTORE_PATH=... WALLET_PASSWORD=... LOCALHOST_RPC_URL=http://127.0.0.1:8545 npm run deploy:keystore:localhost`
 
@@ -100,3 +100,95 @@ Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-
 - `StateManager.finalize`: only Proposer
 - `Bridge.recordDeposit`: disabled; canonical path is Router -> Gateway -> Bridge.recordDepositFromGateway
 - `Bridge.recordDepositFromGateway`: caller must match Router-resolved gateway
+
+
+## Upgrade / Rescue Runbook
+
+Upgradeable production contracts use OpenZeppelin v5 transparent proxies owned by `DefaultProxyAdmin`.
+
+Upgradeable deployment names:
+- `PsyAddressesProvider`
+- `PsyACLManager`
+- `StateManager`
+- `Bridge`
+- `Router`
+- `ERC20Gateway`
+- `ETHGateway`
+- `TokenFaucetManager`
+
+Governance executor:
+- `ExecutorWithTimelock` is deployed by `deploy/007c_deploy_timelock.ts`.
+- `deploy/007d_grant_timelock_roles.ts` grants `BRIDGE_ADMIN_ROLE` and `STATE_MANAGER_ADMIN_ROLE` to the timelock when `GRANT_TIMELOCK_ROLES=1`.
+- `deploy/007e_transfer_proxy_admin_to_timelock.ts` transfers `DefaultProxyAdmin` ownership to the timelock when `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1`.
+- Set `TIMELOCK_ADMIN` to the multisig address, or it defaults to `cfg.owner`.
+
+Notes:
+- Deploying `ExecutorWithTimelock` alone does not hand over every permission. By default, `cfg.admin` remains the ACL default admin and the `DefaultProxyAdmin` owner.
+- `GRANT_TIMELOCK_ROLES=1` only grants `BRIDGE_ADMIN_ROLE` and `STATE_MANAGER_ADMIN_ROLE` to the timelock. It does not grant router admin, ACL default admin, or proxy-upgrade ownership by itself.
+- `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1` is the separate cutover step for proxy upgrades. Without it, implementation upgrades can still be executed directly by the current `DefaultProxyAdmin` owner.
+- `state-manager:force-set-state` requires all `NEW_*` env vars together, including `NEW_LAST_FINALIZED_CHECKPOINT_ID` and `NEW_DEPOSIT_SUBTREE_ROOT`.
+Upgrade modes use `DRY_RUN`:
+- Fork governance tests and forked upgrade scripts need a working `SEPOLIA_RPC_URL`. If the default public RPC rate-limits or returns 403, override it explicitly, for example `SEPOLIA_RPC_URL=https://sepolia.drpc.org`.
+- unset: execute directly through the connected signer. This works only while `DefaultProxyAdmin` is still directly owned by that signer.
+- `Run`: send the encoded transaction directly to the target contract. This also requires direct `DefaultProxyAdmin` ownership for upgrades.
+- `TimeLock`: print queue/execute/cancel calldata for `ExecutorWithTimelock`.
+- `Safe`: write an offline Safe proposal JSON under `deployments/<network>/safe-proposals/`.
+- `SafeWithTimeLock`: write a Safe proposal that targets the timelock calldata.
+- Once `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1` has been applied, upgrades must go through `TimeLock` or `SafeWithTimeLock`.
+
+Examples:
+
+```bash
+# Activate full timelock governance for upgrade + rescue/force-set paths
+GRANT_TIMELOCK_ROLES=1 \
+TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1 \
+npx hardhat deploy --tags timelock_proxy_admin --network sepolia
+
+# Encode a timelock queue operation for the in-place StateManager implementation
+DRY_RUN=TimeLock npx hardhat upgrade --contract StateManager --network sepolia
+
+# Upgrade Bridge to the current in-place implementation directly on a fork/local network
+DRY_RUN=Run npx hardhat upgrade --contract Bridge --network localhost
+
+# Encode all known proxy upgrades
+DRY_RUN=TimeLock npx hardhat upgrade:all --network sepolia
+```
+
+StateManager force state repair after upgrading the in-place implementation:
+
+```bash
+DRY_RUN=TimeLock \
+NEW_LAST_FINALIZED_CHECKPOINT_ID=100187 \
+NEW_LAST_VERIFIED_CHECKPOINT_ROOT=0xe3f1bcc23eff84f7a1d2f71c91cfdcc5cd3947380970cbd49fe8663eb78e2b0a \
+NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT=0x2588266e5eaea8ff9867d7a36694e35c04bccc5ab36d40d565d8579beb6aff08 \
+NEW_DEPOSIT_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
+NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT=0x030522995310a315f591ff2e948dd628b1fa274e838eeaac00e8ec6a3cba8778 \
+NEW_WITHDRAWAL_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
+npx hardhat state-manager:force-set-state --network sepolia
+```
+
+Bridge fund rescue after upgrading the in-place implementation:
+
+```bash
+# ERC20 rescue
+DRY_RUN=TimeLock \
+RESCUE_MODE=erc20 \
+RESCUE_TOKEN=0xToken \
+RESCUE_TO=0xRecipient \
+RESCUE_AMOUNT=1000000000000000000 \
+npx hardhat bridge:rescue --network sepolia
+
+# Native ETH rescue
+DRY_RUN=TimeLock \
+RESCUE_MODE=native \
+RESCUE_TO=0xRecipient \
+RESCUE_AMOUNT=1000000000000000000 \
+npx hardhat bridge:rescue --network sepolia
+
+# WETH custody unwrap + native rescue
+DRY_RUN=TimeLock \
+RESCUE_MODE=weth-native \
+RESCUE_TO=0xRecipient \
+RESCUE_AMOUNT=1000000000000000000 \
+npx hardhat bridge:rescue --network sepolia
+```

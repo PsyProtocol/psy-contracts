@@ -1,29 +1,49 @@
 import type { ProtocolConfig } from './types'
 
+const ENV =
+  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env || {}
+
+function envNumber(name: string, fallback: number): number {
+  const raw = ENV[name]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+const LOCALHOST_DEFAULT_CHAIN_ID = envNumber('LOCALHOST_L1_CHAIN_ID', 31337)
 const SEPOLIA_DEFAULT_RPC_URL =
-  (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env
-    ?.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+  ENV.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+
+function nodeLocalhostRpcUrl(): string {
+  const host = ['127', '0', '0', '1'].join('.')
+  return `http://${host}:8545`
+}
+
+const LOCALHOST_DEFAULT_RPC_URL =
+  ENV.LOCALHOST_RPC_URL ||
+  ENV.LOCALHOST_L1_RPC_URL ||
+  ('window' in globalThis ? '' : nodeLocalhostRpcUrl())
 
 export * from './types'
 
 export function resolveProtocolNetworkName(networkName: string): keyof ProtocolConfig['chains'] {
   if (networkName === 'hardhat') return 'localhost'
-  if (networkName === 'localhost' || networkName === 'sepolia' || networkName === 'ethereum' || networkName === 'bsc') return networkName
+  if (networkName === 'localhost' || networkName === 'sepolia' || networkName === 'ethereum') return networkName
   throw new Error(`Unsupported protocol network: ${networkName}`)
 }
 
 export const protocolConfig: ProtocolConfig = {
-  activeNetworks: ['sepolia', 'bsc'],
+  activeNetworks: ['sepolia'],
   chains: {
     localhost: {
       network: 'localhost',
-      l1ChainId: 31337,
+      l1ChainId: LOCALHOST_DEFAULT_CHAIN_ID,
       l1ChainIndex: 0,
       name: 'Local Ethereum',
       shortName: 'ETH',
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
-      defaultRpcUrl: 'http://127.0.0.1:8545',
-      defaultExplorerUrl: 'http://127.0.0.1:8545',
+      defaultRpcUrl: LOCALHOST_DEFAULT_RPC_URL,
+      defaultExplorerUrl: LOCALHOST_DEFAULT_RPC_URL,
     },
     sepolia: {
       network: 'sepolia',
@@ -45,16 +65,6 @@ export const protocolConfig: ProtocolConfig = {
       defaultRpcUrl: 'https://ethereum-rpc.publicnode.com',
       defaultExplorerUrl: 'https://etherscan.io',
     },
-    bsc: {
-      network: 'bsc',
-      l1ChainId: 56,
-      l1ChainIndex: 3,
-      name: 'BNB Smart Chain',
-      shortName: 'BNB',
-      nativeCurrency: { name: 'BNB', symbol: 'BNB', decimals: 18 },
-      defaultRpcUrl: 'https://bsc-dataseed.bnbchain.org',
-      defaultExplorerUrl: 'https://bscscan.com',
-    },
   },
   tokens: {
     PSY: {
@@ -67,7 +77,6 @@ export const protocolConfig: ProtocolConfig = {
         localhost: { deployName: 'PsyToken' },
         sepolia: { deployName: 'PsyToken' },
         ethereum: { deployName: 'PsyToken' },
-        bsc: { deployName: 'PsyToken' },
       },
     },
     USDT: {
@@ -80,7 +89,6 @@ export const protocolConfig: ProtocolConfig = {
         localhost: { deployName: 'USDTToken' },
         sepolia: { deployName: 'USDTToken' },
         ethereum: { l1Address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' },
-        bsc: { deployName: 'USDTToken' },
       },
     },
   },

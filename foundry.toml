@@ -12,8 +12,9 @@ via_ir = true
 auto_detect_remappings = false
 remappings = [
   "forge-std/=lib/forge-std/src/",
-  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-  "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/"
+  "solc_0.8/=node_modules/hardhat-deploy/solc_0.8/",
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "@openzeppelin/contracts-upgradeable/=node_modules/@openzeppelin/contracts-upgradeable/"
 ]
 
 [fmt]

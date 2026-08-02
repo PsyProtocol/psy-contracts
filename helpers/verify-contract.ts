@@ -25,6 +25,11 @@ export type VerifyOptions = {
   constructorArgs?: unknown[];
   libraries?: Record<string, string>;
   fqnOverride?: string;
+  abiOverride?: any[];
+  compilerVersion?: string;
+  optimizerRuns?: number;
+  evmVersion?: string;
+  viaIR?: boolean;
 };
 
 type ContractMeta = {
@@ -33,6 +38,11 @@ type ContractMeta = {
   constructorArgs: unknown[];
   libraries: Record<string, string> | undefined;
   fqnOverride?: string;
+  abiOverride?: any[];
+  compilerVersion?: string;
+  optimizerRuns?: number;
+  evmVersion?: string;
+  viaIR?: boolean;
 };
 
 async function resolveFoundryLibraries(
@@ -90,6 +100,7 @@ export async function verifyContract(
     const parts = opts.fqnOverride.split(":");
     sourceName = parts[0];
     contractName = parts[1] ?? name;
+    abi = opts.abiOverride ?? [];
   } else {
     const art = await resolveArtifact(hre, name);
     if (art) {
@@ -121,6 +132,12 @@ export async function verifyContract(
       opts.constructorArgs ?? [],
       await resolveFoundryLibraries(hre, opts.libraries),
       verifierUrl,
+      {
+        compilerVersion: opts.compilerVersion,
+        optimizerRuns: opts.optimizerRuns,
+        evmVersion: opts.evmVersion,
+        viaIR: opts.viaIR,
+      },
     );
   } else {
     console.log(`  method:  hardhat`);
@@ -188,6 +205,64 @@ async function hardhatVerify(
   console.error(`  ❌ ${name} FAILED: ${lastError?.message ?? "unknown error"}`);
 }
 
+function fqnFromDeploymentMetadata(data: { metadata?: string }): string | undefined {
+  if (!data.metadata) return undefined;
+  try {
+    const metadata = JSON.parse(data.metadata) as {
+      settings?: { compilationTarget?: Record<string, string> };
+    };
+    const target = metadata.settings?.compilationTarget;
+    if (!target) return undefined;
+    const [[sourceName, contractName]] = Object.entries(target);
+    if (!sourceName || !contractName) return undefined;
+    const localSourceName = sourceName.startsWith("solc_0.8/")
+      ? `node_modules/hardhat-deploy/${sourceName}`
+      : sourceName;
+    return `${localSourceName}:${contractName}`;
+  } catch {
+    return undefined;
+  }
+}
+
+
+function compilerSettingsFromDeploymentMetadata(data: { metadata?: string }): {
+  compilerVersion?: string;
+  optimizerRuns?: number;
+  evmVersion?: string;
+  viaIR?: boolean;
+} {
+  if (!data.metadata) return {};
+  try {
+    const metadata = JSON.parse(data.metadata) as {
+      compiler?: { version?: string };
+      settings?: {
+        optimizer?: { runs?: number };
+        evmVersion?: string;
+        viaIR?: boolean;
+      };
+    };
+    return {
+      compilerVersion: metadata.compiler?.version,
+      optimizerRuns: metadata.settings?.optimizer?.runs,
+      evmVersion: metadata.settings?.evmVersion,
+      viaIR: metadata.settings?.viaIR,
+    };
+  } catch {
+    return {};
+  }
+}
+function abiFromDeploymentMetadata(data: { metadata?: string }): any[] | undefined {
+  if (!data.metadata) return undefined;
+  try {
+    const metadata = JSON.parse(data.metadata) as {
+      output?: { abi?: any[] };
+    };
+    return metadata.output?.abi;
+  } catch {
+    return undefined;
+  }
+}
+
 // ── Entry point 1: read all from hardhat-deploy files ───────────
 
 /**
@@ -213,10 +288,10 @@ export async function verifyDeployments(hre: HardhatRuntimeEnvironment): Promise
       .filter((f) => f.endsWith(".json") && !["deployed-contracts.json", "verifiable.json"].includes(f))
       .map(async (f) => {
         const name = f.replace(/\.json$/, "");
+        // Skip hardhat-deploy infrastructure; proxies are standard OpenZeppelin bytecode.
+        if (name.startsWith("DefaultProxyAdmin")) return null;
         // Skip proxy contracts — standard bytecode, auto-detected by Etherscan
         if (name.endsWith("_Proxy")) return null;
-        // Skip infrastructure
-        if (name.startsWith("DefaultProxyAdmin")) return null;
         // Skip proxy main entries: if Name_Implementation.json exists, Name.json is the proxy address
         if (!name.endsWith("_Implementation") && fileSet.has(`${name}_Implementation.json`)) return null;
 
@@ -224,7 +299,16 @@ export async function verifyDeployments(hre: HardhatRuntimeEnvironment): Promise
           const raw = await fsp.readFile(path.join(deployDir, f), "utf8");
           const data = JSON.parse(raw);
           if (!data.address || data.address === "0x0000000000000000000000000000000000000000") return null;
-          const meta: ContractMeta = { name, address: data.address, constructorArgs: data.args ?? [], libraries: data.libraries ?? undefined };
+          const compilerSettings = compilerSettingsFromDeploymentMetadata(data);
+          const meta: ContractMeta = {
+            name,
+            address: data.address,
+            constructorArgs: data.args ?? [],
+            libraries: data.libraries ?? undefined,
+            fqnOverride: fqnFromDeploymentMetadata(data),
+            abiOverride: abiFromDeploymentMetadata(data),
+            ...compilerSettings,
+          };
           return meta;
         } catch {
           return null;
@@ -245,15 +329,29 @@ export async function verifyDeployments(hre: HardhatRuntimeEnvironment): Promise
   console.log(`  Found:    ${contracts.length} contracts (+ ${files.filter(f => f.endsWith("_Proxy.json")).length} proxy artifacts skipped)`);
   console.log(`========================================\n`);
 
+  const failures: string[] = [];
+
   for (const c of contracts.sort((a, b) => a.name.localeCompare(b.name))) {
     try {
       await verifyContract(hre, c.name, c.address, {
         constructorArgs: c.constructorArgs,
         libraries: c.libraries,
+        fqnOverride: c.fqnOverride,
+        abiOverride: c.abiOverride,
+        compilerVersion: c.compilerVersion,
+        optimizerRuns: c.optimizerRuns,
+        evmVersion: c.evmVersion,
+        viaIR: c.viaIR,
       });
-    } catch (err: any) {
-      console.error(`  ❌ ${c.name}: ${err.message}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${c.name}: ${message}`);
+      console.error(`  ❌ ${c.name}: ${message}`);
     }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`Verification failed for ${failures.length} contract(s): ${failures.join("; ")}`);
   }
 
   console.log(`\n========================================`);
@@ -283,6 +381,8 @@ export async function verifyFromRegistry(hre: HardhatRuntimeEnvironment): Promis
   console.log(`  Found:    ${entries.length} contracts`);
   console.log(`========================================\n`);
 
+  const failures: string[] = [];
+
   for (const [name, meta] of entries.sort(([a], [b]) => a.localeCompare(b))) {
     try {
       await verifyContract(hre, name, meta.address, {
@@ -290,9 +390,15 @@ export async function verifyFromRegistry(hre: HardhatRuntimeEnvironment): Promis
         libraries: meta.libraries,
         fqnOverride: meta.fqnOverride,
       });
-    } catch (err: any) {
-      console.error(`  ❌ ${name}: ${err.message}`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      failures.push(`${name}: ${message}`);
+      console.error(`  ❌ ${name}: ${message}`);
     }
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`Registry verification failed for ${failures.length} contract(s): ${failures.join("; ")}`);
   }
 
   console.log(`\n========================================`);

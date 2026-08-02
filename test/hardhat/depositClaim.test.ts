@@ -2,6 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
+import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -26,72 +27,13 @@ function u32ToBytes32(value: number): string {
   return ethers.utils.hexZeroPad(ethers.utils.hexlify(value), 32);
 }
 
-function bytes32ToU32x8(value: string): bigint[] {
-  const bytes = ethers.utils.arrayify(ethers.utils.hexZeroPad(value, 32));
-  const words: bigint[] = [];
-  for (let i = 0; i < 8; i++) {
-    const offset = i * 4;
-    const word =
-      (BigInt(bytes[offset]) << 24n) |
-      (BigInt(bytes[offset + 1]) << 16n) |
-      (BigInt(bytes[offset + 2]) << 8n) |
-      BigInt(bytes[offset + 3]);
-    words.push(word);
-  }
-  return words;
-}
-
-function uint256ToU32x8(value: bigint): bigint[] {
-  const hex = ethers.utils.hexZeroPad(`0x${value.toString(16)}`, 32);
-  return bytes32ToU32x8(hex);
-}
-
-function batchSlotDataCommit(slotData: bigint[]): string {
-  const bytes: number[] = [];
-  for (const word of slotData) {
-    const normalized = Number(word & 0xffff_ffffn);
-    bytes.push((normalized >>> 24) & 0xff, (normalized >>> 16) & 0xff, (normalized >>> 8) & 0xff, normalized & 0xff);
-  }
-  return ethers.utils.keccak256(Uint8Array.from(bytes));
-}
-
-function buildWithdrawalBatchClaimPublicInputsSingle(params: {
-  withdrawalRoot: string;
-  recipient: string;
-  token: string;
-  amount: bigint;
-  nonce: bigint;
-  destChainId: number;
-  leafIndex?: number;
-  bridgeUserId?: number;
-}): { publicInputs: bigint[]; slotData: bigint[] } {
-  const out = new Array<bigint>(18).fill(0n);
-  const slotData = new Array<bigint>(832).fill(0n);
-  const pushAt = (offset: number, words: bigint[]) => {
-    for (let i = 0; i < words.length; i++) out[offset + i] = words[i];
-  };
-  const pushSlotAt = (offset: number, words: bigint[]) => {
-    for (let i = 0; i < words.length; i++) slotData[offset + i] = words[i];
-  };
-  pushAt(0, bytes32ToU32x8(params.withdrawalRoot));
-  out[8] = 1n;
-  out[9] = BigInt(params.bridgeUserId ?? 524288);
-  pushSlotAt(0, bytes32ToU32x8(addrToBytes32(params.recipient)));
-  pushSlotAt(8, bytes32ToU32x8(addrToBytes32(params.token)));
-  pushSlotAt(16, uint256ToU32x8(params.amount));
-  slotData[24] = params.nonce & 0xffff_ffffn;
-  slotData[25] = BigInt(params.destChainId);
-  pushAt(10, bytes32ToU32x8(batchSlotDataCommit(slotData)));
-  return { publicInputs: out, slotData };
-}
-
 function depositLeafCompat(
   shieldAddress: string,
   token: string,
   l2TokenId: string,
   amount: bigint,
   chainIndex: number,
-  noteSecretHash: string
+  noteCommitment: string
 ): string {
   return ethers.utils.solidityKeccak256(
     ["bytes32", "bytes32", "bytes32", "uint256", "uint32", "bytes32"],
@@ -101,7 +43,7 @@ function depositLeafCompat(
       l2TokenId,
       amount,
       chainIndex,
-      noteSecretHash,
+      noteCommitment,
     ]
   );
 }
@@ -124,8 +66,8 @@ describe("Deposit And Claim", function () {
     await token.mint(user.address, 1000n);
     await token.connect(user).approve(erc20Gateway.address, 300n);
     const l2Recipient1 = ethers.utils.hexZeroPad("0x2a", 32);
-    const noteSecretHash1 = u32ToBytes32(2001);
-    const tx1 = await router.connect(user).deposit(token.address, 300n, l2Recipient1, noteSecretHash1);
+    const noteCommitment1 = u32ToBytes32(2001);
+    const tx1 = await router.connect(user).deposit(token.address, 300n, l2Recipient1, noteCommitment1);
     const rc1 = await tx1.wait();
     const bridgeIface = (await ethers.getContractFactory("Bridge")).interface;
     const depLog1 = rc1!.logs
@@ -144,7 +86,7 @@ describe("Deposit And Claim", function () {
       l2TokenId,
       300n,
       0,
-      noteSecretHash1
+      noteCommitment1
     );
     expect((depLog1 as any).args.leafHash).to.equal(expectedLeaf1);
     expect(await token.balanceOf(bridge.address)).to.equal(300n);
@@ -152,8 +94,8 @@ describe("Deposit And Claim", function () {
     // ETH deposit (wrapped to WETH9 then transferred to bridge)
     const oneEth = 1_000_000_000n;
     const l2Recipient2 = ethers.utils.hexZeroPad("0x07", 32);
-    const noteSecretHash2 = u32ToBytes32(2002);
-    const tx2 = await router.connect(user).deposit(ethers.constants.AddressZero, oneEth, l2Recipient2, noteSecretHash2, { value: oneEth });
+    const noteCommitment2 = u32ToBytes32(2002);
+    const tx2 = await router.connect(user).deposit(ethers.constants.AddressZero, oneEth, l2Recipient2, noteCommitment2, { value: oneEth });
     const rc2 = await tx2.wait();
     const depLog2 = rc2!.logs
       .map((l) => {
@@ -171,7 +113,7 @@ describe("Deposit And Claim", function () {
       l2EthTokenId,
       oneEth,
       0,
-      noteSecretHash2
+      noteCommitment2
     );
     expect((depLog2 as any).args.leafHash).to.equal(expectedLeaf2);
     const wethAtBridge = await ethers.getContractAt("WETH9", weth.address);
@@ -200,13 +142,13 @@ describe("Deposit And Claim", function () {
     await sm.finalize(DUMMY_GNARK_PROOF, depositTop1.root, roots1, withdrawalTop1.root, 0, 1, depositTop1.proof, withdrawalTop1.proof);
 
     const proof = new Array(8).fill(0n);
-    const { publicInputs: erc20PublicInputs, slotData: erc20SlotData } = buildWithdrawalBatchClaimPublicInputsSingle({
+    const { publicInputs: erc20PublicInputs, slotData: erc20SlotData } = buildWithdrawalBatchClaimSingle({
       withdrawalRoot: withdrawalTop1.proof[0],
       recipient: user.address,
       token: token.address,
       amount: erc20Amount,
       nonce: erc20Nonce,
-      destChainId: 0,
+      destinationChainIndex: 0,
     });
 
     await expect(
@@ -229,13 +171,13 @@ describe("Deposit And Claim", function () {
     ];
     await sm.finalize(DUMMY_GNARK_PROOF, depositTop2.root, roots2, withdrawalTop2.root, 0, 2, depositTop2.proof, withdrawalTop2.proof);
 
-    const { publicInputs: ethPublicInputs, slotData: ethSlotData } = buildWithdrawalBatchClaimPublicInputsSingle({
+    const { publicInputs: ethPublicInputs, slotData: ethSlotData } = buildWithdrawalBatchClaimSingle({
       withdrawalRoot: withdrawalTop2.proof[0],
       recipient: user.address,
       token: ethers.constants.AddressZero,
       amount: ethAmount,
       nonce: ethNonce,
-      destChainId: 0,
+      destinationChainIndex: 0,
     });
 
     await expect(

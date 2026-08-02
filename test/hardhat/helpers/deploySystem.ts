@@ -1,7 +1,9 @@
+import fs from "fs";
+import path from "path";
 import { ethers } from "hardhat";
 import { deployProxy } from "./deployProxy";
 
-async function waitForContractDeployment(contract: any) {
+export async function waitForContractDeployment(contract: any) {
   if (typeof contract.waitForDeployment === "function") {
     await contract.waitForDeployment();
     return;
@@ -13,7 +15,7 @@ async function waitForContractDeployment(contract: any) {
   throw new Error("Unsupported ethers contract deployment API");
 }
 
-async function getContractAddress(contract: any): Promise<string> {
+export async function getContractAddress(contract: any): Promise<string> {
   if (typeof contract.address === "string") {
     return contract.address;
   }
@@ -24,6 +26,38 @@ async function getContractAddress(contract: any): Promise<string> {
     return await contract.getAddress();
   }
   throw new Error("Unable to resolve deployed contract address");
+}
+
+export async function ensureHardhatDeploymentChainId(): Promise<void> {
+  const { chainId } = await ethers.provider.getNetwork();
+  const deploymentDir = path.join(__dirname, "../../../deployments/hardhat");
+  fs.mkdirSync(deploymentDir, { recursive: true });
+  fs.writeFileSync(path.join(deploymentDir, ".chainId"), String(chainId));
+}
+export async function readStorageAt(address: string, slot: string): Promise<string> {
+  const provider = ethers.provider as any;
+  if (typeof provider.getStorageAt === "function") {
+    return provider.getStorageAt(address, slot);
+  }
+  if (typeof provider.getStorage === "function") {
+    return provider.getStorage(address, slot);
+  }
+  return provider.send("eth_getStorageAt", [address, slot, "latest"]);
+}
+
+export function getDefaultAbiCoder() {
+  return (ethers as any).AbiCoder?.defaultAbiCoder?.() ?? ethers.utils.defaultAbiCoder;
+}
+export function getChecksumAddress(value: string): string {
+  return (ethers as any).getAddress?.(value) ?? ethers.utils.getAddress(value);
+}
+
+export function hexDataSlice(value: string, start: number, end?: number): string {
+  return (ethers as any).dataSlice?.(value, start, end) ?? ethers.utils.hexDataSlice(value, start, end);
+}
+
+export function hexZeroPad(value: string, length: number): string {
+  return (ethers as any).zeroPadValue?.(value, length) ?? ethers.utils.hexZeroPad(value, length);
 }
 
 export async function deployAccessLayer(admin: string, proposer?: string) {
@@ -44,14 +78,21 @@ export async function wireCoreAddresses(params: {
   verifier: any;
 }) {
   const { provider, acl, bridge, stateManager, router, erc20Gateway, ethGateway, verifier } = params;
+  const aclAddress = await getContractAddress(acl);
+  const bridgeAddress = await getContractAddress(bridge);
+  const stateManagerAddress = await getContractAddress(stateManager);
+  const routerAddress = await getContractAddress(router);
+  const erc20GatewayAddress = await getContractAddress(erc20Gateway);
+  const ethGatewayAddress = await getContractAddress(ethGateway);
+  const verifierAddress = await getContractAddress(verifier);
 
-  await provider.setAddress(await provider.ACL_MANAGER_ID(), acl.address);
-  await provider.setAddress(await provider.BRIDGE_ID(), bridge.address);
-  await provider.setAddress(await provider.STATE_MANAGER_ID(), stateManager.address);
-  await provider.setAddress(await provider.ROUTER_ID(), router.address);
-  await provider.setAddress(await provider.ERC20_GATEWAY_ID(), erc20Gateway.address);
-  await provider.setAddress(await provider.ETH_GATEWAY_ID(), ethGateway.address);
-  await provider.setAddress(await provider.ZK_VERIFIER_ID(), verifier.address);
+  await provider.setAddress(await provider.ACL_MANAGER_ID(), aclAddress);
+  await provider.setAddress(await provider.BRIDGE_ID(), bridgeAddress);
+  await provider.setAddress(await provider.STATE_MANAGER_ID(), stateManagerAddress);
+  await provider.setAddress(await provider.ROUTER_ID(), routerAddress);
+  await provider.setAddress(await provider.ERC20_GATEWAY_ID(), erc20GatewayAddress);
+  await provider.setAddress(await provider.ETH_GATEWAY_ID(), ethGatewayAddress);
+  await provider.setAddress(await provider.ZK_VERIFIER_ID(), verifierAddress);
 }
 
 export async function deployCoreSystem(owner: string, proposer?: string) {

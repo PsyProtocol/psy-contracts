@@ -10,6 +10,7 @@ import {
   MAINNET_ETHERSCAN_KEY,
 } from "./helpers/hardhat-constants";
 import "./tasks/verify";
+import "./tasks/upgrade";
 
 dotenv.config();
 
@@ -18,7 +19,6 @@ const optNetworks = Object.fromEntries(
     ["localhost", mkNetworkCfg("localhost")],
     ["sepolia", mkNetworkCfg("sepolia")],
     ["ethereum", mkNetworkCfg("ethereum")],
-    ["bsc", mkNetworkCfg("bsc")],
   ].filter(([, cfg]) => cfg !== undefined)
 );
 

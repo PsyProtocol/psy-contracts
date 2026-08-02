@@ -6,7 +6,7 @@ import { deploy } from "../helpers/deploy-helper";
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, getNamedAccounts, network } = hre;
-  const { get, log } = deployments;
+  const { get, getArtifact, log, save } = deployments;
   const { deployer } = await getNamedAccounts();
   const cfg = await loadDeployConfig(hre);
   const protocolNetwork = resolveProtocolNetworkName(network.name);
@@ -30,9 +30,12 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     },
   });
 
+  const protocolChain = protocolConfig.chains[protocolNetwork];
   let wethAddress: string;
-  if (cfg.weth) {
-    wethAddress = cfg.weth;
+  if (cfg.weth || protocolChain.wethAddress) {
+    wethAddress = cfg.weth ?? protocolChain.wethAddress!;
+    const artifact = await getArtifact("WETH9");
+    await save("WETH9", { abi: artifact.abi, address: wethAddress });
     log("Using configured WETH for " + network.name + ": " + wethAddress);
   } else {
     const weth = await deploy(hre, "WETH9", {
@@ -60,7 +63,13 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
   for (const token of Object.values(protocolConfig.tokens)) {
     const deployment = token.deployments[protocolNetwork];
-    if (!deployment?.deployName || deployment.l1Address) continue;
+    if (!deployment?.deployName) continue;
+    if (deployment.l1Address) {
+      const artifact = await getArtifact(deployment.deployName);
+      await save(deployment.deployName, { abi: artifact.abi, address: deployment.l1Address });
+      log(`Using configured ${deployment.deployName} for ${network.name}: ${deployment.l1Address}`);
+      continue;
+    }
     const initialSupply = (1_000_000_000n * (10n ** BigInt(token.decimals))).toString();
     const initialHolder = token.symbol === "PSY" ? bridge.address : deployer;
     await deploy(hre, deployment.deployName, {
