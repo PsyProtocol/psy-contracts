@@ -9,6 +9,7 @@ typechain-types/
 # Local deployment artifacts
 deployments/localhost/
 deployments/hardhat/
+deployments/bsc-testnet/
 deployments/*/solcInputs/
 deployments/*/.chainId
 

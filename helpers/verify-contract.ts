@@ -16,6 +16,7 @@ import {
   ETHERSCAN_VERIFICATION_PROVIDER,
   ETHERSCAN_VERIFICATION_MAX_RETRIES,
   ETHERSCAN_APIS,
+  ETHERSCAN_API_KEYS,
 } from "./hardhat-constants";
 import { forgeVerifyContract } from "./foundry";
 
@@ -138,6 +139,7 @@ export async function verifyContract(
         evmVersion: opts.evmVersion,
         viaIR: opts.viaIR,
       },
+      ETHERSCAN_API_KEYS[hre.network.name],
     );
   } else {
     console.log(`  method:  hardhat`);

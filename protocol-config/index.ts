@@ -13,6 +13,8 @@ function envNumber(name: string, fallback: number): number {
 const LOCALHOST_DEFAULT_CHAIN_ID = envNumber('LOCALHOST_L1_CHAIN_ID', 31337)
 const SEPOLIA_DEFAULT_RPC_URL =
   ENV.SEPOLIA_RPC_URL || 'https://ethereum-sepolia-rpc.publicnode.com'
+const BSC_TESTNET_DEFAULT_RPC_URL =
+  ENV.BSC_TESTNET_RPC_URL || 'https://bsc-testnet-dataseed.bnbchain.org'
 
 function nodeLocalhostRpcUrl(): string {
   const host = ['127', '0', '0', '1'].join('.')
@@ -28,7 +30,12 @@ export * from './types'
 
 export function resolveProtocolNetworkName(networkName: string): keyof ProtocolConfig['chains'] {
   if (networkName === 'hardhat') return 'localhost'
-  if (networkName === 'localhost' || networkName === 'sepolia' || networkName === 'ethereum') return networkName
+  if (
+    networkName === 'localhost' ||
+    networkName === 'sepolia' ||
+    networkName === 'bsc-testnet' ||
+    networkName === 'ethereum'
+  ) return networkName
   throw new Error(`Unsupported protocol network: ${networkName}`)
 }
 
@@ -55,6 +62,16 @@ export const protocolConfig: ProtocolConfig = {
       defaultRpcUrl: SEPOLIA_DEFAULT_RPC_URL,
       defaultExplorerUrl: 'https://sepolia.etherscan.io',
     },
+    'bsc-testnet': {
+      network: 'bsc-testnet',
+      l1ChainId: 97,
+      l1ChainIndex: 1,
+      name: 'BSC Testnet',
+      shortName: 'BSC',
+      nativeCurrency: { name: 'Test BNB', symbol: 'tBNB', decimals: 18 },
+      defaultRpcUrl: BSC_TESTNET_DEFAULT_RPC_URL,
+      defaultExplorerUrl: 'https://testnet.bscscan.com',
+    },
     ethereum: {
       network: 'ethereum',
       l1ChainId: 1,
@@ -76,6 +93,7 @@ export const protocolConfig: ProtocolConfig = {
       deployments: {
         localhost: { deployName: 'PsyToken' },
         sepolia: { deployName: 'PsyToken' },
+        'bsc-testnet': { deployName: 'PsyToken' },
         ethereum: { deployName: 'PsyToken' },
       },
     },
@@ -88,6 +106,7 @@ export const protocolConfig: ProtocolConfig = {
       deployments: {
         localhost: { deployName: 'USDTToken' },
         sepolia: { deployName: 'USDTToken' },
+        'bsc-testnet': { deployName: 'USDTToken' },
         ethereum: { l1Address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' },
       },
     },

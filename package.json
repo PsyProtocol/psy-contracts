@@ -14,6 +14,7 @@
     "deploy:keystore": "node scripts/deploy-with-keystore.mjs deploy",
     "deploy:keystore:localhost": "node scripts/deploy-with-keystore.mjs deploy --network localhost --reset",
     "deploy:keystore:sepolia": "node scripts/deploy-with-keystore.mjs deploy --network sepolia --reset",
+    "deploy:keystore:bsc-testnet": "node scripts/deploy-with-keystore.mjs deploy --network bsc-testnet --reset",
     "deploy:keystore:ethereum": "node scripts/deploy-with-keystore.mjs deploy --network ethereum --reset"
   },
   "devDependencies": {

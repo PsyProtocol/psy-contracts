@@ -3,9 +3,23 @@ import hre, { deployments, ethers } from "hardhat";
 import gatewaysDeploy from "../../deploy/004_deploy_gateways";
 import wireCoreDeploy from "../../deploy/006_wire_core";
 import { protocolConfig } from "../../protocol-config";
+import { mkNetworkCfg } from "../../helper-hardhat-config";
 import { ensureHardhatDeploymentChainId, getContractAddress, waitForContractDeployment } from "./helpers/deploySystem";
 
 describe("protocol-config external contract deployments", function () {
+  it("defines BSC Testnet with a distinct Psy bridge index", function () {
+    const chain = protocolConfig.chains["bsc-testnet"];
+    const hardhat = mkNetworkCfg("bsc-testnet");
+
+    expect(chain.l1ChainId).to.equal(97);
+    expect(chain.l1ChainIndex).to.equal(1);
+    expect(chain.nativeCurrency.symbol).to.equal("tBNB");
+    expect(chain.defaultExplorerUrl).to.equal("https://testnet.bscscan.com");
+    expect(hardhat?.chainId).to.equal(97);
+    expect(protocolConfig.tokens.PSY.deployments["bsc-testnet"]?.deployName).to.equal("PsyToken");
+    expect(protocolConfig.tokens.USDT.deployments["bsc-testnet"]?.deployName).to.equal("USDTToken");
+  });
+
   it("uses configured WETH and token addresses instead of deploying local mocks", async function () {
     await ensureHardhatDeploymentChainId();
     await deployments.fixture(["state_manager", "bridge", "router"]);

@@ -1,4 +1,4 @@
-export type ProtocolNetwork = 'localhost' | 'sepolia' | 'ethereum'
+export type ProtocolNetwork = 'localhost' | 'sepolia' | 'bsc-testnet' | 'ethereum'
 export type ProtocolTokenSymbol = 'PSY' | 'USDT'
 
 export type ProtocolChainConfig = {

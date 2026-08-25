@@ -14,6 +14,7 @@ export type DeploymentContracts = {
 
 let localhostModules: Record<string, DeploymentContracts> = {}
 let sepoliaModules: Record<string, DeploymentContracts> = {}
+let bscTestnetModules: Record<string, DeploymentContracts> = {}
 let ethereumModules: Record<string, DeploymentContracts> = {}
 
 try {
@@ -22,6 +23,10 @@ try {
     import: 'default',
   }) as Record<string, DeploymentContracts>
   sepoliaModules = import.meta.glob('./sepolia/deployed-contracts.json', {
+    eager: true,
+    import: 'default',
+  }) as Record<string, DeploymentContracts>
+  bscTestnetModules = import.meta.glob('./bsc-testnet/deployed-contracts.json', {
     eager: true,
     import: 'default',
   }) as Record<string, DeploymentContracts>
@@ -36,21 +41,24 @@ try {
 
 const localhost = localhostModules['./localhost/deployed-contracts.json']
 const sepolia = sepoliaModules['./sepolia/deployed-contracts.json']
+const bscTestnet = bscTestnetModules['./bsc-testnet/deployed-contracts.json']
 const ethereum = ethereumModules['./ethereum/deployed-contracts.json']
 
 const importMetaEnv = import.meta.env
 
 const configuredNetwork = String(importMetaEnv?.VITE_NETWORK ?? 'localhost').trim().toLowerCase()
 const isFork = String(importMetaEnv?.VITE_FORK ?? 'false').trim().toLowerCase() === 'true'
-const selectedNetwork = (isFork || configuredNetwork === 'localhost')
-  ? 'localhost'
-  : (configuredNetwork === 'sepolia' ? 'sepolia' : 'ethereum')
+const selectedNetwork = isFork ? 'localhost' : configuredNetwork
 
 const selectedDeployment =
   selectedNetwork === 'localhost'
     ? localhost
     : selectedNetwork === 'sepolia'
       ? sepolia
-      : ethereum
+      : selectedNetwork === 'bsc-testnet'
+        ? bscTestnet
+        : selectedNetwork === 'ethereum'
+          ? ethereum
+          : undefined
 
 export const currentDeployment: DeploymentContracts | undefined = selectedDeployment

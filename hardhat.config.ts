@@ -7,6 +7,7 @@ import { protocolConfig } from "./protocol-config";
 import {
   ETHERSCAN_KEY,
   SEPOLIA_ETHERSCAN_KEY,
+  BSC_TESTNET_ETHERSCAN_KEY,
   MAINNET_ETHERSCAN_KEY,
 } from "./helpers/hardhat-constants";
 import "./tasks/verify";
@@ -18,6 +19,7 @@ const optNetworks = Object.fromEntries(
   [
     ["localhost", mkNetworkCfg("localhost")],
     ["sepolia", mkNetworkCfg("sepolia")],
+    ["bsc-testnet", mkNetworkCfg("bsc-testnet")],
     ["ethereum", mkNetworkCfg("ethereum")],
   ].filter(([, cfg]) => cfg !== undefined)
 );
@@ -54,8 +56,19 @@ const config: HardhatUserConfig = {
   etherscan: {
     apiKey: {
       sepolia: SEPOLIA_ETHERSCAN_KEY,
+      "bsc-testnet": BSC_TESTNET_ETHERSCAN_KEY,
       ethereum: MAINNET_ETHERSCAN_KEY,
     },
+    customChains: [
+      {
+        network: "bsc-testnet",
+        chainId: 97,
+        urls: {
+          apiURL: "https://api-testnet.bscscan.com/api",
+          browserURL: "https://testnet.bscscan.com",
+        },
+      },
+    ],
   },
   paths: {
     sources: "./src",

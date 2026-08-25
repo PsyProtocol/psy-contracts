@@ -17,6 +17,7 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 - `npm run deploy:devnet`
 - `npm run deploy:keystore:localhost`
 - `npm run deploy:keystore:sepolia`
+- `npm run deploy:keystore:bsc-testnet`
 - `npm run deploy:keystore:ethereum`
 
 ## Notes
@@ -44,6 +45,7 @@ ETHERSCAN_VERIFICATION_PROVIDER=foundry npx hardhat verify-contracts --network s
 All settings are read from env vars:
 - `ETHERSCAN_KEY`: Primary Etherscan API key (required)
 - `SEPOLIA_ETHERSCAN_KEY`: Override for Sepolia (falls back to ETHERSCAN_KEY)
+- `BSC_TESTNET_ETHERSCAN_KEY`: Override for BSC Testnet (also accepts `BSCSCAN_API_KEY`)
 - `MAINNET_ETHERSCAN_KEY`: Override for Ethereum mainnet (falls back to ETHERSCAN_KEY)
 - `ETHERSCAN_VERIFICATION_PROVIDER`: `hardhat` (default) or `foundry`
 - `ETHERSCAN_VERIFICATION_MAX_RETRIES`: Max retries for Hardhat verification (default: 3)

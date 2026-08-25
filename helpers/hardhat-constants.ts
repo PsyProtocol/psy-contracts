@@ -5,6 +5,8 @@ dotenv.config();
 export const ETHERSCAN_KEY = process.env.ETHERSCAN_KEY || process.env.ETHERSCAN_API_KEY || "";
 export const SEPOLIA_ETHERSCAN_KEY =
   process.env.SEPOLIA_ETHERSCAN_KEY || ETHERSCAN_KEY;
+export const BSC_TESTNET_ETHERSCAN_KEY =
+  process.env.BSC_TESTNET_ETHERSCAN_KEY || process.env.BSCSCAN_API_KEY || ETHERSCAN_KEY;
 export const MAINNET_ETHERSCAN_KEY =
   process.env.MAINNET_ETHERSCAN_KEY || ETHERSCAN_KEY;
 
@@ -47,7 +49,16 @@ export const ETHERSCAN_APIS: Record<string, string> = {
   hardhat: "http://localhost:4000/api",
   localhost: "http://localhost:4000/api",
   sepolia: "https://api-sepolia.etherscan.io/api",
+  "bsc-testnet": "https://api-testnet.bscscan.com/api",
   ethereum: "https://api.etherscan.io/api",
+};
+
+export const ETHERSCAN_API_KEYS: Record<string, string> = {
+  hardhat: ETHERSCAN_KEY,
+  localhost: ETHERSCAN_KEY,
+  sepolia: SEPOLIA_ETHERSCAN_KEY,
+  "bsc-testnet": BSC_TESTNET_ETHERSCAN_KEY,
+  ethereum: MAINNET_ETHERSCAN_KEY,
 };
 
 // Block explorer URLs per network
@@ -55,5 +66,6 @@ export const BROWSER_URLS: Record<string, string> = {
   hardhat: "http://localhost:4000",
   localhost: "http://localhost:4000",
   sepolia: "https://sepolia.etherscan.io",
+  "bsc-testnet": "https://testnet.bscscan.com",
   ethereum: "https://etherscan.io",
 };

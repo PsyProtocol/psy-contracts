@@ -30,8 +30,9 @@ export async function forgeVerifyContract(
   libraries?: LibraryAddresses,
   verifierUrl?: string,
   compilerSettings: CompilerSettings = {},
+  explorerApiKey?: string,
 ): Promise<void> {
-  const etherscanApiKey = ETHERSCAN_KEY;
+  const etherscanApiKey = explorerApiKey || ETHERSCAN_KEY;
   if (!etherscanApiKey) {
     throw new Error("ETHERSCAN_KEY is required for Foundry verification");
   }

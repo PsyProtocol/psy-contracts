@@ -5,6 +5,7 @@ export type NetworkName =
   | "hardhat"
   | "localhost"
   | "sepolia"
+  | "bsc-testnet"
   | "ethereum"
 
 export type NetworkConfigItem = {
@@ -25,6 +26,10 @@ export const networkConfig: Record<NetworkName, NetworkConfigItem> = {
   sepolia: {
     chainId: protocolConfig.chains.sepolia.l1ChainId,
     rpcUrl: process.env.SEPOLIA_RPC_URL || protocolConfig.chains.sepolia.defaultRpcUrl,
+  },
+  "bsc-testnet": {
+    chainId: protocolConfig.chains["bsc-testnet"].l1ChainId,
+    rpcUrl: process.env.BSC_TESTNET_RPC_URL || protocolConfig.chains["bsc-testnet"].defaultRpcUrl,
   },
   ethereum: {
     chainId: protocolConfig.chains.ethereum.l1ChainId,
@@ -53,7 +58,7 @@ export function mkNetworkCfg(name: NetworkName): HardhatNetworkUserConfig | unde
   const cfg = networkConfig[name];
   if (!cfg) return undefined;
   const privateKey = getInternalDeployPrivateKey();
-  const chainId = (isForkMode() && (name === "sepolia" || name === "ethereum"))
+  const chainId = (isForkMode() && (name === "sepolia" || name === "bsc-testnet" || name === "ethereum"))
     ? protocolConfig.chains.localhost.l1ChainId
     : cfg.chainId;
   const base: HardhatNetworkUserConfig = {
