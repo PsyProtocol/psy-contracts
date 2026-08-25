@@ -44,6 +44,19 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   }
 
   await removeLegacyPsyFaucetToken(hre, faucetOwner);
+
+  if (process.env.TRANSFER_PROTOCOL_OWNERSHIP_TO_TIMELOCK === "1") {
+    const timelock = await get("ExecutorWithTimelock");
+    const currentOwner = (await deployments.read("TokenFaucetManager", "owner")) as string;
+    if (currentOwner.toLowerCase() !== timelock.address.toLowerCase()) {
+      await deployments.execute(
+        "TokenFaucetManager",
+        { from: currentOwner, log: true },
+        "transferOwnership",
+        timelock.address,
+      );
+    }
+  }
 };
 
 async function configureToken(

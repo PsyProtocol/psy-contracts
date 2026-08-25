@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { deployCoreSystem } from "./helpers/deploySystem";
+import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
 import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
 
@@ -56,6 +56,11 @@ describe("Deposit And Claim", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, ethers.constants.AddressZero, {
+      smallWithdrawalMax: 2_000_000_000n,
+      mediumWithdrawalMax: 4_000_000_000n,
+    });
 
     const l2TokenId = ethers.utils.hexZeroPad("0x1234", 32);
     const l2EthTokenId = ethers.utils.hexZeroPad("0x8888", 32);
@@ -127,6 +132,11 @@ describe("Deposit And Claim", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, ethers.constants.AddressZero, {
+      smallWithdrawalMax: 2_000_000_000n,
+      mediumWithdrawalMax: 4_000_000_000n,
+    });
 
     const erc20Amount = 777n;
     const erc20Nonce = 42n;
@@ -154,6 +164,8 @@ describe("Deposit And Claim", function () {
     await expect(
       bridge.batchClaimWithdrawal(proof, erc20PublicInputs, erc20SlotData)
     ).to.not.be.reverted;
+    expect(await token.balanceOf(user.address)).to.equal(0);
+    await bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32));
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
 
     // ETH claim
@@ -182,6 +194,9 @@ describe("Deposit And Claim", function () {
 
     await expect(
       bridge.batchClaimWithdrawal(proof, ethPublicInputs, ethSlotData)
+    ).to.not.changeEtherBalance(user, ethAmount);
+    await expect(
+      bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))
     ).to.changeEtherBalance(user, ethAmount);
   });
 });

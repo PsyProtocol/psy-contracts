@@ -9,6 +9,36 @@ export type MetaTransaction = {
   data: string;
 };
 
+export function buildSafeTransactionBuilderPayload(params: {
+  safe: string;
+  proposer: string;
+  chainId: string;
+  networkName: string;
+  serviceUrl?: string;
+  transactions: MetaTransaction[];
+  createdAt?: number;
+}) {
+  return {
+    version: "1.0",
+    chainId: params.chainId,
+    createdAt: params.createdAt ?? Date.now(),
+    meta: {
+      name: `Psy governance (${params.networkName})`,
+      description: params.serviceUrl ? `Transaction service: ${params.serviceUrl}` : "Psy governance operation",
+      txBuilderVersion: "1.18.0",
+      createdFromSafeAddress: ethers.utils.getAddress(params.safe),
+      createdFromOwnerAddress: ethers.utils.getAddress(params.proposer),
+    },
+    transactions: params.transactions.map((tx) => ({
+      to: ethers.utils.getAddress(tx.to),
+      value: tx.value ?? "0",
+      data: tx.data,
+      contractMethod: null,
+      contractInputsValues: null,
+    })),
+  };
+}
+
 async function writeSafeProposal(payload: unknown): Promise<void> {
   const dir = path.join(process.cwd(), "deployments", network.name, "safe-proposals");
   await fsp.mkdir(dir, { recursive: true });
@@ -22,23 +52,29 @@ async function writeSafeProposal(payload: unknown): Promise<void> {
 export async function proposeSafeTransaction(target: string, data: string): Promise<void> {
   if (!MULTI_SIG) throw new Error("MULTI_SIG is required for DRY_RUN=Safe");
   const [signer] = await ethers.getSigners();
-  await writeSafeProposal({
+  const { chainId } = await ethers.provider.getNetwork();
+  const proposer = await signer.getAddress();
+  await writeSafeProposal(buildSafeTransactionBuilderPayload({
     safe: MULTI_SIG,
-    safeTxServiceUrl: SAFE_TX_SERVICE_URL || null,
-    network: network.name,
-    proposer: await signer.getAddress(),
+    proposer,
+    chainId: chainId.toString(),
+    networkName: network.name,
+    serviceUrl: SAFE_TX_SERVICE_URL,
     transactions: [{ to: target, value: "0", data }],
-  });
+  }));
 }
 
 export async function proposeMultiSafeTransactions(transactions: MetaTransaction[]): Promise<void> {
   if (!MULTI_SIG) throw new Error("MULTI_SIG is required for DRY_RUN=Safe");
   const [signer] = await ethers.getSigners();
-  await writeSafeProposal({
+  const { chainId } = await ethers.provider.getNetwork();
+  const proposer = await signer.getAddress();
+  await writeSafeProposal(buildSafeTransactionBuilderPayload({
     safe: MULTI_SIG,
-    safeTxServiceUrl: SAFE_TX_SERVICE_URL || null,
-    network: network.name,
-    proposer: await signer.getAddress(),
-    transactions: transactions.map((tx) => ({ to: tx.to, value: tx.value ?? "0", data: tx.data })),
-  });
+    proposer,
+    chainId: chainId.toString(),
+    networkName: network.name,
+    serviceUrl: SAFE_TX_SERVICE_URL,
+    transactions,
+  }));
 }

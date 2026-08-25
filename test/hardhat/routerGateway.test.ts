@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { deployCoreSystem } from "./helpers/deploySystem";
+import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 
 function u32ToBytes32(value: number): string {
   return ethers.utils.hexZeroPad(ethers.utils.hexlify(value), 32);
@@ -18,6 +18,8 @@ describe("Router + Gateways", function () {
     const l2EthTokenId = ethers.utils.hexZeroPad("0x8888", 32);
     await router.connect(owner).setTokenMapping(token.address, l2TokenId);
     await router.connect(owner).setTokenMapping(ethers.constants.AddressZero, l2EthTokenId);
+    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, ethers.constants.AddressZero);
 
     await token.mint(user.address, 1000n);
     await token.connect(user).approve(erc20g.address, 300n);

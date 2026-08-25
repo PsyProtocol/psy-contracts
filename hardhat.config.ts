@@ -11,6 +11,7 @@ import {
 } from "./helpers/hardhat-constants";
 import "./tasks/verify";
 import "./tasks/upgrade";
+import "./tasks/governance";
 
 dotenv.config();
 

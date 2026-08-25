@@ -36,6 +36,7 @@ export const TIMELOCK_OPERATION =
   (process.env.TIMELOCK_OPERATION || TimeLockOperation.Queue) as TimeLockOperation;
 export const MULTI_SIG = process.env.MULTI_SIG || "";
 export const SAFE_TX_SERVICE_URL = process.env.SAFE_TX_SERVICE_URL || "";
+export const TIMELOCK_ETA_BUFFER_SECONDS = parseInt(process.env.TIMELOCK_ETA_BUFFER_SECONDS || "60", 10);
 export const GLOBAL_OVERRIDES = {
   gasLimit: process.env.TX_GAS_LIMIT ? Number(process.env.TX_GAS_LIMIT) : undefined,
 };

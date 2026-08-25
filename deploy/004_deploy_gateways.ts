@@ -82,4 +82,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ["gateways"];
-func.dependencies = ["access", "bridge"];
+func.dependencies = ["access", "bridge_flow_limits"];

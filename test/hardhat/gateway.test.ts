@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { deployCoreSystem } from "./helpers/deploySystem";
+import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
 import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
 
@@ -31,6 +31,7 @@ describe("Multicall3 claim", function () {
     const T = await ethers.getContractFactory("MockERC20");
     const token = await T.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
     const amount = 99n;
     const nonce = 9n;
     await token.mint(bridge.address, amount);
@@ -58,11 +59,18 @@ describe("Multicall3 claim", function () {
       publicInputs,
       slotData,
     ]);
+    const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
+    const settleCallData = bridge.interface.encodeFunctionData("claimPendingWithdrawal", [nullifier]);
     await multicall.aggregate3([
       {
         target: bridge.address,
         allowFailure: false,
         callData: claimCallData,
+      },
+      {
+        target: bridge.address,
+        allowFailure: false,
+        callData: settleCallData,
       },
     ]);
 
