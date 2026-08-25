@@ -141,7 +141,9 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
   it("executes upgrade, force-set-state, and rescue scripts on a Sepolia fork deployment", async function () {
     const [, recipient] = await ethers.getSigners();
     await ensureHardhatDeploymentChainId();
+    process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS = "1";
     await deployments.fixture(["token_faucet", "timelock_roles"]);
+    delete process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS;
 
     const { UPGRADEABLE_CONTRACTS, upgradeAllContracts } = await import("../../scripts/upgrade/utils");
     const bridgeFactory = await ethers.getContractFactory("Bridge");

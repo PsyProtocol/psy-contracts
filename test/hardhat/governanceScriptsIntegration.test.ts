@@ -6,6 +6,7 @@ import hre, { deployments, ethers } from "hardhat";
 import { buildPermissionMigration, verifyProtocolPermissions } from "../../scripts/governance/permissions";
 import { setBridgeTokenFlowConfig } from "../../scripts/governance/bridgeFlowConfig";
 import { rescueBridgeFunds } from "../../scripts/upgrade/rescueBridgeFunds";
+import initializeBridgeFlowLimits from "../../deploy/003b_initialize_bridge_flow_limits";
 import { upgradeBridge } from "../../scripts/upgrade/bridge";
 import { forceSetState } from "../../scripts/upgrade/forceSetState";
 import { UPGRADEABLE_CONTRACTS, upgradeAllContracts } from "../../scripts/upgrade/utils";
@@ -55,11 +56,27 @@ describe("governance scripts local integration", function () {
 
   beforeEach(async function () {
     await ensureHardhatDeploymentChainId();
+    process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS = "1";
     await deployments.fixture(["token_faucet"]);
+  });
+
+  it("initializes local Bridge flow policies for native and deployed tokens", async function () {
+    delete process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS;
+    await initializeBridgeFlowLimits(hre);
+    const bridge = await getDeployedContract("Bridge");
+    const psy = await getDeployedContract("PsyToken");
+    const usdt = await getDeployedContract("USDTToken");
+
+    for (const token of [ethers.constants.AddressZero, psy.address, usdt.address]) {
+      const config = await bridge.getTokenFlowConfig(token);
+      expect(config.configured).to.equal(true);
+      expect(config.minDepositAmount).to.equal(1);
+    }
   });
 
   afterEach(function () {
     for (const name of [
+      "PSY_SKIP_BRIDGE_FLOW_LIMITS",
       "BRIDGE_FLOW_LIMITS_FILE",
       "RESCUE_MODE",
       "RESCUE_TOKEN",

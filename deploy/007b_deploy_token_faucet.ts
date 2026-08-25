@@ -122,4 +122,4 @@ async function removeLegacyPsyFaucetToken(
 
 export default func;
 func.tags = ["token_faucet"];
-func.dependencies = ["transfer_ownership"];
+func.dependencies = ["transfer_ownership", "bridge_flow_limits"];
