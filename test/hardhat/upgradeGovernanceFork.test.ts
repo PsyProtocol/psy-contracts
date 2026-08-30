@@ -97,17 +97,20 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     await state.proxyAdmin.upgradeAndCall(state.proxy.address, await getContractAddress(stateImpl), "0x");
     const upgradedState = stateFactory.attach(state.proxy.address) as any;
     if (upgradedState.address == null) upgradedState.address = state.proxy.address;
-    await upgradedState.forceSetState(
-      1,
-      hexZeroPad("0x01", 32),
-      HASH_ZERO,
-      HASH_ZERO,
-      HASH_ZERO,
-      HASH_ZERO,
-      0,
-    );
+    const currentState = {
+      lastFinalizedCheckpointId: await upgradedState.lastFinalizedCheckpointId(),
+      lastVerifiedCheckpointRoot: await upgradedState.lastVerifiedCheckpointRoot(),
+      lastVerifiedDepositTreeRoot: await upgradedState.lastVerifiedDepositTreeRoot(),
+      lastVerifiedWithdrawalTreeRoot: await upgradedState.lastVerifiedWithdrawalTreeRoot(),
+      withdrawalSubtreeRoot: await upgradedState.withdrawalSubtreeRoot(),
+    };
+    await upgradedState.forceSetState(currentState, {
+      ...currentState,
+      lastFinalizedCheckpointId: 0,
+      lastVerifiedCheckpointRoot: hexZeroPad("0x01", 32),
+    });
     expect(await upgradedState.getRevision()).to.equal(2);
-    expect(await upgradedState.lastFinalizedCheckpointId()).to.equal(1);
+    expect(await upgradedState.lastFinalizedCheckpointId()).to.equal(0);
 
     const bridgeFactory = await ethers.getContractFactory("Bridge");
     const bridgeImpl = await bridgeFactory.deploy();
@@ -146,15 +149,37 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     }
 
     const { forceSetState } = await import("../../scripts/upgrade/forceSetState");
-    process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID = "11";
+    const stateManagerBefore = await deployedContract("StateManager");
+    process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID = String(await stateManagerBefore.lastFinalizedCheckpointId());
+    process.env.EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT = await stateManagerBefore.lastVerifiedCheckpointRoot();
+    process.env.EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT = await stateManagerBefore.lastVerifiedDepositTreeRoot();
+    process.env.EXPECTED_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = await stateManagerBefore.lastVerifiedWithdrawalTreeRoot();
+    process.env.EXPECTED_WITHDRAWAL_SUBTREE_ROOT = await stateManagerBefore.withdrawalSubtreeRoot();
+    process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID = process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID;
     process.env.NEW_LAST_VERIFIED_CHECKPOINT_ROOT = hexZeroPad("0x11", 32);
     process.env.NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT = hexZeroPad("0x12", 32);
-    process.env.NEW_DEPOSIT_SUBTREE_ROOT = hexZeroPad("0x21", 32);
     process.env.NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = hexZeroPad("0x13", 32);
     process.env.NEW_WITHDRAWAL_SUBTREE_ROOT = hexZeroPad("0x14", 32);
     await forceSetState();
     const stateManager = await deployedContract("StateManager");
-    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(11);
+    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID);
+
+    const { forceSetBridgeState } = await import("../../scripts/upgrade/forceSetBridgeState");
+    const bridgeBefore = await deployedContract("Bridge");
+    const expectedFrontier = await bridgeBefore.getDepositFrontier();
+    const targetFrontier = [...expectedFrontier];
+    targetFrontier[0] = hexZeroPad("0x21", 32);
+    process.env.EXPECTED_BRIDGE_DEPOSIT_ROOT = await bridgeBefore.depositRoot();
+    process.env.EXPECTED_BRIDGE_PROVED_DEPOSIT_COUNT = String(await bridgeBefore.provedDepositCount());
+    process.env.EXPECTED_BRIDGE_PENDING_DEPOSIT_COUNT = String(await bridgeBefore.pendingDepositCount());
+    process.env.EXPECTED_BRIDGE_DEPOSIT_FRONTIER_JSON = JSON.stringify(expectedFrontier);
+    process.env.NEW_BRIDGE_DEPOSIT_ROOT = hexZeroPad("0x22", 32);
+    process.env.NEW_BRIDGE_PROVED_DEPOSIT_COUNT = process.env.EXPECTED_BRIDGE_PROVED_DEPOSIT_COUNT;
+    process.env.NEW_BRIDGE_PENDING_DEPOSIT_COUNT = process.env.EXPECTED_BRIDGE_PENDING_DEPOSIT_COUNT;
+    process.env.NEW_BRIDGE_DEPOSIT_FRONTIER_JSON = JSON.stringify(targetFrontier);
+    await forceSetBridgeState();
+    expect(await bridgeBefore.depositRoot()).to.equal(process.env.NEW_BRIDGE_DEPOSIT_ROOT);
+    expect(await bridgeBefore.getDepositFrontier()).to.deep.equal(targetFrontier);
 
     const { rescueBridgeFunds } = await import("../../scripts/upgrade/rescueBridgeFunds");
     const bridge = await deployedContract("Bridge");

@@ -22,7 +22,7 @@ interface IZKVerifierProof {
 contract StateManager is OwnableUpgradeable {
     uint256 public constant VERSION = 2;
     uint64 public constant BRIDGE_USER_ID = 524288;
-    bytes32 internal constant NON_MAPPING_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_NON_MAPPING_STATE_V1");
+    bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_FORCE_SET_STATE_V1");
 
     struct NonMappingState {
         uint64 lastFinalizedCheckpointId;
@@ -51,14 +51,6 @@ contract StateManager is OwnableUpgradeable {
         bytes32 withdrawalTreeRoot
     );
     event ForceSetState(
-        uint64 indexed newLastFinalizedCheckpointId,
-        bytes32 indexed newLastVerifiedCheckpointRoot,
-        bytes32 newLastVerifiedDepositTreeRoot,
-        bytes32 newDepositSubtreeRoot,
-        bytes32 newLastVerifiedWithdrawalTreeRoot,
-        bytes32 newWithdrawalSubtreeRoot
-    );
-    event NonMappingStateReset(
         bytes32 indexed previousStateHash,
         bytes32 indexed newStateHash,
         uint64 lastFinalizedCheckpointId,
@@ -82,7 +74,6 @@ contract StateManager is OwnableUpgradeable {
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
     error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
-    error InvalidRollbackTarget();
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         if (msg.sender != provider.getAddress(provider.BRIDGE_ID())) revert OnlyBridge();
@@ -126,37 +117,10 @@ contract StateManager is OwnableUpgradeable {
     }
 
     function forceSetState(
-        uint64 newLastFinalizedCheckpointId,
-        bytes32 newLastVerifiedCheckpointRoot,
-        bytes32 newLastVerifiedDepositTreeRoot,
-        bytes32 newDepositSubtreeRoot,
-        bytes32 newLastVerifiedWithdrawalTreeRoot,
-        bytes32 newWithdrawalSubtreeRoot
-    ) external onlyStateManagerAdmin {
-        if (newLastFinalizedCheckpointId < lastFinalizedCheckpointId) revert InvalidForceSetState();
-
-        lastFinalizedCheckpointId = newLastFinalizedCheckpointId;
-        lastVerifiedCheckpointRoot = newLastVerifiedCheckpointRoot;
-        lastVerifiedDepositTreeRoot = newLastVerifiedDepositTreeRoot;
-        lastVerifiedWithdrawalTreeRoot = newLastVerifiedWithdrawalTreeRoot;
-        withdrawalSubtreeRoot = newWithdrawalSubtreeRoot;
-        knownDepositSubtreeRoots[newDepositSubtreeRoot] = true;
-        knownWithdrawalSubtreeRoots[newWithdrawalSubtreeRoot] = true;
-
-        emit ForceSetState(
-            newLastFinalizedCheckpointId,
-            newLastVerifiedCheckpointRoot,
-            newLastVerifiedDepositTreeRoot,
-            newDepositSubtreeRoot,
-            newLastVerifiedWithdrawalTreeRoot,
-            newWithdrawalSubtreeRoot
-        );
-    }
-    function resetNonMappingState(
         NonMappingState calldata expected,
         NonMappingState calldata target
     ) external onlyStateManagerAdmin {
-        bytes32 actualStateHash = _nonMappingStateHash(
+        bytes32 actualStateHash = _forceSetStateHash(
             NonMappingState({
                 lastFinalizedCheckpointId: lastFinalizedCheckpointId,
                 lastVerifiedCheckpointRoot: lastVerifiedCheckpointRoot,
@@ -165,15 +129,15 @@ contract StateManager is OwnableUpgradeable {
                 withdrawalSubtreeRoot: withdrawalSubtreeRoot
             })
         );
-        bytes32 targetStateHash = _nonMappingStateHash(target);
+        bytes32 targetStateHash = _forceSetStateHash(target);
         if (actualStateHash == targetStateHash) return;
 
-        bytes32 expectedStateHash = _nonMappingStateHash(expected);
+        bytes32 expectedStateHash = _forceSetStateHash(expected);
         if (actualStateHash != expectedStateHash) {
             revert UnexpectedCurrentState(expectedStateHash, actualStateHash);
         }
         if (target.lastFinalizedCheckpointId > expected.lastFinalizedCheckpointId) {
-            revert InvalidRollbackTarget();
+            revert InvalidForceSetState();
         }
 
         lastFinalizedCheckpointId = target.lastFinalizedCheckpointId;
@@ -182,7 +146,7 @@ contract StateManager is OwnableUpgradeable {
         lastVerifiedWithdrawalTreeRoot = target.lastVerifiedWithdrawalTreeRoot;
         withdrawalSubtreeRoot = target.withdrawalSubtreeRoot;
 
-        emit NonMappingStateReset(
+        emit ForceSetState(
             actualStateHash,
             targetStateHash,
             target.lastFinalizedCheckpointId,
@@ -193,10 +157,10 @@ contract StateManager is OwnableUpgradeable {
         );
     }
 
-    function _nonMappingStateHash(NonMappingState memory state_) internal pure returns (bytes32) {
+    function _forceSetStateHash(NonMappingState memory state_) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
-                NON_MAPPING_STATE_HASH_DOMAIN,
+                FORCE_SET_STATE_HASH_DOMAIN,
                 state_.lastFinalizedCheckpointId,
                 state_.lastVerifiedCheckpointRoot,
                 state_.lastVerifiedDepositTreeRoot,
