@@ -22,6 +22,15 @@ interface IZKVerifierProof {
 contract StateManager is OwnableUpgradeable {
     uint256 public constant VERSION = 2;
     uint64 public constant BRIDGE_USER_ID = 524288;
+    bytes32 internal constant NON_MAPPING_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_NON_MAPPING_STATE_V1");
+
+    struct NonMappingState {
+        uint64 lastFinalizedCheckpointId;
+        bytes32 lastVerifiedCheckpointRoot;
+        bytes32 lastVerifiedDepositTreeRoot;
+        bytes32 lastVerifiedWithdrawalTreeRoot;
+        bytes32 withdrawalSubtreeRoot;
+    }
 
     address public addressesProvider;
     uint8 public l1ChainIndex;
@@ -49,6 +58,15 @@ contract StateManager is OwnableUpgradeable {
         bytes32 newLastVerifiedWithdrawalTreeRoot,
         bytes32 newWithdrawalSubtreeRoot
     );
+    event NonMappingStateReset(
+        bytes32 indexed previousStateHash,
+        bytes32 indexed newStateHash,
+        uint64 lastFinalizedCheckpointId,
+        bytes32 lastVerifiedCheckpointRoot,
+        bytes32 lastVerifiedDepositTreeRoot,
+        bytes32 lastVerifiedWithdrawalTreeRoot,
+        bytes32 withdrawalSubtreeRoot
+    );
 
     error OnlyBridge();
     error OnlyProposer();
@@ -63,6 +81,8 @@ contract StateManager is OwnableUpgradeable {
 
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
+    error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
+    error InvalidRollbackTarget();
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         if (msg.sender != provider.getAddress(provider.BRIDGE_ID())) revert OnlyBridge();
@@ -130,6 +150,59 @@ contract StateManager is OwnableUpgradeable {
             newDepositSubtreeRoot,
             newLastVerifiedWithdrawalTreeRoot,
             newWithdrawalSubtreeRoot
+        );
+    }
+    function resetNonMappingState(
+        NonMappingState calldata expected,
+        NonMappingState calldata target
+    ) external onlyStateManagerAdmin {
+        bytes32 actualStateHash = _nonMappingStateHash(
+            NonMappingState({
+                lastFinalizedCheckpointId: lastFinalizedCheckpointId,
+                lastVerifiedCheckpointRoot: lastVerifiedCheckpointRoot,
+                lastVerifiedDepositTreeRoot: lastVerifiedDepositTreeRoot,
+                lastVerifiedWithdrawalTreeRoot: lastVerifiedWithdrawalTreeRoot,
+                withdrawalSubtreeRoot: withdrawalSubtreeRoot
+            })
+        );
+        bytes32 targetStateHash = _nonMappingStateHash(target);
+        if (actualStateHash == targetStateHash) return;
+
+        bytes32 expectedStateHash = _nonMappingStateHash(expected);
+        if (actualStateHash != expectedStateHash) {
+            revert UnexpectedCurrentState(expectedStateHash, actualStateHash);
+        }
+        if (target.lastFinalizedCheckpointId > expected.lastFinalizedCheckpointId) {
+            revert InvalidRollbackTarget();
+        }
+
+        lastFinalizedCheckpointId = target.lastFinalizedCheckpointId;
+        lastVerifiedCheckpointRoot = target.lastVerifiedCheckpointRoot;
+        lastVerifiedDepositTreeRoot = target.lastVerifiedDepositTreeRoot;
+        lastVerifiedWithdrawalTreeRoot = target.lastVerifiedWithdrawalTreeRoot;
+        withdrawalSubtreeRoot = target.withdrawalSubtreeRoot;
+
+        emit NonMappingStateReset(
+            actualStateHash,
+            targetStateHash,
+            target.lastFinalizedCheckpointId,
+            target.lastVerifiedCheckpointRoot,
+            target.lastVerifiedDepositTreeRoot,
+            target.lastVerifiedWithdrawalTreeRoot,
+            target.withdrawalSubtreeRoot
+        );
+    }
+
+    function _nonMappingStateHash(NonMappingState memory state_) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                NON_MAPPING_STATE_HASH_DOMAIN,
+                state_.lastFinalizedCheckpointId,
+                state_.lastVerifiedCheckpointRoot,
+                state_.lastVerifiedDepositTreeRoot,
+                state_.lastVerifiedWithdrawalTreeRoot,
+                state_.withdrawalSubtreeRoot
+            )
         );
     }
 

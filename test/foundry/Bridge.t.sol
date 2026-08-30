@@ -105,6 +105,93 @@ contract BridgeTest is Test {
         vm.stopPrank();
     }
 
+    function _bridgeNonMappingState(
+        bytes32 root,
+        uint256 provedCount,
+        uint256 pendingCount,
+        bytes32[32] memory frontier
+    ) internal pure returns (Bridge.NonMappingState memory state_) {
+        state_ = Bridge.NonMappingState({
+            depositRoot: root,
+            provedDepositCount: provedCount,
+            pendingDepositCount: pendingCount,
+            depositFrontier: frontier
+        });
+    }
+
+    function testResetNonMappingStateRestoresFieldsLeavesMappingsAndRetryIsNoOp() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+
+        vm.prank(owner);
+        bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
+        bytes32 recordedLeaf = bridge.depositLeafHashes(0);
+        bytes32 claimedNonce = bytes32(uint256(0xCA11));
+        vm.store(address(bridge), keccak256(abi.encode(claimedNonce, uint256(1))), bytes32(uint256(1)));
+        assertTrue(bridge.claimedNullifiers(claimedNonce));
+
+        bytes32 currentRoot = bytes32(uint256(0xCAFE));
+        vm.store(address(bridge), bytes32(uint256(34)), currentRoot);
+        vm.store(address(bridge), bytes32(uint256(35)), bytes32(uint256(1)));
+
+        bytes32[32] memory initialFrontier;
+        Bridge.NonMappingState memory expected = _bridgeNonMappingState(currentRoot, 1, 1, initialFrontier);
+        bytes32[32] memory targetFrontier;
+        for (uint256 i = 0; i < targetFrontier.length; ++i) {
+            targetFrontier[i] = bytes32(i + 1);
+        }
+        Bridge.NonMappingState memory target = _bridgeNonMappingState(bytes32(uint256(0xBEEF)), 0, 0, targetFrontier);
+
+        vm.recordLogs();
+        vm.prank(owner);
+        bridge.resetNonMappingState(expected, target);
+        Vm.Log[] memory resetLogs = vm.getRecordedLogs();
+        assertEq(resetLogs.length, 1);
+        assertEq(resetLogs[0].topics[0], Bridge.NonMappingStateReset.selector);
+
+        assertEq(bridge.depositRoot(), target.depositRoot);
+        assertEq(bridge.provedDepositCount(), target.provedDepositCount);
+        assertEq(bridge.pendingDepositCount(), target.pendingDepositCount);
+        assertEq(keccak256(abi.encode(bridge.getDepositFrontier())), keccak256(abi.encode(targetFrontier)));
+        assertEq(bridge.depositLeafHashes(0), recordedLeaf);
+        assertTrue(bridge.claimedNullifiers(claimedNonce));
+
+        vm.recordLogs();
+        vm.prank(owner);
+        bridge.resetNonMappingState(expected, target);
+        assertEq(vm.getRecordedLogs().length, 0);
+    }
+
+    function testResetNonMappingStateFailsClosedOnAuthCasAndInvariants() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+
+        bytes32[32] memory frontier;
+        Bridge.NonMappingState memory current = _bridgeNonMappingState(EMPTY_DEPOSIT_ROOT, 0, 0, frontier);
+
+        vm.prank(user);
+        vm.expectRevert(Bridge.UnauthorizedBridgeAdmin.selector);
+        bridge.resetNonMappingState(current, current);
+
+        Bridge.NonMappingState memory stale = _bridgeNonMappingState(bytes32(uint256(1)), 0, 0, frontier);
+        Bridge.NonMappingState memory target = _bridgeNonMappingState(bytes32(uint256(2)), 0, 0, frontier);
+        vm.prank(owner);
+        vm.expectPartialRevert(Bridge.UnexpectedCurrentState.selector);
+        bridge.resetNonMappingState(stale, target);
+
+        Bridge.NonMappingState memory provedAbovePending = _bridgeNonMappingState(bytes32(uint256(2)), 1, 0, frontier);
+        vm.prank(owner);
+        vm.expectRevert(Bridge.InvalidRollbackTarget.selector);
+        bridge.resetNonMappingState(current, provedAbovePending);
+
+        Bridge.NonMappingState memory countIncrease = _bridgeNonMappingState(bytes32(uint256(2)), 0, 1, frontier);
+        vm.prank(owner);
+        vm.expectRevert(Bridge.InvalidRollbackTarget.selector);
+        bridge.resetNonMappingState(current, countIncrease);
+
+        assertEq(bridge.depositRoot(), EMPTY_DEPOSIT_ROOT);
+        assertEq(bridge.provedDepositCount(), 0);
+        assertEq(bridge.pendingDepositCount(), 0);
+    }
+
     function testRecordDepositDisabled() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
         PsyACLManager acl = _deployACL();
