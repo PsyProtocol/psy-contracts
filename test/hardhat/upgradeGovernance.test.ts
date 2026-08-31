@@ -2,6 +2,7 @@ import { expect } from "chai";
 import { Contract } from "ethers";
 import { ethers, network } from "hardhat";
 import {
+  defaultFlowConfig,
   deployAccessLayer,
   getChecksumAddress,
   getContractAddress,
@@ -233,22 +234,31 @@ describe("governance upgrade and rescue", function () {
     const [owner, proposer, recipient, other] = await ethers.getSigners();
     const { bridge } = await deploySystemWithTransparentBridge(owner.address, proposer.address);
 
-    const implementationFactory = await ethers.getContractFactory("Bridge");
-    const implementation = await implementationFactory.deploy();
-    await waitForContractDeployment(implementation);
-    await bridge.proxyAdmin.upgradeAndCall(bridge.proxy.address, await getContractAddress(implementation), "0x");
-    const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
-    if (upgraded.address == null) upgraded.address = bridge.proxy.address;
-    expect(await upgraded.getRevision()).to.equal(2);
-
     const tokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await tokenFactory.deploy("Mock", "MOCK");
     await waitForContractDeployment(token);
+    const implementationFactory = await ethers.getContractFactory("Bridge");
+    const implementation = await implementationFactory.deploy();
+    await waitForContractDeployment(implementation);
+    const initData = implementationFactory.interface.encodeFunctionData("initializeFlowLimits", [
+      [await getContractAddress(token)],
+      [defaultFlowConfig()],
+    ]);
+    await bridge.proxyAdmin.upgradeAndCall(
+      bridge.proxy.address,
+      await getContractAddress(implementation),
+      initData,
+    );
+    const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
+    if (upgraded.address == null) upgraded.address = bridge.proxy.address;
+    expect(await upgraded.getRevision()).to.equal(3);
+    expect((await upgraded.getTokenFlowConfig(await getContractAddress(token))).configured).to.equal(true);
     await token.mint(upgraded.address, 1000);
 
     await expect(
       upgraded.connect(other).rescueERC20(await getContractAddress(token), recipient.address, 100),
     ).to.be.revertedWithCustomError(upgraded, "UnauthorizedBridgeAdmin");
+    await upgraded.setGlobalPauseFlags(7);
     await expect(upgraded.rescueERC20(await getContractAddress(token), recipient.address, 100)).to.emit(upgraded, "ERC20Rescued");
     expect(await token.balanceOf(recipient.address)).to.equal(100);
 

@@ -3,6 +3,7 @@ import { Contract } from "ethers";
 import { deployments, ethers, network } from "hardhat";
 import { protocolConfig } from "../../protocol-config";
 import {
+  defaultFlowConfig,
   deployAccessLayer,
   ensureHardhatDeploymentChainId,
   getChecksumAddress,
@@ -80,9 +81,17 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
   this.timeout(180000);
   before(async function () {
     const rpcUrl = process.env.SEPOLIA_RPC_URL || protocolConfig.chains.sepolia.defaultRpcUrl;
+    const remoteProvider = new ethers.providers.JsonRpcProvider(rpcUrl);
+    const configuredBlock = process.env.SEPOLIA_FORK_BLOCK;
+    const blockNumber = configuredBlock
+      ? Number(configuredBlock)
+      : (await remoteProvider.getBlockNumber()) - 64;
+    if (!Number.isSafeInteger(blockNumber) || blockNumber <= 0) {
+      throw new Error(`Invalid SEPOLIA_FORK_BLOCK: ${configuredBlock ?? blockNumber}`);
+    }
     await network.provider.request({
       method: "hardhat_reset",
-      params: [{ forking: { jsonRpcUrl: rpcUrl } }],
+      params: [{ forking: { jsonRpcUrl: rpcUrl, blockNumber } }],
     });
   });
 
@@ -115,23 +124,38 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     const bridgeFactory = await ethers.getContractFactory("Bridge");
     const bridgeImpl = await bridgeFactory.deploy();
     await waitForContractDeployment(bridgeImpl);
-    await bridge.proxyAdmin.upgradeAndCall(bridge.proxy.address, await getContractAddress(bridgeImpl), "0x");
-    const upgradedBridge = bridgeFactory.attach(bridge.proxy.address) as any;
-    if (upgradedBridge.address == null) upgradedBridge.address = bridge.proxy.address;
     const tokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await tokenFactory.deploy("ForkMock", "FMK");
     await waitForContractDeployment(token);
+    const tokenAddress = await getContractAddress(token);
+    const initData = bridgeFactory.interface.encodeFunctionData("initializeFlowLimits", [
+      [tokenAddress],
+      [defaultFlowConfig()],
+    ]);
+    await bridge.proxyAdmin.upgradeAndCall(bridge.proxy.address, await getContractAddress(bridgeImpl), initData);
+    const upgradedBridge = bridgeFactory.attach(bridge.proxy.address) as any;
+    if (upgradedBridge.address == null) upgradedBridge.address = bridge.proxy.address;
+    expect((await upgradedBridge.getTokenFlowConfig(tokenAddress)).configured).to.equal(true);
     await token.mint(upgradedBridge.address, 123);
-    await expect(upgradedBridge.rescueERC20(await getContractAddress(token), recipient.address, 123)).to.emit(upgradedBridge, "ERC20Rescued");
+    await upgradedBridge.setGlobalPauseFlags(7);
+    await expect(upgradedBridge.rescueERC20(tokenAddress, recipient.address, 123)).to.emit(upgradedBridge, "ERC20Rescued");
     expect(await token.balanceOf(recipient.address)).to.equal(123);
   });
 
   it("executes upgrade, force-set-state, and rescue scripts on a Sepolia fork deployment", async function () {
     const [, recipient] = await ethers.getSigners();
     await ensureHardhatDeploymentChainId();
+    process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS = "1";
     await deployments.fixture(["token_faucet", "timelock_roles"]);
+    delete process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS;
 
     const { UPGRADEABLE_CONTRACTS, upgradeAllContracts } = await import("../../scripts/upgrade/utils");
+    const bridgeFactory = await ethers.getContractFactory("Bridge");
+    const usdtDeployment = await deployments.get("USDTToken");
+    const bridgeInitData = bridgeFactory.interface.encodeFunctionData("initializeFlowLimits", [
+      [usdtDeployment.address],
+      [defaultFlowConfig()],
+    ]);
     const beforeImplementations = new Map<string, string>();
     const proxyAddresses = new Map<string, string>();
     for (const name of UPGRADEABLE_CONTRACTS) {
@@ -140,7 +164,7 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
       beforeImplementations.set(name, await implementationOf(proxy.address));
     }
 
-    await upgradeAllContracts();
+    await upgradeAllContracts(undefined, bridgeInitData);
 
     for (const name of UPGRADEABLE_CONTRACTS) {
       const proxy = await deployments.get(`${name}_Proxy`);
@@ -185,6 +209,7 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     const bridge = await deployedContract("Bridge");
     const token = await deployedContract("USDTToken");
     await token.transfer(bridge.address, 1000);
+    await bridge.setGlobalPauseFlags(7);
     process.env.RESCUE_MODE = "erc20";
     process.env.RESCUE_TOKEN = token.address;
     process.env.RESCUE_TO = recipient.address;

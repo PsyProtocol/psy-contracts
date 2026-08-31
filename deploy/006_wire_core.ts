@@ -73,4 +73,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ["wire"];
-func.dependencies = ["access", "verifier", "state_manager", "bridge", "gateways", "router"];
+func.dependencies = ["access", "verifier", "state_manager", "bridge", "gateways", "bridge_flow_limits", "router"];

@@ -7,7 +7,10 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { execute, get, read, log } = deployments;
   const { deployer } = await getNamedAccounts();
   const cfg = await loadDeployConfig(hre);
-  const targetOwner = cfg.owner;
+  const transferToTimelock = process.env.TRANSFER_PROTOCOL_OWNERSHIP_TO_TIMELOCK === "1";
+  const targetOwner = transferToTimelock
+    ? (await get("ExecutorWithTimelock")).address
+    : cfg.owner;
 
   const txFrom = cfg.admin || deployer;
   log("Running 007_transfer_ownership -> " + targetOwner);
@@ -33,4 +36,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ["transfer_ownership"];
-func.dependencies = ["wire"];
+func.dependencies = ["timelock_roles"];

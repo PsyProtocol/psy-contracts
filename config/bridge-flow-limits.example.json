@@ -1,0 +1,19 @@
+{
+  "tokens": [
+    "0x0000000000000000000000000000000000000000"
+  ],
+  "configs": [
+    {
+      "minDepositAmount": "10000000000000000",
+      "depositCapacity": "1000000000000000000000",
+      "depositRefillPerSecond": "100000000000000000",
+      "custodyCap": "10000000000000000000000",
+      "smallWithdrawalMax": "10000000000000000000",
+      "mediumWithdrawalMax": "100000000000000000000",
+      "smallWithdrawalDelay": "900",
+      "mediumWithdrawalDelay": "21600",
+      "largeWithdrawalDelay": "172800",
+      "configured": true
+    }
+  ]
+}

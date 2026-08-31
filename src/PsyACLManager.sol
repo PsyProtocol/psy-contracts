@@ -6,12 +6,13 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
 
 contract PsyACLManager is Initializable, OwnableUpgradeable, AccessControlUpgradeable {
-    uint256 public constant VERSION = 1;
+    uint256 public constant VERSION = 2;
 
     bytes32 public constant BRIDGE_ADMIN_ROLE = keccak256("BRIDGE_ADMIN");
     bytes32 public constant ROUTER_ADMIN_ROLE = keccak256("ROUTER_ADMIN");
     bytes32 public constant STATE_MANAGER_ADMIN_ROLE = keccak256("STATE_MANAGER_ADMIN");
     bytes32 public constant PROPOSER_ROLE = keccak256("PROPOSER");
+    bytes32 public constant GUARDIAN_ROLE = keccak256("GUARDIAN");
 
     error ZeroAddress();
 
@@ -55,5 +56,9 @@ contract PsyACLManager is Initializable, OwnableUpgradeable, AccessControlUpgrad
 
     function isProposer(address account) external view returns (bool) {
         return hasRole(PROPOSER_ROLE, account);
+    }
+
+    function isGuardian(address account) external view returns (bool) {
+        return hasRole(GUARDIAN_ROLE, account);
     }
 }

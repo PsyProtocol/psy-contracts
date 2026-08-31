@@ -1,5 +1,17 @@
-import { dryRunEncodedData, getDeployedContract, waitForTx } from "../../helpers/contracts-helpers";
-import { DRY_RUN, GLOBAL_OVERRIDES } from "../../helpers/hardhat-constants";
+import {
+  dryRunMultipleEncodedData,
+  getDeployedContract,
+  waitForTx,
+} from "../../helpers/contracts-helpers";
+import {
+  DRY_RUN,
+  DryRunExecutor,
+  GLOBAL_OVERRIDES,
+  TIMELOCK_OPERATION,
+  TimeLockOperation,
+} from "../../helpers/hardhat-constants";
+import { getExecutionTime } from "../../helpers/timelock-helpers";
+import { ethers } from "hardhat";
 
 type RescueMode = "erc20" | "native" | "weth-native";
 
@@ -27,10 +39,27 @@ export async function rescueBridgeFunds(executionTime?: string) {
     : mode === "native"
       ? bridge.interface.encodeFunctionData("rescueNative", [to, amount])
       : bridge.interface.encodeFunctionData("rescueWETHAsNative", [to, amount]);
+  const [globalPauseFlags] = await bridge.getPauseFlags(ethers.constants.AddressZero);
+  const pauseData = globalPauseFlags === 7 || globalPauseFlags.toString() === "7"
+    ? undefined
+    : bridge.interface.encodeFunctionData("setGlobalPauseFlags", [7]);
 
   if (DRY_RUN) {
-    await dryRunEncodedData(bridge.address, data, executionTime);
+    const payloads = pauseData ? [pauseData, data] : [data];
+    const routedThroughTimelock = DRY_RUN === DryRunExecutor.TimeLock
+      || DRY_RUN === DryRunExecutor.SafeWithTimeLock;
+    const resolvedExecutionTime = routedThroughTimelock
+      && TIMELOCK_OPERATION === TimeLockOperation.Queue
+      && !executionTime
+      ? await getExecutionTime()
+      : executionTime;
+    await dryRunMultipleEncodedData(
+      payloads.map(() => bridge.address),
+      payloads,
+      payloads.map(() => resolvedExecutionTime),
+    );
   } else {
+    if (pauseData) await waitForTx(await bridge.setGlobalPauseFlags(7, GLOBAL_OVERRIDES));
     if (mode === "erc20") {
       await waitForTx(await bridge.rescueERC20(required("RESCUE_TOKEN"), to, amount, GLOBAL_OVERRIDES));
     } else if (mode === "native") {
@@ -39,7 +68,7 @@ export async function rescueBridgeFunds(executionTime?: string) {
       await waitForTx(await bridge.rescueWETHAsNative(to, amount, GLOBAL_OVERRIDES));
     }
   }
-  return { target: bridge.address, data, mode, to, amount };
+  return { target: bridge.address, pauseData, data, mode, to, amount };
 }
 
 if (require.main === module) {

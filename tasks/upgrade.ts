@@ -10,6 +10,16 @@ upgrade.setAction(async (args: { contract: string; implementation?: string; exec
   if (!isUpgradeableContractName(args.contract)) {
     throw new Error(`Unsupported upgrade target: ${args.contract}`);
   }
+  if (args.contract === "Bridge") {
+    const { getBridgeFlowLimitInitData } = await import("../scripts/upgrade/bridge");
+    await upgradeContract(
+      args.contract,
+      args.implementation,
+      args.executionTime,
+      await getBridgeFlowLimitInitData(),
+    );
+    return;
+  }
   await upgradeContract(args.contract, args.implementation, args.executionTime);
 });
 
@@ -17,7 +27,8 @@ task("upgrade:all", "Upgrade all Psy transparent-proxy contracts")
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
   .setAction(async (args: { executionTime?: string }) => {
     const { upgradeAllContracts } = await import("../scripts/upgrade/utils");
-    await upgradeAllContracts(args.executionTime);
+    const { getBridgeFlowLimitInitData } = await import("../scripts/upgrade/bridge");
+    await upgradeAllContracts(args.executionTime, await getBridgeFlowLimitInitData());
   });
 
 task("upgrade:state-manager", "Upgrade StateManager")
