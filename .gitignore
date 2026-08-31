@@ -15,3 +15,4 @@ deployments/*/.chainId
 # Optional local outputs
 coverage/
 coverage.json
+gasReporterOutput.json

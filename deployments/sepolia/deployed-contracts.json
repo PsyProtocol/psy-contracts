@@ -1,0 +1,60 @@
+{
+  "network": "sepolia",
+  "chainId": "11155111",
+  "generatedAt": "2026-07-24T09:51:47Z",
+  "source": "https://psy-config-stg.pages.dev/config.json",
+  "protocol": {
+    "chain": {
+      "network": "sepolia",
+      "l1ChainId": 11155111,
+      "l1ChainIndex": 0,
+      "name": "Sepolia",
+      "shortName": "ETH",
+      "nativeCurrency": {
+        "name": "Ether",
+        "symbol": "ETH",
+        "decimals": 18
+      }
+    },
+    "tokens": {
+      "PSY": {
+        "symbol": "PSY",
+        "decimals": 9,
+        "l2TokenContractId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "l1Address": "0xd8B4F2bf23daaeC19686190d1013E4778E003dFb"
+      },
+      "USDT": {
+        "symbol": "USDT",
+        "decimals": 6,
+        "l2TokenContractId": "0x0000000000000000000000000000000000000000000000000000000000000004",
+        "l1Address": "0xbBC0D21A312006eB0E902c279d5E53Dc8225cBB6"
+      }
+    }
+  },
+  "core": {
+    "AddressesProvider": "0x37FdA0985af67575D879d2e2d7a51b4db181E3aa",
+    "Bridge": "0x5B8010e8F5F4BAe5cd7737A3398B16C115274Cd9",
+    "StateManager": "0x1f17D331a635F3078129A37269CB3e6e595Ae8D8",
+    "Router": "0x960B4E47CD335990A2C3a7aeb6909e4C9084AA7a",
+    "ERC20Gateway": "0xB51F25b34622c5B791f5c32e8695a22A17bf03E4",
+    "ETHGateway": "0xb956caBB63663F359E0b1E89e1fA769e6A1849F4",
+    "Multicall3": "0x7cfBB763C485a065BD93a76D8DFF32689d402174",
+    "WETH9": "0x87F71878f631f55853483C8b171061b593de8560",
+    "TokenFaucetManager": "0x413D356A4e16F202eC55FCd8d11ad22F7A507F0E",
+    "PsyToken": "0xd8B4F2bf23daaeC19686190d1013E4778E003dFb",
+    "USDTToken": "0xbBC0D21A312006eB0E902c279d5E53Dc8225cBB6"
+  },
+  "contracts": {
+    "AddressesProvider": "0x37FdA0985af67575D879d2e2d7a51b4db181E3aa",
+    "Bridge": "0x5B8010e8F5F4BAe5cd7737A3398B16C115274Cd9",
+    "StateManager": "0x1f17D331a635F3078129A37269CB3e6e595Ae8D8",
+    "Router": "0x960B4E47CD335990A2C3a7aeb6909e4C9084AA7a",
+    "ERC20Gateway": "0xB51F25b34622c5B791f5c32e8695a22A17bf03E4",
+    "ETHGateway": "0xb956caBB63663F359E0b1E89e1fA769e6A1849F4",
+    "Multicall3": "0x7cfBB763C485a065BD93a76D8DFF32689d402174",
+    "WETH9": "0x87F71878f631f55853483C8b171061b593de8560",
+    "TokenFaucetManager": "0x413D356A4e16F202eC55FCd8d11ad22F7A507F0E",
+    "PsyToken": "0xd8B4F2bf23daaeC19686190d1013E4778E003dFb",
+    "USDTToken": "0xbBC0D21A312006eB0E902c279d5E53Dc8225cBB6"
+  }
+}

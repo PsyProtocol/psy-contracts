@@ -12,6 +12,8 @@ import {
   waitForContractDeployment,
   wireCoreAddresses,
 } from "./helpers/deploySystem";
+import { forceSetBridgeState } from "../../scripts/upgrade/forceSetBridgeState";
+import { forceSetState } from "../../scripts/upgrade/forceSetState";
 
 const ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
 
@@ -106,60 +108,125 @@ describe("governance upgrade and rescue", function () {
     ).to.emit(timelock, "CancelledAction");
   });
 
-  it("upgrades StateManager in place and repairs continuity without changing storage layout", async function () {
+  it("upgrades StateManager and Bridge in place and force-sets non-mapping state without touching mappings", async function () {
     const [owner, proposer, other] = await ethers.getSigners();
-    const { acl, state } = await deploySystemWithTransparentBridge(owner.address, proposer.address);
-
-    const depositRoot = hexZeroPad("0x11", 32);
-    const withdrawalRoot = hexZeroPad("0x22", 32);
+    const { acl, state, bridge, router, erc20Gateway } = await deploySystemWithTransparentBridge(owner.address, proposer.address);
     await acl.grantRole(await acl.STATE_MANAGER_ADMIN_ROLE(), owner.address);
 
-    const implementationFactory = await ethers.getContractFactory("StateManager");
-    const implementation = await implementationFactory.deploy();
-    await waitForContractDeployment(implementation);
-    await state.proxyAdmin.upgradeAndCall(state.proxy.address, await getContractAddress(implementation), "0x");
-    const upgraded = implementationFactory.attach(state.proxy.address) as any;
-    if (upgraded.address == null) upgraded.address = state.proxy.address;
+    const stateFactory = await ethers.getContractFactory("StateManager");
+    const stateImplementation = await stateFactory.deploy();
+    await waitForContractDeployment(stateImplementation);
+    await state.proxyAdmin.upgradeAndCall(state.proxy.address, await getContractAddress(stateImplementation), "0x");
+    const upgradedState = stateFactory.attach(state.proxy.address) as any;
+    if (upgradedState.address == null) upgradedState.address = state.proxy.address;
 
-    expect(await upgraded.getRevision()).to.equal(2);
-    expect(await upgraded.addressesProvider()).to.equal(await state.proxy.addressesProvider());
+    const expectedState = {
+      lastFinalizedCheckpointId: 0,
+      lastVerifiedCheckpointRoot: ethers.constants.HashZero,
+      lastVerifiedDepositTreeRoot: ethers.constants.HashZero,
+      lastVerifiedWithdrawalTreeRoot: ethers.constants.HashZero,
+      withdrawalSubtreeRoot: ethers.constants.HashZero,
+    };
+    const targetState = {
+      lastFinalizedCheckpointId: 0,
+      lastVerifiedCheckpointRoot: hexZeroPad("0x11", 32),
+      lastVerifiedDepositTreeRoot: hexZeroPad("0x12", 32),
+      lastVerifiedWithdrawalTreeRoot: hexZeroPad("0x13", 32),
+      withdrawalSubtreeRoot: hexZeroPad("0x14", 32),
+    };
+    const untouchedStateMappingKey = hexZeroPad("0xab", 32);
+
+    expect(await upgradedState.getRevision()).to.equal(2);
+    expect(await upgradedState.addressesProvider()).to.equal(await state.proxy.addressesProvider());
     await expect(
-      upgraded.connect(other).forceSetState(
-        10,
-        depositRoot,
-        depositRoot,
-        depositRoot,
-        withdrawalRoot,
-        withdrawalRoot,
-      ),
-    ).to.be.revertedWithCustomError(upgraded, "UnauthorizedStateManagerAdmin");
+      upgradedState.connect(other).forceSetState(expectedState, targetState),
+    ).to.be.revertedWithCustomError(upgradedState, "UnauthorizedStateManagerAdmin");
+    await expect(upgradedState.forceSetState(expectedState, targetState)).to.emit(upgradedState, "ForceSetState");
+    expect(await upgradedState.lastFinalizedCheckpointId()).to.equal(targetState.lastFinalizedCheckpointId);
+    expect(await upgradedState.lastVerifiedCheckpointRoot()).to.equal(targetState.lastVerifiedCheckpointRoot);
+    expect(await upgradedState.lastVerifiedDepositTreeRoot()).to.equal(targetState.lastVerifiedDepositTreeRoot);
+    expect(await upgradedState.lastVerifiedWithdrawalTreeRoot()).to.equal(targetState.lastVerifiedWithdrawalTreeRoot);
+    expect(await upgradedState.withdrawalSubtreeRoot()).to.equal(targetState.withdrawalSubtreeRoot);
+    expect(await upgradedState.knownDepositSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
+    expect(await upgradedState.knownWithdrawalSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
+    expect(await upgradedState.knownDepositSubtreeRoots(untouchedStateMappingKey)).to.equal(false);
+    expect(await upgradedState.knownWithdrawalSubtreeRoots(untouchedStateMappingKey)).to.equal(false);
+    await expect(upgradedState.forceSetState(expectedState, targetState)).to.not.emit(upgradedState, "ForceSetState");
+
+    const bridgeFactory = await ethers.getContractFactory("Bridge");
+    const bridgeImplementation = await bridgeFactory.deploy();
+    await waitForContractDeployment(bridgeImplementation);
+    await bridge.proxyAdmin.upgradeAndCall(bridge.proxy.address, await getContractAddress(bridgeImplementation), "0x");
+    const upgradedBridge = bridgeFactory.attach(bridge.proxy.address) as any;
+    if (upgradedBridge.address == null) upgradedBridge.address = bridge.proxy.address;
+
+    const tokenFactory = await ethers.getContractFactory("MockERC20");
+    const depositToken = await tokenFactory.deploy("Deposit", "DEP");
+    await waitForContractDeployment(depositToken);
+    await router.proxy.setTokenMapping(depositToken.address, hexZeroPad("0x2222", 32));
+    await depositToken.mint(owner.address, 1);
+    await depositToken.approve(erc20Gateway.proxy.address, 1);
+    await router.proxy.deposit(depositToken.address, 1, hexZeroPad("0x23", 32), hexZeroPad("0x24", 32));
+    const depositLeafHash = await upgradedBridge.depositLeafHashes(0);
+
+    const expectedBridge = {
+      depositRoot: await upgradedBridge.depositRoot(),
+      provedDepositCount: 0,
+      pendingDepositCount: 1,
+      depositFrontier: await upgradedBridge.getDepositFrontier(),
+    };
+    const targetFrontier = [...expectedBridge.depositFrontier];
+    targetFrontier[0] = hexZeroPad("0x31", 32);
+    const targetBridge = {
+      depositRoot: hexZeroPad("0x32", 32),
+      provedDepositCount: 0,
+      pendingDepositCount: 0,
+      depositFrontier: targetFrontier,
+    };
+    const untouchedNullifier = hexZeroPad("0xcd", 32);
+
+    expect(await upgradedBridge.getRevision()).to.equal(2);
     await expect(
-      upgraded.forceSetState(
-        10,
-        depositRoot,
-        depositRoot,
-        depositRoot,
-        withdrawalRoot,
-        withdrawalRoot,
-      ),
-    ).to.emit(upgraded, "ForceSetState");
-    expect(await upgraded.lastFinalizedCheckpointId()).to.equal(10);
-    expect(await upgraded.lastVerifiedCheckpointRoot()).to.equal(depositRoot);
-    expect(await upgraded.lastVerifiedDepositTreeRoot()).to.equal(depositRoot);
-    expect(await upgraded.lastVerifiedWithdrawalTreeRoot()).to.equal(withdrawalRoot);
-    expect(await upgraded.withdrawalSubtreeRoot()).to.equal(withdrawalRoot);
-    expect(await upgraded.knownDepositSubtreeRoots(depositRoot)).to.equal(true);
-    expect(await upgraded.knownWithdrawalSubtreeRoots(withdrawalRoot)).to.equal(true);
-    await expect(
-      upgraded.forceSetState(
-        9,
-        depositRoot,
-        depositRoot,
-        depositRoot,
-        withdrawalRoot,
-        withdrawalRoot,
-      ),
-    ).to.be.revertedWithCustomError(upgraded, "InvalidForceSetState");
+      upgradedBridge.connect(other).forceSetState(expectedBridge, targetBridge),
+    ).to.be.revertedWithCustomError(upgradedBridge, "UnauthorizedBridgeAdmin");
+    await expect(upgradedBridge.forceSetState(expectedBridge, targetBridge)).to.emit(upgradedBridge, "ForceSetState");
+    expect(await upgradedBridge.depositRoot()).to.equal(targetBridge.depositRoot);
+    expect(await upgradedBridge.provedDepositCount()).to.equal(targetBridge.provedDepositCount);
+    expect(await upgradedBridge.pendingDepositCount()).to.equal(targetBridge.pendingDepositCount);
+    expect(await upgradedBridge.getDepositFrontier()).to.deep.equal(targetBridge.depositFrontier);
+    expect(await upgradedBridge.depositLeafHashes(0)).to.equal(depositLeafHash);
+    expect(await upgradedBridge.claimedNullifiers(untouchedNullifier)).to.equal(false);
+    await expect(upgradedBridge.forceSetState(expectedBridge, targetBridge)).to.not.emit(upgradedBridge, "ForceSetState");
+  });
+
+  it("rejects invalid force-set script invariants before deployment lookup", async function () {
+    const zero = ethers.constants.HashZero;
+    process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID = "1";
+    process.env.EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT = zero;
+    process.env.EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT = zero;
+    process.env.EXPECTED_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = zero;
+    process.env.EXPECTED_WITHDRAWAL_SUBTREE_ROOT = zero;
+    process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID = "2";
+    process.env.NEW_LAST_VERIFIED_CHECKPOINT_ROOT = zero;
+    process.env.NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT = zero;
+    process.env.NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = zero;
+    process.env.NEW_WITHDRAWAL_SUBTREE_ROOT = zero;
+    await expect(forceSetState()).to.be.rejectedWith(
+      "NEW_LAST_FINALIZED_CHECKPOINT_ID must not exceed EXPECTED_LAST_FINALIZED_CHECKPOINT_ID",
+    );
+
+    const frontier = JSON.stringify(Array(32).fill(zero));
+    process.env.EXPECTED_BRIDGE_DEPOSIT_ROOT = zero;
+    process.env.EXPECTED_BRIDGE_PROVED_DEPOSIT_COUNT = "1";
+    process.env.EXPECTED_BRIDGE_PENDING_DEPOSIT_COUNT = "1";
+    process.env.EXPECTED_BRIDGE_DEPOSIT_FRONTIER_JSON = frontier;
+    process.env.NEW_BRIDGE_DEPOSIT_ROOT = zero;
+    process.env.NEW_BRIDGE_PROVED_DEPOSIT_COUNT = "2";
+    process.env.NEW_BRIDGE_PENDING_DEPOSIT_COUNT = "1";
+    process.env.NEW_BRIDGE_DEPOSIT_FRONTIER_JSON = frontier;
+    await expect(forceSetBridgeState()).to.be.rejectedWith(
+      "NEW_BRIDGE_PROVED_DEPOSIT_COUNT must not exceed NEW_BRIDGE_PENDING_DEPOSIT_COUNT",
+    );
   });
 
   it("upgrades Bridge in place and rescues ERC20 and native funds via BRIDGE_ADMIN_ROLE", async function () {

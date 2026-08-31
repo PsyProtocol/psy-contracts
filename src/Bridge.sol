@@ -57,6 +57,14 @@ contract Bridge is Initializable, OwnableUpgradeable {
         DEPOSIT_BATCH_APPEND_SLOT_WORDS * DEPOSIT_BATCH_APPEND_SLOT_COUNT;
     bytes32 internal constant EMPTY_DEPOSIT_ROOT =
         0xd65af5933a094e8329332a714327ba72b1e4dac93c0cde8ee479b9bb36c3fc43;
+    bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_BRIDGE_FORCE_SET_STATE_V1");
+
+    struct NonMappingState {
+        bytes32 depositRoot;
+        uint256 provedDepositCount;
+        uint256 pendingDepositCount;
+        bytes32[32] depositFrontier;
+    }
 
     address public addressesProvider;
     mapping(bytes32 => bool) public claimedNullifiers;
@@ -98,6 +106,14 @@ contract Bridge is Initializable, OwnableUpgradeable {
     event ERC20Rescued(address indexed token, address indexed to, uint256 amount);
     event NativeRescued(address indexed to, uint256 amount);
     event WETHUnwrappedAndRescued(address indexed weth, address indexed to, uint256 amount);
+    event ForceSetState(
+        bytes32 indexed previousStateHash,
+        bytes32 indexed newStateHash,
+        bytes32 depositRoot,
+        uint256 provedDepositCount,
+        uint256 pendingDepositCount,
+        bytes32[32] depositFrontier
+    );
 
     error ZeroAddress();
     error ZeroAmount();
@@ -119,6 +135,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error InvalidRealCount();
 
     error UnauthorizedBridgeAdmin();
+    error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
+    error InvalidForceSetState();
     constructor() {
         _disableInitializers();
     }
@@ -167,6 +185,58 @@ contract Bridge is Initializable, OwnableUpgradeable {
             revert UnauthorizedBridgeAdmin();
         }
         _;
+    }
+    function forceSetState(
+        NonMappingState calldata expected,
+        NonMappingState calldata target
+    ) external onlyBridgeAdmin {
+        bytes32[32] memory actualFrontier = _depositFrontier;
+        bytes32 actualStateHash = _forceSetStateHash(
+            NonMappingState({
+                depositRoot: depositRoot,
+                provedDepositCount: provedDepositCount,
+                pendingDepositCount: pendingDepositCount,
+                depositFrontier: actualFrontier
+            })
+        );
+        bytes32 targetStateHash = _forceSetStateHash(target);
+        if (actualStateHash == targetStateHash) return;
+
+        bytes32 expectedStateHash = _forceSetStateHash(expected);
+        if (actualStateHash != expectedStateHash) {
+            revert UnexpectedCurrentState(expectedStateHash, actualStateHash);
+        }
+        if (
+            target.provedDepositCount > target.pendingDepositCount ||
+            target.provedDepositCount > expected.provedDepositCount ||
+            target.pendingDepositCount > expected.pendingDepositCount
+        ) revert InvalidForceSetState();
+
+        depositRoot = target.depositRoot;
+        provedDepositCount = target.provedDepositCount;
+        pendingDepositCount = target.pendingDepositCount;
+        _depositFrontier = target.depositFrontier;
+
+        emit ForceSetState(
+            actualStateHash,
+            targetStateHash,
+            target.depositRoot,
+            target.provedDepositCount,
+            target.pendingDepositCount,
+            target.depositFrontier
+        );
+    }
+
+    function _forceSetStateHash(NonMappingState memory state_) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                FORCE_SET_STATE_HASH_DOMAIN,
+                state_.depositRoot,
+                state_.provedDepositCount,
+                state_.pendingDepositCount,
+                state_.depositFrontier
+            )
+        );
     }
 
     function rescueERC20(address token, address to, uint256 amount) external onlyBridgeAdmin {

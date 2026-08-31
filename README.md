@@ -126,7 +126,7 @@ Notes:
 - Deploying `ExecutorWithTimelock` alone does not hand over every permission. By default, `cfg.admin` remains the ACL default admin and the `DefaultProxyAdmin` owner.
 - `GRANT_TIMELOCK_ROLES=1` only grants `BRIDGE_ADMIN_ROLE` and `STATE_MANAGER_ADMIN_ROLE` to the timelock. It does not grant router admin, ACL default admin, or proxy-upgrade ownership by itself.
 - `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1` is the separate cutover step for proxy upgrades. Without it, implementation upgrades can still be executed directly by the current `DefaultProxyAdmin` owner.
-- `state-manager:force-set-state` requires all `NEW_*` env vars together, including `NEW_LAST_FINALIZED_CHECKPOINT_ID` and `NEW_DEPOSIT_SUBTREE_ROOT`.
+- `state-manager:force-set-state` and `bridge:force-set-state` require complete `EXPECTED_*` and `NEW_*` non-mapping state tuples; inputs are validated before encoding or sending a transaction.
 Upgrade modes use `DRY_RUN`:
 - Fork governance tests and forked upgrade scripts need a working `SEPOLIA_RPC_URL`. If the default public RPC rate-limits or returns 403, override it explicitly, for example `SEPOLIA_RPC_URL=https://sepolia.drpc.org`.
 - unset: execute directly through the connected signer. This works only while `DefaultProxyAdmin` is still directly owned by that signer.
@@ -158,13 +158,32 @@ StateManager force state repair after upgrading the in-place implementation:
 
 ```bash
 DRY_RUN=TimeLock \
-NEW_LAST_FINALIZED_CHECKPOINT_ID=100187 \
+EXPECTED_LAST_FINALIZED_CHECKPOINT_ID=100187 \
+EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT=0xe3f1bcc23eff84f7a1d2f71c91cfdcc5cd3947380970cbd49fe8663eb78e2b0a \
+EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT=0x2588266e5eaea8ff9867d7a36694e35c04bccc5ab36d40d565d8579beb6aff08 \
+EXPECTED_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT=0x030522995310a315f591ff2e948dd628b1fa274e838eeaac00e8ec6a3cba8778 \
+EXPECTED_WITHDRAWAL_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
+NEW_LAST_FINALIZED_CHECKPOINT_ID=100000 \
 NEW_LAST_VERIFIED_CHECKPOINT_ROOT=0xe3f1bcc23eff84f7a1d2f71c91cfdcc5cd3947380970cbd49fe8663eb78e2b0a \
 NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT=0x2588266e5eaea8ff9867d7a36694e35c04bccc5ab36d40d565d8579beb6aff08 \
-NEW_DEPOSIT_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
 NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT=0x030522995310a315f591ff2e948dd628b1fa274e838eeaac00e8ec6a3cba8778 \
 NEW_WITHDRAWAL_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
 npx hardhat state-manager:force-set-state --network sepolia
+```
+
+Bridge force state repair uses `EXPECTED_BRIDGE_*` and `NEW_BRIDGE_*` values for the deposit root, proved/pending counts, and `DEPOSIT_FRONTIER_JSON`. Each frontier must be a JSON array containing exactly 32 bytes32 hex values:
+
+```bash
+DRY_RUN=TimeLock \
+EXPECTED_BRIDGE_DEPOSIT_ROOT=0x... \
+EXPECTED_BRIDGE_PROVED_DEPOSIT_COUNT=100 \
+EXPECTED_BRIDGE_PENDING_DEPOSIT_COUNT=120 \
+EXPECTED_BRIDGE_DEPOSIT_FRONTIER_JSON='["0x...", "..."]' \
+NEW_BRIDGE_DEPOSIT_ROOT=0x... \
+NEW_BRIDGE_PROVED_DEPOSIT_COUNT=90 \
+NEW_BRIDGE_PENDING_DEPOSIT_COUNT=110 \
+NEW_BRIDGE_DEPOSIT_FRONTIER_JSON='["0x...", "..."]' \
+npx hardhat bridge:force-set-state --network sepolia
 ```
 
 Bridge fund rescue after upgrading the in-place implementation:

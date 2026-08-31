@@ -68,6 +68,13 @@ task("state-manager:force-set-state", "Encode or execute StateManager.forceSetSt
     await forceSetState(args.executionTime);
   });
 
+task("bridge:force-set-state", "Encode or execute Bridge.forceSetState")
+  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
+  .setAction(async (args: { executionTime?: string }) => {
+    const { forceSetBridgeState } = await import("../scripts/upgrade/forceSetBridgeState");
+    await forceSetBridgeState(args.executionTime);
+  });
+
 task("bridge:rescue", "Encode or execute Bridge rescueERC20/rescueNative/rescueWETHAsNative")
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
   .setAction(async (args: { executionTime?: string }) => {
