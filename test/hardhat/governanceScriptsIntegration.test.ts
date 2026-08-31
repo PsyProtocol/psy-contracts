@@ -82,10 +82,14 @@ describe("governance scripts local integration", function () {
       "RESCUE_TOKEN",
       "RESCUE_TO",
       "RESCUE_AMOUNT",
+      "EXPECTED_LAST_FINALIZED_CHECKPOINT_ID",
+      "EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT",
+      "EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT",
+      "EXPECTED_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT",
+      "EXPECTED_WITHDRAWAL_SUBTREE_ROOT",
       "NEW_LAST_FINALIZED_CHECKPOINT_ID",
       "NEW_LAST_VERIFIED_CHECKPOINT_ROOT",
       "NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT",
-      "NEW_DEPOSIT_SUBTREE_ROOT",
       "NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT",
       "NEW_WITHDRAWAL_SUBTREE_ROOT",
     ]) delete process.env[name];
@@ -109,15 +113,19 @@ describe("governance scripts local integration", function () {
       expect(await implementationOf(proxy.address)).to.not.equal(before.get(name));
     }
 
-    process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID = "11";
+    const stateManager = await getDeployedContract("StateManager");
+    process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID = String(await stateManager.lastFinalizedCheckpointId());
+    process.env.EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT = await stateManager.lastVerifiedCheckpointRoot();
+    process.env.EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT = await stateManager.lastVerifiedDepositTreeRoot();
+    process.env.EXPECTED_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = await stateManager.lastVerifiedWithdrawalTreeRoot();
+    process.env.EXPECTED_WITHDRAWAL_SUBTREE_ROOT = await stateManager.withdrawalSubtreeRoot();
+    process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID = process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID;
     process.env.NEW_LAST_VERIFIED_CHECKPOINT_ROOT = hexZeroPad("0x11", 32);
     process.env.NEW_LAST_VERIFIED_DEPOSIT_TREE_ROOT = hexZeroPad("0x12", 32);
-    process.env.NEW_DEPOSIT_SUBTREE_ROOT = hexZeroPad("0x13", 32);
     process.env.NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT = hexZeroPad("0x14", 32);
     process.env.NEW_WITHDRAWAL_SUBTREE_ROOT = hexZeroPad("0x15", 32);
     await forceSetState();
-    const stateManager = await getDeployedContract("StateManager");
-    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(11);
+    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID);
     expect(await stateManager.lastVerifiedCheckpointRoot()).to.equal(hexZeroPad("0x11", 32));
   });
 

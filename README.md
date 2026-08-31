@@ -118,13 +118,13 @@ Upgradeable deployment names:
 
 Governance executor:
 - `ExecutorWithTimelock` is deployed by `deploy/007c_deploy_timelock.ts`.
-- `deploy/007d_grant_timelock_roles.ts` grants `BRIDGE_ADMIN_ROLE` and `STATE_MANAGER_ADMIN_ROLE` to the timelock when `GRANT_TIMELOCK_ROLES=1`.
+- `deploy/007d_grant_timelock_roles.ts` grants `DEFAULT_ADMIN_ROLE`, `BRIDGE_ADMIN_ROLE`, `ROUTER_ADMIN_ROLE`, and `STATE_MANAGER_ADMIN_ROLE` to the timelock when `GRANT_TIMELOCK_ROLES=1`.
 - `deploy/007e_transfer_proxy_admin_to_timelock.ts` transfers `DefaultProxyAdmin` ownership to the timelock when `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1`.
 - Set `TIMELOCK_ADMIN` to the multisig address, or it defaults to `cfg.owner`.
 
 Notes:
 - Deploying `ExecutorWithTimelock` alone does not hand over every permission. By default, `cfg.admin` remains the ACL default admin and the `DefaultProxyAdmin` owner.
-- `GRANT_TIMELOCK_ROLES=1` only grants `BRIDGE_ADMIN_ROLE` and `STATE_MANAGER_ADMIN_ROLE` to the timelock. It does not grant router admin, ACL default admin, or proxy-upgrade ownership by itself.
+- `GRANT_TIMELOCK_ROLES=1` grants ACL administration, Bridge administration, Router administration, and StateManager administration to the timelock. It does not transfer proxy-upgrade ownership; that remains a separate cutover.
 - `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1` is the separate cutover step for proxy upgrades. Without it, implementation upgrades can still be executed directly by the current `DefaultProxyAdmin` owner.
 - `state-manager:force-set-state` and `bridge:force-set-state` require complete `EXPECTED_*` and `NEW_*` non-mapping state tuples; inputs are validated before encoding or sending a transaction.
 Upgrade modes use `DRY_RUN`:
