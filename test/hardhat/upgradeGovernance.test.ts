@@ -164,6 +164,7 @@ describe("governance upgrade and rescue", function () {
     const tokenFactory = await ethers.getContractFactory("MockERC20");
     const depositToken = await tokenFactory.deploy("Deposit", "DEP");
     await waitForContractDeployment(depositToken);
+    await upgradedBridge.initializeFlowLimits([depositToken.address], [defaultFlowConfig()]);
     await router.proxy.setTokenMapping(depositToken.address, hexZeroPad("0x2222", 32));
     await depositToken.mint(owner.address, 1);
     await depositToken.approve(erc20Gateway.proxy.address, 1);
