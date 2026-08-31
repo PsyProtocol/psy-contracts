@@ -187,7 +187,7 @@ describe("governance upgrade and rescue", function () {
     };
     const untouchedNullifier = hexZeroPad("0xcd", 32);
 
-    expect(await upgradedBridge.getRevision()).to.equal(2);
+    expect(await upgradedBridge.getRevision()).to.equal(3);
     await expect(
       upgradedBridge.connect(other).forceSetState(expectedBridge, targetBridge),
     ).to.be.revertedWithCustomError(upgradedBridge, "UnauthorizedBridgeAdmin");
