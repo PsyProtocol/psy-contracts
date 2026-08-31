@@ -979,6 +979,148 @@ contract BridgeTest is Test {
         assertEq(aboveMedium.claimableAt, block.timestamp + 30);
     }
 
+    function testZeroDelaySmallAndMediumImmediatelyClaimableLargeDelayed() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
+        StateManager sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        vm.stopPrank();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
+        config.smallWithdrawalMax = 100;
+        config.mediumWithdrawalMax = 200;
+        config.smallWithdrawalDelay = 0;
+        config.mediumWithdrawalDelay = 0;
+        config.largeWithdrawalDelay = 3_600;
+        _setFlowConfig(bridge, address(token), config);
+
+        uint256 smallAmount = 50;
+        uint256 mediumAmount = 150;
+        uint256 largeAmount = 250;
+        bytes32 smallNonce = bytes32(uint256(0x11));
+        bytes32 mediumNonce = bytes32(uint256(0x22));
+        bytes32 largeNonce = bytes32(uint256(0x33));
+        token.mint(address(bridge), smallAmount + mediumAmount + largeAmount);
+
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
+        vm.prank(owner);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
+            withdrawalRoot,
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+
+        uint256[8] memory proof;
+        (uint256[18] memory smallInputs, uint256[1088] memory smallSlotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), smallAmount, smallNonce, 0, 0);
+        WithdrawalBatchHashVerifier smallVerifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(smallInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(smallVerifier));
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, smallInputs, smallSlotData);
+
+        (uint256[18] memory mediumInputs, uint256[1088] memory mediumSlotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), mediumAmount, mediumNonce, 0, 0);
+        WithdrawalBatchHashVerifier mediumVerifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(mediumInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(mediumVerifier));
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, mediumInputs, mediumSlotData);
+
+        (uint256[18] memory largeInputs, uint256[1088] memory largeSlotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), largeAmount, largeNonce, 0, 0);
+        WithdrawalBatchHashVerifier largeVerifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(largeInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(largeVerifier));
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, largeInputs, largeSlotData);
+
+        (,, uint256 smallPending, uint64 smallClaimableAt) = bridge.pendingWithdrawals(smallNonce);
+        (,, uint256 mediumPending, uint64 mediumClaimableAt) = bridge.pendingWithdrawals(mediumNonce);
+        (,, uint256 largePending, uint64 largeClaimableAt) = bridge.pendingWithdrawals(largeNonce);
+        assertEq(smallPending, smallAmount);
+        assertEq(mediumPending, mediumAmount);
+        assertEq(largePending, largeAmount);
+        assertEq(smallClaimableAt, block.timestamp, "zero-delay small tier must be immediately claimable");
+        assertEq(mediumClaimableAt, block.timestamp, "zero-delay medium tier must be immediately claimable");
+        assertEq(largeClaimableAt, block.timestamp + 3_600, "large tier delay must remain enforced");
+
+        vm.prank(user);
+        bridge.claimPendingWithdrawal(smallNonce);
+        assertEq(token.balanceOf(user), smallAmount);
+        vm.prank(user);
+        bridge.claimPendingWithdrawal(mediumNonce);
+        assertEq(token.balanceOf(user), smallAmount + mediumAmount);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, largeNonce, largeClaimableAt)
+        );
+        bridge.claimPendingWithdrawal(largeNonce);
+
+        vm.warp(largeClaimableAt);
+        vm.prank(user);
+        bridge.claimPendingWithdrawal(largeNonce);
+        assertEq(token.balanceOf(user), smallAmount + mediumAmount + largeAmount);
+    }
+
+    function testZeroDelayTiersPreviewImmediateClaimableAt() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
+        config.smallWithdrawalMax = 100;
+        config.mediumWithdrawalMax = 200;
+        config.smallWithdrawalDelay = 0;
+        config.mediumWithdrawalDelay = 0;
+        config.largeWithdrawalDelay = 3_600;
+        _setFlowConfig(bridge, token, config);
+
+        Bridge.WithdrawalPreview memory small = bridge.previewWithdrawal(token, 50);
+        Bridge.WithdrawalPreview memory medium = bridge.previewWithdrawal(token, 150);
+        Bridge.WithdrawalPreview memory large = bridge.previewWithdrawal(token, 250);
+        assertEq(uint8(small.tier), uint8(Bridge.WithdrawalTier.Small));
+        assertEq(uint8(medium.tier), uint8(Bridge.WithdrawalTier.Medium));
+        assertEq(uint8(large.tier), uint8(Bridge.WithdrawalTier.Large));
+        assertEq(small.claimableAt, block.timestamp, "zero-delay small tier preview must be immediate");
+        assertEq(medium.claimableAt, block.timestamp, "zero-delay medium tier preview must be immediate");
+        assertEq(large.claimableAt, block.timestamp + 3_600, "large tier preview must keep its delay");
+    }
+
+    function testZeroSmallMediumDelayConfigAcceptedWithLargeDelay() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
+        config.smallWithdrawalDelay = 0;
+        config.mediumWithdrawalDelay = 0;
+        config.largeWithdrawalDelay = 3_600;
+        _setFlowConfig(bridge, token, config);
+
+        assertEq(
+            bridge.getTokenFlowConfigHash(token),
+            keccak256(abi.encode(token, config)),
+            "zero small/medium delay with nonzero large delay must be a valid config"
+        );
+    }
+
     function testInvalidFlowConfigMatrixAndPauseFlagValidation() public {
         (Bridge bridge,) = _setupBridgeSystem();
         address token = address(0x1234);

@@ -194,6 +194,83 @@ describe("Bridge per-token flow limits", function () {
     );
   });
 
+  it("settles zero-delay small and medium tiers immediately while large stays delayed", async function () {
+    const [owner, recipient] = await ethers.getSigners();
+    const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
+    const factory = await ethers.getContractFactory("MockERC20");
+    const token = await factory.deploy("Token", "TOK");
+    await token.deployed();
+    await configureFlowToken(bridge, token.address, {
+      smallWithdrawalMax: 100,
+      mediumWithdrawalMax: 200,
+      smallWithdrawalDelay: 0,
+      mediumWithdrawalDelay: 0,
+      largeWithdrawalDelay: 3_600,
+    });
+
+    const smallAmount = 50n;
+    const mediumAmount = 150n;
+    const largeAmount = 250n;
+    await token.mint(bridge.address, smallAmount + mediumAmount + largeAmount);
+
+    const deposit = mkTopProof(await stateManager.withdrawalSubtreeRoot(), 0);
+    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
+    await stateManager.finalize(
+      DUMMY_GNARK_PROOF,
+      deposit.root,
+      [ethers.utils.hexZeroPad("0x01", 32), ethers.utils.hexZeroPad("0x02", 32)],
+      withdrawal.root,
+      0,
+      1,
+      deposit.proof,
+      withdrawal.proof,
+    );
+
+    const claim = async (amount: bigint, nonce: bigint) => {
+      const calldata = buildWithdrawalBatchClaimSingle({
+        withdrawalRoot: withdrawal.proof[0],
+        recipient: recipient.address,
+        token: token.address,
+        amount,
+        nonce,
+        destinationChainIndex: 0,
+      });
+      await bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData);
+      return ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
+    };
+
+    const base = (await ethers.provider.getBlock("latest")).timestamp;
+    await network.provider.send("evm_setNextBlockTimestamp", [base + 1]);
+    const smallNonce = await claim(smallAmount, 0x11n);
+    await network.provider.send("evm_setNextBlockTimestamp", [base + 2]);
+    const mediumNonce = await claim(mediumAmount, 0x22n);
+    await network.provider.send("evm_setNextBlockTimestamp", [base + 3]);
+    const largeNonce = await claim(largeAmount, 0x33n);
+
+    const smallPending = await bridge.pendingWithdrawals(smallNonce);
+    const mediumPending = await bridge.pendingWithdrawals(mediumNonce);
+    const largePending = await bridge.pendingWithdrawals(largeNonce);
+    expect(smallPending.amount).to.equal(smallAmount);
+    expect(mediumPending.amount).to.equal(mediumAmount);
+    expect(largePending.amount).to.equal(largeAmount);
+    expect(smallPending.claimableAt).to.equal(base + 1);
+    expect(mediumPending.claimableAt).to.equal(base + 2);
+    expect(largePending.claimableAt).to.equal(base + 3 + 3_600);
+
+    await bridge.connect(recipient).claimPendingWithdrawal(smallNonce);
+    expect(await token.balanceOf(recipient.address)).to.equal(smallAmount);
+    await bridge.connect(recipient).claimPendingWithdrawal(mediumNonce);
+    expect(await token.balanceOf(recipient.address)).to.equal(smallAmount + mediumAmount);
+
+    await expect(bridge.connect(recipient).claimPendingWithdrawal(largeNonce)).to.be.revertedWithCustomError(
+      bridge,
+      "PendingWithdrawalNotClaimable",
+    );
+    await network.provider.send("evm_setNextBlockTimestamp", [largePending.claimableAt.toNumber()]);
+    await bridge.connect(recipient).claimPendingWithdrawal(largeNonce);
+    expect(await token.balanceOf(recipient.address)).to.equal(smallAmount + mediumAmount + largeAmount);
+  });
+
   it("keeps pause state outside the config hash and gives Guardian pause-only behavior", async function () {
     const [owner, guardian] = await ethers.getSigners();
     const { bridge, acl } = await deployCoreSystem(owner.address, owner.address);
