@@ -98,16 +98,20 @@ contract BridgeTest is Test {
     function _defaultFlowConfig() internal pure returns (Bridge.TokenFlowConfig memory) {
         return Bridge.TokenFlowConfig({
             minDepositAmount: 1,
-            depositBucketCapacity: 1e24,
-            depositRefillPerSecond: 1e18,
-            custodyCap: 1e30,
+            depositCap: 1e30,
             smallWithdrawalMax: 1e18,
-            lifetimeWithdrawalThreshold: 1e24,
+            mediumWithdrawalMax: 5e18,
+            totalWithdrawalCap: 1e24,
             smallWithdrawalDelay: 0,
             mediumWithdrawalDelay: 0,
-            thresholdExceededWithdrawalDelay: 0,
+            largeWithdrawalDelay: 0,
             configured: true
         });
+    }
+
+    function _flowConfigs(uint256 length) internal pure returns (Bridge.TokenFlowConfig[] memory configs) {
+        configs = new Bridge.TokenFlowConfig[](length);
+        for (uint256 i = 0; i < length; ++i) configs[i] = _defaultFlowConfig();
     }
 
     function _configureFlowToken(Bridge bridge, address token) internal {
@@ -712,8 +716,9 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.lifetimeWithdrawalThreshold = 200;
-        config.thresholdExceededWithdrawalDelay = 3_600;
+        config.mediumWithdrawalMax = 200;
+        config.totalWithdrawalCap = 200;
+        config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
         uint256 amount = 250;
         bytes32 nonce = bytes32(uint256(88));
@@ -743,7 +748,7 @@ contract BridgeTest is Test {
         assertEq(claimableAt, block.timestamp + 3_600);
         assertTrue(bridge.claimedNullifiers(nonce));
 
-        config.thresholdExceededWithdrawalDelay = 7_200;
+        config.largeWithdrawalDelay = 7_200;
         _setFlowConfig(bridge, address(token), config);
         (,,, uint64 snapshottedClaimableAt) = bridge.pendingWithdrawals(nonce);
         assertEq(snapshottedClaimableAt, claimableAt, "config update must not change an existing ETA");
@@ -866,11 +871,10 @@ contract BridgeTest is Test {
         MockERC20 mockToken = new MockERC20("Mock B", "MOCKB");
         vm.etch(tokenB, address(mockToken).code);
 
+        vm.etch(tokenA, address(mockToken).code);
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.minDepositAmount = 100;
-        config.depositBucketCapacity = 500;
-        config.depositRefillPerSecond = 1;
-        config.custodyCap = 1_000;
+        config.depositCap = 500;
         _setFlowConfig(bridge, tokenA, config);
         _setFlowConfig(bridge, tokenB, config);
 
@@ -878,24 +882,18 @@ contract BridgeTest is Test {
         vm.expectRevert(abi.encodeWithSelector(Bridge.DepositBelowMinimum.selector, tokenA, 99, 100));
         bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 99, bytes32(uint256(2)), bytes32(uint256(3)));
 
+        MockERC20(tokenA).mint(address(bridge), 501);
         vm.prank(owner);
-        bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 400, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        vm.prank(owner);
-        vm.expectRevert(
-            abi.encodeWithSelector(Bridge.DepositRateLimited.selector, tokenA, 100, uint64(block.timestamp + 1))
-        );
-        bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 101, bytes32(uint256(4)), bytes32(uint256(5)));
+        vm.expectRevert(abi.encodeWithSelector(Bridge.DepositCapExceeded.selector, tokenA, 501, 500));
+        bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 100, bytes32(uint256(4)), bytes32(uint256(5)));
 
         vm.prank(owner);
         bridge.recordDepositFromGateway(tokenB, bytes32(uint256(1)), 400, bytes32(uint256(6)), bytes32(uint256(7)));
 
         bytes32 oldHash = bridge.getTokenFlowConfigHash(tokenA);
-        Bridge.BucketState memory beforeUpdate = bridge.getMaterializedDepositBucket(tokenA);
-        config.depositBucketCapacity = 1_000;
+        config.depositCap = 1_000;
         _setFlowConfig(bridge, tokenA, config);
-        Bridge.BucketState memory afterUpdate = bridge.getMaterializedDepositBucket(tokenA);
-        assertEq(afterUpdate.available, beforeUpdate.available, "capacity increase must not gift deposit quota");
+        assertEq(bridge.getTokenFlowConfig(tokenA).depositCap, 1_000);
 
         bytes32 currentHash = bridge.getTokenFlowConfigHash(tokenA);
         vm.prank(owner);
@@ -903,71 +901,23 @@ contract BridgeTest is Test {
         bridge.setTokenFlowConfig(tokenA, config, oldHash);
     }
 
-    function testFuzzConfigUpdateNeverGiftsQuotaOrChangesAnotherToken(uint96 spentSeed, uint96 capacitySeed)
-        public
-    {
-        (Bridge bridge,) = _setupBridgeSystem();
-        address tokenA = address(0x1234);
-        address tokenB = address(0x5678);
-        MockERC20 mockToken = new MockERC20("Mock B", "MOCKB");
-        vm.etch(tokenB, address(mockToken).code);
 
-        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
-        config.depositBucketCapacity = 10_000;
-        config.depositRefillPerSecond = 1;
-        _setFlowConfig(bridge, tokenA, config);
-        _setFlowConfig(bridge, tokenB, config);
-
-        uint256 spent = bound(uint256(spentSeed), 1, 10_000);
-        vm.prank(owner);
-        bridge.recordDepositFromGateway(
-            tokenA, bytes32(uint256(1)), spent, bytes32(uint256(2)), bytes32(uint256(3))
-        );
-        Bridge.BucketState memory beforeA = bridge.getMaterializedDepositBucket(tokenA);
-        Bridge.BucketState memory beforeB = bridge.getMaterializedDepositBucket(tokenB);
-
-        uint128 newCapacity = uint128(bound(uint256(capacitySeed), 1, 20_000));
-        config.minDepositAmount = 1;
-        config.depositBucketCapacity = newCapacity;
-        config.custodyCap = newCapacity;
-        _setFlowConfig(bridge, tokenA, config);
-
-        Bridge.BucketState memory afterA = bridge.getMaterializedDepositBucket(tokenA);
-        Bridge.BucketState memory afterB = bridge.getMaterializedDepositBucket(tokenB);
-        uint256 expectedMaximum = beforeA.available < newCapacity ? beforeA.available : newCapacity;
-        assertLe(afterA.available, expectedMaximum, "config update must not create deposit credit");
-        assertEq(afterB.available, beforeB.available, "token A config must not change token B bucket");
-        assertEq(bridge.getTokenFlowConfigHash(tokenB), keccak256(abi.encode(tokenB, _defaultConfigForHash())), "token B config changed");
-    }
-
-    function _defaultConfigForHash() internal pure returns (Bridge.TokenFlowConfig memory config) {
-        config = _defaultFlowConfig();
-        config.depositBucketCapacity = 10_000;
-        config.depositRefillPerSecond = 1;
-    }
-
-    function testDepositExactBoundariesAndCustodyCap() public {
+    function testDepositExactBoundariesAndDepositCap() public {
         (Bridge bridge,) = _setupBridgeSystem();
         address token = address(0x1234);
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.minDepositAmount = 100;
-        config.depositBucketCapacity = 500;
-        config.depositRefillPerSecond = 1;
-        config.custodyCap = 1_000;
+        config.depositCap = 1_000;
         _setFlowConfig(bridge, token, config);
 
         vm.startPrank(owner);
         bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 100, bytes32(uint256(2)), bytes32(uint256(3)));
-        bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 400, bytes32(uint256(4)), bytes32(uint256(5)));
+        bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 900, bytes32(uint256(4)), bytes32(uint256(5)));
         vm.stopPrank();
 
-        MockERC20(token).mint(address(bridge), 1_000);
-        vm.warp(block.timestamp + 500);
+        MockERC20(token).mint(address(bridge), 1_001);
         vm.prank(owner);
-        bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 100, bytes32(uint256(8)), bytes32(uint256(9)));
-        MockERC20(token).mint(address(bridge), 1);
-        vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.CustodyCapExceeded.selector, token, 1_001, 1_000));
+        vm.expectRevert(abi.encodeWithSelector(Bridge.DepositCapExceeded.selector, token, 1_001, 1_000));
         bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 100, bytes32(uint256(10)), bytes32(uint256(11)));
     }
 
@@ -984,9 +934,9 @@ contract BridgeTest is Test {
         totals[0] = type(uint256).max;
         totals[1] = 42;
         vm.prank(owner);
-        bridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
-        assertEq(bridge.totalRegisteredWithdrawalAmount(token), type(uint256).max);
-        assertEq(bridge.totalRegisteredWithdrawalAmount(otherToken), 42);
+        bridge.initializeWithdrawalTotals(tokens, _flowConfigs(tokens.length), totals, _tokenSetHash(tokens), address(this));
+        assertEq(bridge.totalWithdrawalAmount(token), type(uint256).max);
+        assertEq(bridge.totalWithdrawalAmount(otherToken), 42);
     }
 
     function testInitializeWithdrawalTotalsRejectsDuplicatesAndUnconfiguredTokens() public {
@@ -998,7 +948,7 @@ contract BridgeTest is Test {
         uint256[] memory duplicateTotals = new uint256[](2);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(Bridge.DuplicateToken.selector, token));
-        duplicateBridge.initializeWithdrawalTotals(duplicateTokens, duplicateTotals, _tokenSetHash(duplicateTokens), address(this));
+        duplicateBridge.initializeWithdrawalTotals(duplicateTokens, _flowConfigs(duplicateTokens.length), duplicateTotals, _tokenSetHash(duplicateTokens), address(this));
 
         (Bridge unconfiguredBridge,) = _setupBridgeSystem();
         address unconfigured = address(0x9876);
@@ -1007,7 +957,7 @@ contract BridgeTest is Test {
         uint256[] memory totals = new uint256[](1);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(Bridge.TokenNotConfigured.selector, unconfigured));
-        unconfiguredBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
+        unconfiguredBridge.initializeWithdrawalTotals(tokens, _flowConfigs(tokens.length), totals, _tokenSetHash(tokens), address(this));
     }
 
     function testInitializeWithdrawalTotalsRejectsInvalidExecutorAndTokenSetHashAtomically() public {
@@ -1020,14 +970,14 @@ contract BridgeTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(Bridge.InvalidWithdrawalForceClaimExecutor.selector, address(0))
         );
-        zeroExecutorBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(0));
-        assertEq(zeroExecutorBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+        zeroExecutorBridge.initializeWithdrawalTotals(tokens, _flowConfigs(tokens.length), totals, _tokenSetHash(tokens), address(0));
+        assertEq(zeroExecutorBridge.totalWithdrawalAmount(tokens[0]), 0);
 
         (Bridge eoaExecutorBridge,) = _setupBridgeSystem();
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(Bridge.InvalidWithdrawalForceClaimExecutor.selector, user));
-        eoaExecutorBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), user);
-        assertEq(eoaExecutorBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+        eoaExecutorBridge.initializeWithdrawalTotals(tokens, _flowConfigs(tokens.length), totals, _tokenSetHash(tokens), user);
+        assertEq(eoaExecutorBridge.totalWithdrawalAmount(tokens[0]), 0);
 
         (Bridge badHashBridge,) = _setupBridgeSystem();
         vm.prank(owner);
@@ -1038,86 +988,12 @@ contract BridgeTest is Test {
                 _tokenSetHash(tokens)
             )
         );
-        badHashBridge.initializeWithdrawalTotals(tokens, totals, bytes32(uint256(1)), address(this));
-        assertEq(badHashBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+        badHashBridge.initializeWithdrawalTotals(tokens, _flowConfigs(tokens.length), totals, bytes32(uint256(1)), address(this));
+        assertEq(badHashBridge.totalWithdrawalAmount(tokens[0]), 0);
         assertEq(badHashBridge.withdrawalForceClaimExecutor(), address(0));
         assertEq(badHashBridge.withdrawalTotalsTokenSetHash(), bytes32(0));
     }
 
-    function testWithdrawalTierUsesLifetimeTotalBoundariesAndPreviewTotals() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-        address token = address(0x1234);
-        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
-        config.smallWithdrawalMax = 100;
-        config.lifetimeWithdrawalThreshold = 200;
-        config.smallWithdrawalDelay = 10;
-        config.mediumWithdrawalDelay = 20;
-        config.thresholdExceededWithdrawalDelay = 30;
-        _setFlowConfig(bridge, token, config);
-
-        Bridge.WithdrawalQuote memory small = bridge.previewWithdrawal(token, 100);
-        Bridge.WithdrawalQuote memory medium = bridge.previewWithdrawal(token, 101);
-        assertEq(uint8(small.tier), uint8(Bridge.WithdrawalTier.Small));
-        assertEq(uint8(medium.tier), uint8(Bridge.WithdrawalTier.Medium));
-        assertEq(small.currentTotalRegisteredAmount, 0);
-        assertEq(small.projectedTotalRegisteredAmount, 100);
-
-        address[] memory tokens = new address[](1);
-        tokens[0] = token;
-        uint256[] memory historicalTotals = new uint256[](1);
-        historicalTotals[0] = 100;
-        vm.prank(owner);
-        bridge.initializeWithdrawalTotals(tokens, historicalTotals, _tokenSetHash(tokens), address(this));
-        Bridge.WithdrawalQuote memory atCap = bridge.previewWithdrawal(token, 100);
-        Bridge.WithdrawalQuote memory aboveCap = bridge.previewWithdrawal(token, 101);
-        assertEq(uint8(atCap.tier), uint8(Bridge.WithdrawalTier.Small));
-        assertEq(uint8(aboveCap.tier), uint8(Bridge.WithdrawalTier.LifetimeThresholdExceeded));
-        assertEq(atCap.currentTotalRegisteredAmount, 100);
-        assertEq(atCap.projectedTotalRegisteredAmount, 200);
-        assertEq(aboveCap.projectedTotalRegisteredAmount, 201);
-        assertEq(atCap.claimableAt, block.timestamp + 10);
-        assertEq(aboveCap.claimableAt, block.timestamp + 30);
-    }
-
-    function testWithdrawalQuoteFailsClosedWhenLifetimeProjectionOverflows() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-        address token = address(0x1234);
-        address[] memory tokens = new address[](1);
-        tokens[0] = token;
-        uint256[] memory totals = new uint256[](1);
-        totals[0] = type(uint256).max;
-        vm.prank(owner);
-        bridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
-
-
-        Bridge.WithdrawalQuote memory preview = bridge.previewWithdrawal(token, 1);
-        assertEq(uint8(preview.status), uint8(Bridge.WithdrawalStatus.InvalidAmount));
-        assertEq(preview.currentTotalRegisteredAmount, type(uint256).max);
-        assertEq(preview.projectedTotalRegisteredAmount, 0);
-    }
-
-    function testWithdrawalQuoteRejectsZeroAmount() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-        Bridge.WithdrawalQuote memory quote = bridge.previewWithdrawal(address(0x1234), 0);
-        assertEq(uint8(quote.status), uint8(Bridge.WithdrawalStatus.InvalidAmount));
-    }
-
-    function testWithdrawalAmountGoldilocksBoundaryPreview() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-        address token = address(0x1234);
-        assertEq(
-            uint8(bridge.previewWithdrawal(token, 18446744069414584320).status),
-            uint8(Bridge.WithdrawalStatus.Accepted)
-        );
-        assertEq(
-            uint8(bridge.previewWithdrawal(token, 18446744069414584321).status),
-            uint8(Bridge.WithdrawalStatus.InvalidAmount)
-        );
-        assertEq(
-            uint8(bridge.previewWithdrawal(token, type(uint64).max).status),
-            uint8(Bridge.WithdrawalStatus.InvalidAmount)
-        );
-    }
 
 
     function testZeroDelaySmallAndMediumImmediatelyClaimableLargeDelayed() public {
@@ -1139,10 +1015,11 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.lifetimeWithdrawalThreshold = 200;
+        config.mediumWithdrawalMax = 200;
+        config.totalWithdrawalCap = 200;
         config.smallWithdrawalDelay = 0;
         config.mediumWithdrawalDelay = 0;
-        config.thresholdExceededWithdrawalDelay = 3_600;
+        config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
 
         uint256 smallAmount = 50;
@@ -1241,8 +1118,9 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 10;
-        config.lifetimeWithdrawalThreshold = 20;
-        config.thresholdExceededWithdrawalDelay = 3_600;
+        config.mediumWithdrawalMax = 20;
+        config.totalWithdrawalCap = 20;
+        config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
         token.mint(address(bridge), 30);
 
@@ -1268,7 +1146,7 @@ contract BridgeTest is Test {
         uint256[] memory historicalTotals = new uint256[](1);
         vm.prank(owner);
         bridge.initializeWithdrawalTotals(
-            configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this)
+            configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this)
         );
 
         vm.prank(user);
@@ -1289,33 +1167,6 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(user), 30);
     }
 
-    function testZeroDelayTiersPreviewImmediateClaimableAt() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-        address token = address(0x1234);
-        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
-        config.smallWithdrawalMax = 100;
-        config.lifetimeWithdrawalThreshold = 200;
-        config.smallWithdrawalDelay = 0;
-        config.mediumWithdrawalDelay = 0;
-        config.thresholdExceededWithdrawalDelay = 3_600;
-        _setFlowConfig(bridge, token, config);
-
-        Bridge.WithdrawalQuote memory small = bridge.previewWithdrawal(token, 50);
-        Bridge.WithdrawalQuote memory medium = bridge.previewWithdrawal(token, 150);
-        address[] memory tokens = new address[](1);
-        tokens[0] = token;
-        uint256[] memory historicalTotals = new uint256[](1);
-        historicalTotals[0] = 200;
-        vm.prank(owner);
-        bridge.initializeWithdrawalTotals(tokens, historicalTotals, _tokenSetHash(tokens), address(this));
-        Bridge.WithdrawalQuote memory large = bridge.previewWithdrawal(token, 1);
-        assertEq(uint8(small.tier), uint8(Bridge.WithdrawalTier.Small));
-        assertEq(uint8(medium.tier), uint8(Bridge.WithdrawalTier.Medium));
-        assertEq(uint8(large.tier), uint8(Bridge.WithdrawalTier.LifetimeThresholdExceeded));
-        assertEq(small.claimableAt, block.timestamp, "zero-delay small tier preview must be immediate");
-        assertEq(medium.claimableAt, block.timestamp, "zero-delay medium tier preview must be immediate");
-        assertEq(large.claimableAt, block.timestamp + 3_600, "large tier preview must keep its delay");
-    }
 
     function testZeroSmallMediumDelayConfigAcceptedWithLargeDelay() public {
         (Bridge bridge,) = _setupBridgeSystem();
@@ -1323,7 +1174,7 @@ contract BridgeTest is Test {
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalDelay = 0;
         config.mediumWithdrawalDelay = 0;
-        config.thresholdExceededWithdrawalDelay = 3_600;
+        config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, token, config);
 
         assertEq(
@@ -1345,22 +1196,16 @@ contract BridgeTest is Test {
         config.minDepositAmount = 0;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.minDepositAmount = config.depositBucketCapacity + 1;
+        config.depositCap = config.minDepositAmount - 1;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.depositRefillPerSecond = 0;
+        config.smallWithdrawalMax = config.mediumWithdrawalMax + 1;
         _expectInvalidFlowConfig(bridge, token, config);
-        config = _defaultFlowConfig();
-        config.custodyCap = config.minDepositAmount - 1;
-        _expectInvalidFlowConfig(bridge, token, config);
-        config = _defaultFlowConfig();
-        config.lifetimeWithdrawalThreshold = 0;
-        _setFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
         config.smallWithdrawalDelay = config.mediumWithdrawalDelay + 1;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.mediumWithdrawalDelay = config.thresholdExceededWithdrawalDelay + 1;
+        config.mediumWithdrawalDelay = config.largeWithdrawalDelay + 1;
         _expectInvalidFlowConfig(bridge, token, config);
 
         vm.prank(owner);
@@ -1739,8 +1584,8 @@ contract BridgeTest is Test {
         uint256[] memory historicalTotals = new uint256[](1);
         historicalTotals[0] = type(uint256).max;
         vm.prank(owner);
-        bridge.initializeWithdrawalTotals(configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this));
-        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), type(uint256).max);
+        bridge.initializeWithdrawalTotals(configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
 
         (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
@@ -1753,12 +1598,12 @@ contract BridgeTest is Test {
         vm.prank(user);
         vm.expectRevert(
             abi.encodeWithSelector(
-                Bridge.TotalRegisteredWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
+                Bridge.TotalWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
             )
         );
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
-        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), type(uint256).max);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
         assertFalse(bridge.claimedNullifiers(nonce));
         (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, 0);
@@ -1812,14 +1657,14 @@ contract BridgeTest is Test {
         configuredTokens[0] = address(token);
         uint256[] memory historicalTotals = new uint256[](1);
         vm.prank(owner);
-        bridge.initializeWithdrawalTotals(configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this));
+        bridge.initializeWithdrawalTotals(configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this));
 
         (address pendingToken, address pendingRecipient, uint256 pendingAmount, uint64 pendingClaimableAt) =
             bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, amount);
         assertEq(pendingRecipient, user);
         assertTrue(bridge.claimedNullifiers(nonce));
-        uint256 totalBefore = bridge.totalRegisteredWithdrawalAmount(address(token));
+        uint256 totalBefore = bridge.totalWithdrawalAmount(address(token));
 
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "transfer rejected"));
         bridge.forceClaimWithdrawal(nonce);
@@ -1830,7 +1675,7 @@ contract BridgeTest is Test {
         assertEq(recipientAfter, pendingRecipient);
         assertEq(amountAfter, pendingAmount);
         assertEq(claimableAtAfter, pendingClaimableAt);
-        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), totalBefore);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), totalBefore);
         assertTrue(bridge.claimedNullifiers(nonce));
     }
 }

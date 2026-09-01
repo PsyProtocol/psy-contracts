@@ -40,7 +40,7 @@ async function implementationOf(proxy: string): Promise<string> {
 
 function stringConfig(overrides: Record<string, unknown> = {}) {
   return Object.fromEntries(
-    Object.entries({ ...defaultFlowConfig(overrides), lifetimeWithdrawalThreshold: overrides.lifetimeWithdrawalThreshold ?? 18_446_744_069_414_584_320n })
+    Object.entries({ ...defaultFlowConfig(overrides), totalWithdrawalCap: overrides.totalWithdrawalCap ?? 18_446_744_069_414_584_320n })
       .map(([key, value]) => [key, typeof value === "boolean" ? value : value.toString()]),
   );
 }
@@ -106,6 +106,7 @@ describe("governance scripts local integration", function () {
     await bridge.initializeFlowLimits([token.address], [defaultFlowConfig()]);
     const bridgeInitData = bridge.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [token.address],
+      [defaultFlowConfig()],
       [0],
       tokenSetHash([token.address]),
       timelock.address,
@@ -150,7 +151,7 @@ describe("governance scripts local integration", function () {
       await upgradeBridge();
       const bridge = await getDeployedContract("Bridge");
       expect((await bridge.getTokenFlowConfig(token.address)).minDepositAmount).to.equal(10);
-      expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(321);
+      expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(321);
 
       const next = writeManifest(token.address, stringConfig({ minDepositAmount: 20 }));
       try {

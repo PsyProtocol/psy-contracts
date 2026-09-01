@@ -64,7 +64,7 @@ async function registerWithdrawal(params: {
 }
 
 describe("Bridge per-token flow limits", function () {
-  it("enforces deposit min, bucket, custody accounting, and token isolation", async function () {
+  it("enforces deposit minimum, deposit cap, and token isolation", async function () {
     const [owner, user] = await ethers.getSigners();
     const { bridge, router, erc20Gateway } = await deployCoreSystem(owner.address, owner.address);
     const factory = await ethers.getContractFactory("MockERC20");
@@ -77,21 +77,17 @@ describe("Bridge per-token flow limits", function () {
       await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
       await configureFlowToken(bridge, token.address, {
         minDepositAmount: 100,
-        depositBucketCapacity: 500,
-        depositRefillPerSecond: 10,
-        custodyCap: 2_000,
+        depositCap: 500,
       });
       await token.mint(user.address, 2_000);
       await token.connect(user).approve(erc20Gateway.address, 2_000);
     }
 
-    // There is no per-transaction maximum: the deposit may use all currently
-    // available bucket credit, subject to the custody cap.
-    await router.connect(user).deposit(tokenA.address, 450, ethers.constants.HashZero, ethers.constants.HashZero);
+    await router.connect(user).deposit(tokenA.address, 400, ethers.constants.HashZero, ethers.constants.HashZero);
     await expect(
-      router.connect(user).deposit(tokenA.address, 100, ethers.constants.HashZero, ethers.constants.HashZero),
-    ).to.be.revertedWithCustomError(bridge, "DepositRateLimited");
-    expect(await tokenA.balanceOf(bridge.address)).to.equal(450);
+      router.connect(user).deposit(tokenA.address, 101, ethers.constants.HashZero, ethers.constants.HashZero),
+    ).to.be.revertedWithCustomError(bridge, "DepositCapExceeded");
+    expect(await tokenA.balanceOf(bridge.address)).to.equal(400);
 
     await expect(
       router.connect(user).deposit(tokenB.address, 99, ethers.constants.HashZero, ethers.constants.HashZero),
@@ -100,25 +96,16 @@ describe("Bridge per-token flow limits", function () {
     expect(await tokenB.balanceOf(bridge.address)).to.equal(250);
   });
 
-  it("updates a token config with stale-hash protection and without gifting quota", async function () {
+  it("updates a token config with stale-hash protection", async function () {
     const [owner] = await ethers.getSigners();
     const { bridge } = await deployCoreSystem(owner.address, owner.address);
     const token = ethers.Wallet.createRandom().address;
-    await configureFlowToken(bridge, token, {
-      depositBucketCapacity: 500,
-      depositRefillPerSecond: 1,
-    });
+    await configureFlowToken(bridge, token, { depositCap: 500 });
 
     const oldHash = await bridge.getTokenFlowConfigHash(token);
-    const before = (await bridge.getMaterializedDepositBucket(token)).available;
-    const next = defaultFlowConfig({
-      depositBucketCapacity: 1_000,
-      depositRefillPerSecond: 1,
-    });
+    const next = defaultFlowConfig({ depositCap: 1_000 });
     await bridge.setTokenFlowConfig(token, next, oldHash);
-    const after = (await bridge.getMaterializedDepositBucket(token)).available;
-    expect(after).to.be.lte(before.add(2));
-    expect(after).to.be.lt(1_000);
+    expect((await bridge.getTokenFlowConfig(token)).depositCap).to.equal(1_000);
     await expect(bridge.setTokenFlowConfig(token, next, oldHash)).to.be.revertedWithCustomError(
       bridge,
       "StaleConfigHash",
@@ -143,45 +130,41 @@ describe("Bridge per-token flow limits", function () {
     expect(await bridge.pendingDepositCount()).to.equal(0);
   });
 
-  it("accumulates lifetime registered volume across pending and settled withdrawals without decrementing", async function () {
+  it("accumulates lifetime withdrawal amount across pending and settled withdrawals without decrementing", async function () {
     const [owner, recipient, keeper] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
     await configureFlowToken(bridge, token.address, {
       smallWithdrawalMax: 100,
-      lifetimeWithdrawalThreshold: 500,
+      mediumWithdrawalMax: 300,
+      totalWithdrawalCap: 500,
       smallWithdrawalDelay: 0,
       mediumWithdrawalDelay: 0,
-      thresholdExceededWithdrawalDelay: 3_600,
+      largeWithdrawalDelay: 3_600,
     });
     await token.mint(bridge.address, 601);
 
     const firstNonce = await registerWithdrawal({
       bridge, stateManager, recipient: recipient.address, token: token.address, amount: 300n, nonce: 9001n,
     });
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(300);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(300);
     await bridge.connect(keeper).claimPendingWithdrawal(firstNonce);
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(300);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(300);
 
     const secondNonce = await registerWithdrawal({
       bridge, stateManager, recipient: recipient.address, token: token.address, amount: 200n, nonce: 9002n,
     });
     expect((await bridge.pendingWithdrawals(secondNonce)).amount).to.equal(200);
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(500);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(500);
 
-    const crossingPreview = await bridge.previewWithdrawal(token.address, 1);
-    expect(crossingPreview.currentTotalRegisteredAmount).to.equal(500);
-    expect(crossingPreview.projectedTotalRegisteredAmount).to.equal(501);
-    expect(crossingPreview.tier).to.equal(2);
     const crossingNonce = await registerWithdrawal({
       bridge, stateManager, recipient: recipient.address, token: token.address, amount: 1n, nonce: 9003n,
     });
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(501);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(501);
     expect((await bridge.pendingWithdrawals(crossingNonce)).claimableAt).to.be.gt(
       (await ethers.provider.getBlock("latest")).timestamp,
     );
-    expect((await bridge.previewWithdrawal(token.address, 1)).tier).to.equal(2);
   });
 
   it("lets only the initialized Timelock executor force-claim the exact stored withdrawal", async function () {
@@ -189,17 +172,18 @@ describe("Bridge per-token flow limits", function () {
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address, {
+    const config = await configureFlowToken(bridge, token.address, {
       smallWithdrawalMax: 10,
-      lifetimeWithdrawalThreshold: 20,
-      thresholdExceededWithdrawalDelay: 3_600,
+      mediumWithdrawalMax: 20,
+      totalWithdrawalCap: 20,
+      largeWithdrawalDelay: 3_600,
     });
     const timelock = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(
       owner.address, 1, 100, 1, 100,
     );
     await timelock.deployed();
     await bridge.initializeWithdrawalTotals(
-      [token.address], [0], tokenSetHash([token.address]), timelock.address,
+      [token.address], [config], [0], tokenSetHash([token.address]), timelock.address,
     );
     expect(await bridge.withdrawalForceClaimExecutor()).to.equal(timelock.address);
     expect(await bridge.withdrawalTotalsTokenSetHash()).to.equal(tokenSetHash([token.address]));
@@ -230,11 +214,11 @@ describe("Bridge per-token flow limits", function () {
       .to.emit(bridge, "WithdrawalForceClaimed")
       .withArgs(nonce, timelock.address);
     expect(await token.balanceOf(recipient.address)).to.equal(30);
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(30);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(30);
     expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(0);
   });
 
-  it("uses lifetime totals for tiering, isolates tokens, and applies governance cap changes prospectively", async function () {
+  it("uses total withdrawal cap for large delays and keeps token totals isolated", async function () {
     const [owner, recipient] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const factory = await ethers.getContractFactory("MockERC20");
@@ -245,10 +229,11 @@ describe("Bridge per-token flow limits", function () {
     for (const token of [tokenA, tokenB]) {
       await configureFlowToken(bridge, token.address, {
         smallWithdrawalMax: 100,
-        lifetimeWithdrawalThreshold: 200,
+        mediumWithdrawalMax: 150,
+        totalWithdrawalCap: 200,
         smallWithdrawalDelay: 0,
         mediumWithdrawalDelay: 0,
-        thresholdExceededWithdrawalDelay: 3_600,
+        largeWithdrawalDelay: 3_600,
       });
     }
 
@@ -259,20 +244,30 @@ describe("Bridge per-token flow limits", function () {
       bridge, stateManager, recipient: recipient.address, token: tokenA.address, amount: 100n, nonce: 0x22n,
     });
     expect((await bridge.pendingWithdrawals(atCap)).claimableAt).to.be.lte((await ethers.provider.getBlock("latest")).timestamp);
-    expect((await bridge.previewWithdrawal(tokenA.address, 1)).tier).to.equal(2);
-    expect((await bridge.previewWithdrawal(tokenB.address, 1)).tier).to.equal(0);
-    expect(await bridge.totalRegisteredWithdrawalAmount(tokenB.address)).to.equal(0);
+    const crossingNonce = await registerWithdrawal({
+      bridge, stateManager, recipient: recipient.address, token: tokenA.address, amount: 1n, nonce: 0x33n,
+    });
+    expect((await bridge.pendingWithdrawals(crossingNonce)).claimableAt).to.be.gt(
+      (await ethers.provider.getBlock("latest")).timestamp,
+    );
+    const tokenBNonce = await registerWithdrawal({
+      bridge, stateManager, recipient: recipient.address, token: tokenB.address, amount: 1n, nonce: 0x44n,
+    });
+    expect((await bridge.pendingWithdrawals(tokenBNonce)).claimableAt).to.be.lte(
+      (await ethers.provider.getBlock("latest")).timestamp,
+    );
+    expect(await bridge.totalWithdrawalAmount(tokenB.address)).to.equal(1);
 
     const oldHash = await bridge.getTokenFlowConfigHash(tokenA.address);
     await bridge.setTokenFlowConfig(tokenA.address, defaultFlowConfig({
       smallWithdrawalMax: 100,
-      lifetimeWithdrawalThreshold: 500,
+      mediumWithdrawalMax: 150,
+      totalWithdrawalCap: 500,
       smallWithdrawalDelay: 0,
       mediumWithdrawalDelay: 0,
-      thresholdExceededWithdrawalDelay: 3_600,
+      largeWithdrawalDelay: 3_600,
     }), oldHash);
-    expect(await bridge.totalRegisteredWithdrawalAmount(tokenA.address)).to.equal(200);
-    expect((await bridge.previewWithdrawal(tokenA.address, 50)).tier).to.equal(0);
+    expect(await bridge.totalWithdrawalAmount(tokenA.address)).to.equal(201);
   });
 
   it("keeps pause state outside the config hash and gives Guardian pause-only behavior", async function () {
@@ -323,7 +318,7 @@ describe("Bridge per-token flow limits", function () {
     calldata.publicInputs[10] ^= 1n;
     await expect(bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData))
       .to.be.revertedWithCustomError(bridge, "InvalidWithdrawalProof");
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(0);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
     expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
   });
 
@@ -334,19 +329,18 @@ describe("Bridge per-token flow limits", function () {
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 5, lifetimeWithdrawalThreshold: 10 });
+    await configureFlowToken(bridge, token.address, {
+      smallWithdrawalMax: 5,
+      mediumWithdrawalMax: 10,
+      totalWithdrawalCap: 10,
+    });
 
-    const validPreview = await bridge.previewWithdrawal(token.address, GOLDILOCKS_PRIME - 1n);
-    expect(validPreview.status).to.equal(0);
-    expect(validPreview.currentTotalRegisteredAmount).to.equal(0);
-    expect(validPreview.projectedTotalRegisteredAmount).to.equal(GOLDILOCKS_PRIME - 1n);
-    expect((await bridge.previewWithdrawal(token.address, GOLDILOCKS_PRIME)).status).to.equal(3);
 
     await registerWithdrawal({
       bridge, stateManager, recipient: recipient.address, token: token.address,
       amount: GOLDILOCKS_PRIME - 1n, nonce: 0x97n,
     });
-    expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
     for (const [amount, nonce] of [
       [GOLDILOCKS_PRIME, 0x94n],
       [GOLDILOCKS_PRIME + 1n, 0x95n],
@@ -356,7 +350,7 @@ describe("Bridge per-token flow limits", function () {
         bridge, stateManager, recipient: recipient.address, token: token.address, amount, nonce,
       })).to.be.revertedWithCustomError(bridge, "InvalidWithdrawalAmount").withArgs(amount);
       expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
-      expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
+      expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
     }
   });
 });

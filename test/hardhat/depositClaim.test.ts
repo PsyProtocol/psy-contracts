@@ -59,7 +59,8 @@ describe("Deposit And Claim", function () {
     await configureFlowToken(bridge, token.address);
     await configureFlowToken(bridge, ethers.constants.AddressZero, {
       smallWithdrawalMax: 2_000_000_000n,
-      lifetimeWithdrawalThreshold: 4_000_000_000n,
+      mediumWithdrawalMax: 3_000_000_000n,
+      totalWithdrawalCap: 4_000_000_000n,
     });
 
     const l2TokenId = ethers.utils.hexZeroPad("0x1234", 32);
@@ -135,7 +136,8 @@ describe("Deposit And Claim", function () {
     await configureFlowToken(bridge, token.address);
     await configureFlowToken(bridge, ethers.constants.AddressZero, {
       smallWithdrawalMax: 2_000_000_000n,
-      lifetimeWithdrawalThreshold: 4_000_000_000n,
+      mediumWithdrawalMax: 3_000_000_000n,
+      totalWithdrawalCap: 4_000_000_000n,
     });
 
     const erc20Amount = 777n;

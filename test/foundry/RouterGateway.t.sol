@@ -75,14 +75,13 @@ contract RouterGatewayTest is Test {
     function _configureFlowToken(Bridge bridge, address token) internal {
         Bridge.TokenFlowConfig memory config = Bridge.TokenFlowConfig({
             minDepositAmount: 1,
-            depositBucketCapacity: 10 ether,
-            depositRefillPerSecond: 1 ether,
-            custodyCap: 100 ether,
+            depositCap: 100 ether,
             smallWithdrawalMax: 1 ether,
-            lifetimeWithdrawalThreshold: 10 ether,
+            mediumWithdrawalMax: 5 ether,
+            totalWithdrawalCap: 10 ether,
             smallWithdrawalDelay: 0,
             mediumWithdrawalDelay: 0,
-            thresholdExceededWithdrawalDelay: 0,
+            largeWithdrawalDelay: 0,
             configured: true
         });
         bytes32 expectedConfigHash = bridge.getTokenFlowConfigHash(token);

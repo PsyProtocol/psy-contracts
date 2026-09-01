@@ -89,7 +89,7 @@ describe("Bridge flow-limit manifest validation", function () {
       manifest([tokenA], [{ ...stringConfig(), surprise: "1" }]),
       "unknown field surprise",
     );
-    for (const deletedField of ["maxDepositAmount", "lifetimeWithdrawalThresholdacity", "withdrawalRefillPerSecond"]) {
+    for (const deletedField of ["depositBucketCapacity", "depositRefillPerSecond", "custodyCap", "lifetimeWithdrawalThreshold", "thresholdExceededWithdrawalDelay"]) {
       expectInvalid(
         manifest([tokenA], [{ ...stringConfig(), [deletedField]: "1" }]),
         `unknown field ${deletedField}`,
@@ -104,21 +104,21 @@ describe("Bridge flow-limit manifest validation", function () {
       "must be an unsigned decimal string",
     );
     expectInvalid(
-      manifest([tokenA], [{ ...stringConfig(), depositBucketCapacity: (1n << 128n).toString() }]),
+      manifest([tokenA], [{ ...stringConfig(), depositCap: (1n << 128n).toString() }]),
       "exceeds its Solidity integer width",
     );
     expectInvalid(
-      manifest([tokenA], [{ ...stringConfig(), thresholdExceededWithdrawalDelay: (1n << 32n).toString() }]),
+      manifest([tokenA], [{ ...stringConfig(), largeWithdrawalDelay: (1n << 32n).toString() }]),
       "exceeds its Solidity integer width",
     );
     const missingWithdrawalCap = stringConfig();
-    delete missingWithdrawalCap.lifetimeWithdrawalThreshold;
+    delete missingWithdrawalCap.totalWithdrawalCap;
     expectInvalid(
       manifest([tokenA], [missingWithdrawalCap]),
-      "lifetimeWithdrawalThreshold must be an unsigned decimal string",
+      "totalWithdrawalCap must be an unsigned decimal string",
     );
     expectInvalid(
-      manifest([tokenA], [stringConfig({ lifetimeWithdrawalThreshold: (1n << 128n).toString() })]),
+      manifest([tokenA], [stringConfig({ totalWithdrawalCap: (1n << 128n).toString() })]),
       "exceeds its Solidity integer width",
     );
     expectInvalid(manifest([tokenA], [stringConfig()], ["-1"]), "must be an unsigned decimal string");
@@ -135,11 +135,10 @@ describe("Bridge flow-limit manifest validation", function () {
     );
     const invalidOverrides = [
       { minDepositAmount: 0 },
-      { minDepositAmount: 2, depositBucketCapacity: 1 },
-      { depositRefillPerSecond: 0 },
-      { minDepositAmount: 2, custodyCap: 1 },
+      { minDepositAmount: 2, depositCap: 1 },
+      { smallWithdrawalMax: 2, mediumWithdrawalMax: 1 },
       { smallWithdrawalDelay: 2, mediumWithdrawalDelay: 1 },
-      { mediumWithdrawalDelay: 2, thresholdExceededWithdrawalDelay: 1 },
+      { mediumWithdrawalDelay: 2, largeWithdrawalDelay: 1 },
     ];
     for (const overrides of invalidOverrides) {
       expectInvalid(

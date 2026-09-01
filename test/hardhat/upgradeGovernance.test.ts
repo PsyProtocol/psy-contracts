@@ -39,6 +39,29 @@ async function deployTransparent(contractName: string, owner: string, initArgs: 
   return { proxy, proxyAdmin };
 }
 
+async function deployTransparentWithImplementation(
+  implementationName: string,
+  interfaceName: string,
+  owner: string,
+  initArgs: unknown[],
+): Promise<{ proxy: Contract; proxyAdmin: Contract }> {
+  const implementationFactory = await ethers.getContractFactory(implementationName);
+  const implementation = await implementationFactory.deploy();
+  await waitForContractDeployment(implementation);
+  const implementationAddress = await getContractAddress(implementation);
+  const initData = implementationFactory.interface.encodeFunctionData("initialize", initArgs);
+  const proxyFactory = await ethers.getContractFactory("TestTransparentUpgradeableProxy");
+  const proxyContract = await proxyFactory.deploy(implementationAddress, owner, initData);
+  await waitForContractDeployment(proxyContract);
+  const proxyAddress = await getContractAddress(proxyContract);
+  const adminAddress = getChecksumAddress(hexDataSlice(await readStorageAt(proxyAddress, ADMIN_SLOT), 12));
+  const proxyAdmin = (await ethers.getContractFactory("ProxyAdmin")).attach(adminAddress) as any;
+  const proxy = (await ethers.getContractFactory(interfaceName)).attach(proxyAddress) as any;
+  if (proxy.address == null) proxy.address = proxyAddress;
+  if (proxyAdmin.address == null) proxyAdmin.address = adminAddress;
+  return { proxy, proxyAdmin };
+}
+
 async function deploySystemWithTransparentBridge(owner: string, proposer: string) {
   const { provider, acl } = await deployAccessLayer(owner, proposer);
   const verifierFactory = await ethers.getContractFactory("MockGnarkVerifier");
@@ -75,6 +98,66 @@ async function deploySystemWithTransparentBridge(owner: string, proposer: string
 }
 
 describe("governance upgrade and rescue", function () {
+  it("migrates the deployed V3 flow-config mapping into V4 storage atomically", async function () {
+    const [owner] = await ethers.getSigners();
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Legacy", "LEG");
+    await waitForContractDeployment(token);
+    const tokenAddress = await getContractAddress(token);
+    const legacy = await deployTransparentWithImplementation(
+      "LegacyBridgeV3",
+      "LegacyBridgeV3",
+      owner.address,
+      [owner.address, owner.address, owner.address, owner.address],
+    );
+    await legacy.proxy.initializeFlowLimits([tokenAddress], [[
+      10, 20, 3, 40, 5, 60, 7, 8, 9, true,
+    ]]);
+
+    const nextConfig = defaultFlowConfig({
+      minDepositAmount: 11,
+      depositCap: 22,
+      smallWithdrawalMax: 33,
+      mediumWithdrawalMax: 44,
+      totalWithdrawalCap: 55,
+      smallWithdrawalDelay: 6,
+      mediumWithdrawalDelay: 7,
+      largeWithdrawalDelay: 8,
+    });
+    const executor = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(
+      owner.address, 1, 1, 1, 1,
+    );
+    await waitForContractDeployment(executor);
+    const bridgeFactory = await ethers.getContractFactory("Bridge");
+    const implementation = await bridgeFactory.deploy();
+    await waitForContractDeployment(implementation);
+    const initData = bridgeFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [
+      [tokenAddress],
+      [nextConfig],
+      [66],
+      tokenSetHash([tokenAddress]),
+      await getContractAddress(executor),
+    ]);
+    await legacy.proxyAdmin.upgradeAndCall(
+      legacy.proxy.address,
+      await getContractAddress(implementation),
+      initData,
+    );
+
+    const upgraded = bridgeFactory.attach(legacy.proxy.address) as any;
+    if (upgraded.address == null) upgraded.address = legacy.proxy.address;
+    const migrated = await upgraded.getTokenFlowConfig(tokenAddress);
+    expect(migrated.minDepositAmount).to.equal(11);
+    expect(migrated.depositCap).to.equal(22);
+    expect(migrated.smallWithdrawalMax).to.equal(33);
+    expect(migrated.mediumWithdrawalMax).to.equal(44);
+    expect(migrated.totalWithdrawalCap).to.equal(55);
+    expect(migrated.smallWithdrawalDelay).to.equal(6);
+    expect(migrated.mediumWithdrawalDelay).to.equal(7);
+    expect(migrated.largeWithdrawalDelay).to.equal(8);
+    expect(migrated.configured).to.equal(true);
+    expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(66);
+  });
+
   it("queues, executes, and cancels timelock actions", async function () {
     const [admin] = await ethers.getSigners();
     const factory = await ethers.getContractFactory("ExecutorWithTimelock");
@@ -158,7 +241,7 @@ describe("governance upgrade and rescue", function () {
     const tokenFactory = await ethers.getContractFactory("MockERC20");
     const depositToken = await tokenFactory.deploy("Deposit", "DEP");
     await waitForContractDeployment(depositToken);
-    const preservedConfig = defaultFlowConfig({ lifetimeWithdrawalThreshold: 777 });
+    const preservedConfig = defaultFlowConfig({ totalWithdrawalCap: 777 });
     const forceClaimExecutor = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(
       owner.address, 1, 1, 1, 1,
     );
@@ -169,6 +252,7 @@ describe("governance upgrade and rescue", function () {
     await waitForContractDeployment(bridgeImplementation);
     const bridgeInitData = bridgeFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [depositToken.address],
+      [preservedConfig],
       [1234],
       tokenSetHash([depositToken.address]),
       await getContractAddress(forceClaimExecutor),
@@ -204,8 +288,8 @@ describe("governance upgrade and rescue", function () {
     const untouchedNullifier = hexZeroPad("0xcd", 32);
 
     expect(await upgradedBridge.getRevision()).to.equal(4);
-    expect((await upgradedBridge.getTokenFlowConfig(depositToken.address)).lifetimeWithdrawalThreshold).to.equal(777);
-    expect(await upgradedBridge.totalRegisteredWithdrawalAmount(depositToken.address)).to.equal(1234);
+    expect((await upgradedBridge.getTokenFlowConfig(depositToken.address)).totalWithdrawalCap).to.equal(777);
+    expect(await upgradedBridge.totalWithdrawalAmount(depositToken.address)).to.equal(1234);
     expect(await upgradedBridge.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
     expect(await upgradedBridge.withdrawalTotalsTokenSetHash()).to.equal(tokenSetHash([depositToken.address]));
     await expect(
@@ -259,7 +343,7 @@ describe("governance upgrade and rescue", function () {
     const token = await tokenFactory.deploy("Mock", "MOCK");
     await waitForContractDeployment(token);
     const tokenAddress = await getContractAddress(token);
-    await bridge.proxy.initializeFlowLimits([tokenAddress], [defaultFlowConfig({ lifetimeWithdrawalThreshold: 555 })]);
+    await bridge.proxy.initializeFlowLimits([tokenAddress], [defaultFlowConfig({ totalWithdrawalCap: 555 })]);
     const forceClaimExecutor = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(
       owner.address, 1, 1, 1, 1,
     );
@@ -269,6 +353,7 @@ describe("governance upgrade and rescue", function () {
     await waitForContractDeployment(implementation);
     const initData = implementationFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [tokenAddress],
+      [defaultFlowConfig({ totalWithdrawalCap: 555 })],
       [987],
       tokenSetHash([tokenAddress]),
       await getContractAddress(forceClaimExecutor),
@@ -281,8 +366,8 @@ describe("governance upgrade and rescue", function () {
     const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
     if (upgraded.address == null) upgraded.address = bridge.proxy.address;
     expect(await upgraded.getRevision()).to.equal(4);
-    expect((await upgraded.getTokenFlowConfig(tokenAddress)).lifetimeWithdrawalThreshold).to.equal(555);
-    expect(await upgraded.totalRegisteredWithdrawalAmount(tokenAddress)).to.equal(987);
+    expect((await upgraded.getTokenFlowConfig(tokenAddress)).totalWithdrawalCap).to.equal(555);
+    expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(987);
     expect(await upgraded.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
     await token.mint(upgraded.address, 1000);
 

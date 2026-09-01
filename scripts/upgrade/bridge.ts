@@ -44,17 +44,12 @@ function loadAuthoritativeV3FlowTokens(): string[] {
 }
 const AMOUNT_FIELDS = [
   "minDepositAmount",
-  "depositBucketCapacity",
-  "depositRefillPerSecond",
-  "custodyCap",
+  "depositCap",
   "smallWithdrawalMax",
-  "lifetimeWithdrawalThreshold",
+  "mediumWithdrawalMax",
+  "totalWithdrawalCap",
 ] as const;
-const DELAY_FIELDS = [
-  "smallWithdrawalDelay",
-  "mediumWithdrawalDelay",
-  "thresholdExceededWithdrawalDelay",
-] as const;
+const DELAY_FIELDS = ["smallWithdrawalDelay", "mediumWithdrawalDelay", "largeWithdrawalDelay"] as const;
 const CONFIG_FIELDS: Record<string, true> = Object.fromEntries(
   [...AMOUNT_FIELDS, ...DELAY_FIELDS, "configured"].map((field) => [field, true]),
 );
@@ -133,11 +128,10 @@ export function loadBridgeFlowLimitManifest(configPath: string): BridgeFlowLimit
     const value = (field: FlowLimitUintField) => ethers.BigNumber.from(output[field]);
     if (
       value("minDepositAmount").isZero()
-      || value("minDepositAmount").gt(value("depositBucketCapacity"))
-      || value("depositRefillPerSecond").isZero()
-      || value("custodyCap").lt(value("minDepositAmount"))
+      || value("depositCap").lt(value("minDepositAmount"))
+      || value("smallWithdrawalMax").gt(value("mediumWithdrawalMax"))
       || value("smallWithdrawalDelay").gt(value("mediumWithdrawalDelay"))
-      || value("mediumWithdrawalDelay").gt(value("thresholdExceededWithdrawalDelay"))
+      || value("mediumWithdrawalDelay").gt(value("largeWithdrawalDelay"))
     ) {
       throw new Error(`configs[${index}] violates Bridge TokenFlowConfig invariants`);
     }
@@ -162,16 +156,11 @@ export async function getBridgeWithdrawalTotalsInitData(): Promise<string> {
   if (!configPath) throw new Error("BRIDGE_FLOW_LIMITS_FILE is required for the atomic Bridge V4 upgrade");
   const manifest = loadBridgeFlowLimitManifest(configPath);
   assertCompleteV3FlowTokenSet(manifest.tokens, loadAuthoritativeV3FlowTokens());
-  const bridgeDeployment = await deployments.get("Bridge");
-  const bridge = await ethers.getContractAt("Bridge", bridgeDeployment.address);
-  for (const token of manifest.tokens) {
-    const config = await bridge.getTokenFlowConfig(token);
-    if (!config.configured) throw new Error(`Bridge token ${token} is not configured on-chain`);
-  }
   const timelock = await deployments.get("ExecutorWithTimelock");
   const bridgeFactory = await ethers.getContractFactory("Bridge");
   return bridgeFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [
     manifest.tokens,
+    manifest.configs,
     manifest.historicalWithdrawalTotals,
     tokenSetHash(manifest.tokens),
     timelock.address,

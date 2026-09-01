@@ -69,7 +69,7 @@ describe("governance operation tooling", function () {
     const token = ethers.Wallet.createRandom().address;
     await configureFlowToken(bridge, token);
     const config = Object.fromEntries(
-      Object.entries(defaultFlowConfig({ minDepositAmount: 25, depositBucketCapacity: 2_000_000_000_000n }))
+      Object.entries(defaultFlowConfig({ minDepositAmount: 25, depositCap: 2_000_000_000_000n }))
         .map(([key, value]) => [key, typeof value === "boolean" ? value : value.toString()]),
     ) as any;
 
@@ -117,13 +117,14 @@ describe("governance operation tooling", function () {
     expect(decoded.actionHash).to.match(/^0x[0-9a-f]{64}$/);
 
     const bridgeUpgradeInterface = new ethers.utils.Interface([
-      "function initializeWithdrawalTotals(address[] configuredTokens,uint256[] historicalTotals,bytes32 expectedTokenSetHash,address forceClaimExecutor)",
+      "function initializeWithdrawalTotals(address[] configuredTokens,(uint128 minDepositAmount,uint128 depositCap,uint128 smallWithdrawalMax,uint128 mediumWithdrawalMax,uint128 totalWithdrawalCap,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 largeWithdrawalDelay,bool configured)[] configs,uint256[] historicalTotals,bytes32 expectedTokenSetHash,address forceClaimExecutor)",
     ]);
     const proxyAdminInterface = new ethers.utils.Interface([
       "function upgradeAndCall(address proxy,address implementation,bytes data)",
     ]);
     const initData = bridgeUpgradeInterface.encodeFunctionData("initializeWithdrawalTotals", [
       [target],
+      [defaultFlowConfig()],
       [123],
       ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["address[]"], [[target]])),
       timelock,

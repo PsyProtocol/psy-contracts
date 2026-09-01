@@ -74,7 +74,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32[32] depositFrontier;
     }
 
-    struct TokenFlowConfig {
+    struct V3TokenFlowConfig {
         uint128 minDepositAmount;
         uint128 depositBucketCapacity;
         uint128 depositRefillPerSecond;
@@ -87,9 +87,16 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bool configured;
     }
 
-    struct BucketState {
-        uint128 available;
-        uint64 lastUpdated;
+    struct TokenFlowConfig {
+        uint128 minDepositAmount;
+        uint128 depositCap;
+        uint128 smallWithdrawalMax;
+        uint128 mediumWithdrawalMax;
+        uint128 totalWithdrawalCap;
+        uint32 smallWithdrawalDelay;
+        uint32 mediumWithdrawalDelay;
+        uint32 largeWithdrawalDelay;
+        bool configured;
     }
 
     struct PendingWithdrawal {
@@ -97,51 +104,6 @@ contract Bridge is Initializable, OwnableUpgradeable {
         address recipient;
         uint256 amount;
         uint64 claimableAt;
-    }
-
-    enum DepositStatus {
-        Accepted,
-        NotConfigured,
-        Paused,
-        BelowMinimum,
-        RateLimited,
-        CustodyCapExceeded
-    }
-
-    struct DepositPreview {
-        DepositStatus status;
-        uint256 available;
-        uint64 availableAt;
-        uint256 projectedCustody;
-        bytes32 configHash;
-    }
-
-    enum WithdrawalStatus {
-        Accepted,
-        NotConfigured,
-        RegistrationPaused,
-        InvalidAmount
-    }
-
-    enum WithdrawalTier {
-        Small,
-        Medium,
-        LifetimeThresholdExceeded
-    }
-
-    enum WithdrawalProjectionStatus {
-        Valid,
-        InvalidAmount,
-        TotalOverflow
-    }
-
-    struct WithdrawalQuote {
-        WithdrawalStatus status;
-        WithdrawalTier tier;
-        uint64 claimableAt;
-        bytes32 configHash;
-        uint256 currentTotalRegisteredAmount;
-        uint256 projectedTotalRegisteredAmount;
     }
 
     address public addressesProvider;
@@ -156,15 +118,16 @@ contract Bridge is Initializable, OwnableUpgradeable {
     address public depositBatchVerifier;
     address public withdrawalClaimVerifier;
     // V3 storage is append-only after withdrawalClaimVerifier.
-    mapping(address => TokenFlowConfig) private _tokenFlowConfigs;
-    mapping(address => BucketState) private _depositBuckets;
+    mapping(address => V3TokenFlowConfig) private _v3TokenFlowConfigs;
+    mapping(address => bytes32) private _reservedDepositBucketSlot;
     mapping(bytes32 => PendingWithdrawal) public pendingWithdrawals;
     mapping(address => uint8) private _tokenPauseFlags;
     uint8 private _globalPauseFlags;
     // V4 storage is append-only after current V3 storage.
-    mapping(address => uint256) private _totalRegisteredWithdrawalAmounts;
+    mapping(address => uint256) private _totalWithdrawalAmounts;
     address public withdrawalForceClaimExecutor;
     bytes32 public withdrawalTotalsTokenSetHash;
+    mapping(address => TokenFlowConfig) private _tokenFlowConfigs;
 
     event DepositRecorded(
         uint32 indexed index,
@@ -245,8 +208,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error TokenNotConfigured(address token);
     error DepositsPaused(address token);
     error DepositBelowMinimum(address token, uint256 amount, uint256 minimum);
-    error DepositRateLimited(address token, uint256 available, uint64 availableAt);
-    error CustodyCapExceeded(address token, uint256 custody, uint256 cap);
+    error DepositCapExceeded(address token, uint256 custody, uint256 cap);
     error WithdrawalRegistrationPaused(address token);
     error ClaimableAtOverflow();
     error PendingWithdrawalNotFound(bytes32 nonce);
@@ -255,7 +217,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error InvalidPauseFlags(uint8 flags);
     error BridgeNotFullyPaused();
     error UnauthorizedFlowInitializer();
-    error TotalRegisteredWithdrawalAmountOverflow(address token, uint256 currentTotal, uint256 amount);
+    error TotalWithdrawalAmountOverflow(address token, uint256 currentTotal, uint256 amount);
     error InvalidWithdrawalForceClaimExecutor(address executor);
     error UnauthorizedWithdrawalForceClaimExecutor(address caller);
     error WithdrawalTotalsTokenSetHashMismatch(bytes32 expected, bytes32 actual);
@@ -295,14 +257,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
         onlyFlowInitializer
     {
         if (tokens.length == 0 || tokens.length != configs.length) revert InvalidArrayLength();
-        uint64 nowTimestamp = uint64(block.timestamp);
         for (uint256 i = 0; i < tokens.length; ++i) {
             for (uint256 j = 0; j < i; ++j) {
                 if (tokens[j] == tokens[i]) revert DuplicateToken(tokens[i]);
             }
             _validateFlowConfig(tokens[i], configs[i]);
             _tokenFlowConfigs[tokens[i]] = configs[i];
-            _depositBuckets[tokens[i]] = BucketState(configs[i].depositBucketCapacity, nowTimestamp);
             emit TokenFlowConfigUpdated(
                 tokens[i], bytes32(0), keccak256(abi.encode(tokens[i], configs[i]))
             );
@@ -310,13 +270,15 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
     function initializeWithdrawalTotals(
         address[] calldata configuredTokens,
+        TokenFlowConfig[] calldata configs,
         uint256[] calldata historicalTotals,
         bytes32 expectedTokenSetHash,
         address forceClaimExecutor
     ) external reinitializer(4) onlyFlowInitializer {
-        if (configuredTokens.length == 0 || configuredTokens.length != historicalTotals.length) {
-            revert InvalidArrayLength();
-        }
+        if (
+            configuredTokens.length == 0 || configuredTokens.length != configs.length
+                || configuredTokens.length != historicalTotals.length
+        ) revert InvalidArrayLength();
         if (forceClaimExecutor == address(0) || forceClaimExecutor.code.length == 0) {
             revert InvalidWithdrawalForceClaimExecutor(forceClaimExecutor);
         }
@@ -328,22 +290,28 @@ contract Bridge is Initializable, OwnableUpgradeable {
         }
         for (uint256 i = 0; i < sortedTokens.length; ++i) {
             if (i != 0 && sortedTokens[i - 1] == sortedTokens[i]) revert DuplicateToken(sortedTokens[i]);
-            if (!_tokenFlowConfigs[sortedTokens[i]].configured) revert TokenNotConfigured(sortedTokens[i]);
         }
         bytes32 actualTokenSetHash = keccak256(abi.encode(sortedTokens));
         if (expectedTokenSetHash != actualTokenSetHash) {
             revert WithdrawalTotalsTokenSetHashMismatch(expectedTokenSetHash, actualTokenSetHash);
         }
         for (uint256 i = 0; i < configuredTokens.length; ++i) {
-            _totalRegisteredWithdrawalAmounts[configuredTokens[i]] = historicalTotals[i];
-            emit WithdrawalTotalInitialized(configuredTokens[i], historicalTotals[i]);
+            address token = configuredTokens[i];
+            TokenFlowConfig storage currentConfig = _tokenFlowConfigs[token];
+            if (!_v3TokenFlowConfigs[token].configured && !currentConfig.configured) revert TokenNotConfigured(token);
+            _validateFlowConfig(token, configs[i]);
+            bytes32 oldHash = currentConfig.configured ? keccak256(abi.encode(token, currentConfig)) : bytes32(0);
+            _tokenFlowConfigs[token] = configs[i];
+            _totalWithdrawalAmounts[token] = historicalTotals[i];
+            emit TokenFlowConfigUpdated(token, oldHash, keccak256(abi.encode(token, configs[i])));
+            emit WithdrawalTotalInitialized(token, historicalTotals[i]);
         }
         withdrawalTotalsTokenSetHash = actualTokenSetHash;
         withdrawalForceClaimExecutor = forceClaimExecutor;
     }
 
-    function totalRegisteredWithdrawalAmount(address token) external view returns (uint256) {
-        return _totalRegisteredWithdrawalAmounts[token];
+    function totalWithdrawalAmount(address token) external view returns (uint256) {
+        return _totalWithdrawalAmounts[token];
     }
 
     function getTokenFlowConfig(address token) external view returns (TokenFlowConfig memory) {
@@ -364,19 +332,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 oldHash = getTokenFlowConfigHash(token);
         if (expectedConfigHash != oldHash) revert StaleConfigHash(expectedConfigHash, oldHash);
 
-        TokenFlowConfig storage current = _tokenFlowConfigs[token];
-        if (current.configured) {
-            uint128 depositAvailable = _materializeBucket(
-                _depositBuckets[token], current.depositBucketCapacity, current.depositRefillPerSecond
-            );
-            _tokenFlowConfigs[token] = next;
-            _depositBuckets[token].available =
-                depositAvailable > next.depositBucketCapacity ? next.depositBucketCapacity : depositAvailable;
-        } else {
-            uint64 nowTimestamp = uint64(block.timestamp);
-            _tokenFlowConfigs[token] = next;
-            _depositBuckets[token] = BucketState(next.depositBucketCapacity, nowTimestamp);
-        }
+        _tokenFlowConfigs[token] = next;
 
         emit TokenFlowConfigUpdated(token, oldHash, keccak256(abi.encode(token, next)));
     }
@@ -637,21 +593,10 @@ contract Bridge is Initializable, OwnableUpgradeable {
             revert DepositBelowMinimum(token, amount, config.minDepositAmount);
         }
 
-        BucketState storage bucket = _depositBuckets[token];
-        uint128 available =
-            _materializeBucket(bucket, config.depositBucketCapacity, config.depositRefillPerSecond);
-        if (amount > available) {
-            revert DepositRateLimited(
-                token,
-                available,
-                _availabilityTimestamp(amount - available, config.depositRefillPerSecond)
-            );
-        }
         uint256 custody = _custodyBalance(token);
-        if (custody > config.custodyCap) {
-            revert CustodyCapExceeded(token, custody, config.custodyCap);
+        if (custody > config.depositCap) {
+            revert DepositCapExceeded(token, custody, config.depositCap);
         }
-        bucket.available = available - uint128(amount);
 
         return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
     }
@@ -859,75 +804,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
         emit WithdrawalClaimed(nonce, pending.recipient, pending.token, pending.amount);
     }
 
-    function previewDeposit(address token, uint256 amount) external view returns (DepositPreview memory preview) {
-        TokenFlowConfig storage config = _tokenFlowConfigs[token];
-        preview.configHash = getTokenFlowConfigHash(token);
-        if (!config.configured) {
-            preview.status = DepositStatus.NotConfigured;
-            return preview;
-        }
 
-        BucketState memory bucket = _previewBucket(
-            _depositBuckets[token], config.depositBucketCapacity, config.depositRefillPerSecond
-        );
-        preview.available = bucket.available;
-        if ((_effectivePauseFlags(token) & PAUSE_DEPOSITS) != 0) {
-            preview.status = DepositStatus.Paused;
-            return preview;
-        }
-        if (amount < config.minDepositAmount) {
-            preview.status = DepositStatus.BelowMinimum;
-            return preview;
-        }
-        preview.projectedCustody = _custodyBalance(token) + amount;
-        if (amount > bucket.available) {
-            preview.status = DepositStatus.RateLimited;
-            preview.availableAt =
-                _availabilityTimestamp(amount - bucket.available, config.depositRefillPerSecond);
-            return preview;
-        }
-        if (preview.projectedCustody > config.custodyCap) {
-            preview.status = DepositStatus.CustodyCapExceeded;
-            return preview;
-        }
-        preview.status = DepositStatus.Accepted;
-        preview.availableAt = uint64(block.timestamp);
-    }
 
-    function previewWithdrawal(address token, uint256 amount)
-        external
-        view
-        returns (WithdrawalQuote memory preview)
-    {
-        TokenFlowConfig storage config = _tokenFlowConfigs[token];
-        preview.configHash = getTokenFlowConfigHash(token);
-        if (!config.configured) {
-            preview.status = WithdrawalStatus.NotConfigured;
-            return preview;
-        }
-        if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
-            preview.status = WithdrawalStatus.RegistrationPaused;
-            return preview;
-        }
-        preview.currentTotalRegisteredAmount = _totalRegisteredWithdrawalAmounts[token];
-        (WithdrawalProjectionStatus projectionStatus, uint256 projectedTotal) =
-            _projectWithdrawalTotal(preview.currentTotalRegisteredAmount, amount);
-        if (projectionStatus != WithdrawalProjectionStatus.Valid) {
-            preview.status = WithdrawalStatus.InvalidAmount;
-            return preview;
-        }
-        preview.projectedTotalRegisteredAmount = projectedTotal;
-
-        (preview.tier, preview.claimableAt) = _withdrawalTierAndTimestamp(config, amount, projectedTotal);
-        preview.status = WithdrawalStatus.Accepted;
-    }
-
-    function getMaterializedDepositBucket(address token) external view returns (BucketState memory deposit) {
-        TokenFlowConfig storage config = _tokenFlowConfigs[token];
-        deposit = _previewBucket(
-            _depositBuckets[token], config.depositBucketCapacity, config.depositRefillPerSecond
-        );
-    }
 
     function _registerPendingWithdrawal(bytes32 nonce, address token, address recipient, uint256 amount) internal {
         TokenFlowConfig storage config = _tokenFlowConfigs[token];
@@ -935,83 +813,39 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
             revert WithdrawalRegistrationPaused(token);
         }
-        uint256 currentTotal = _totalRegisteredWithdrawalAmounts[token];
-        (WithdrawalProjectionStatus projectionStatus, uint256 projectedTotal) =
-            _projectWithdrawalTotal(currentTotal, amount);
-        if (projectionStatus == WithdrawalProjectionStatus.InvalidAmount) {
-            revert InvalidWithdrawalAmount(amount);
-        }
-        if (projectionStatus == WithdrawalProjectionStatus.TotalOverflow) {
-            revert TotalRegisteredWithdrawalAmountOverflow(token, currentTotal, amount);
-        }
-        (, uint64 claimableAt) = _withdrawalTierAndTimestamp(config, amount, projectedTotal);
-        _totalRegisteredWithdrawalAmounts[token] = projectedTotal;
-        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, claimableAt);
-        emit WithdrawalPendingCreated(nonce, token, recipient, amount, claimableAt);
-    }
+        if (amount == 0 || amount >= GOLDILOCKS_PRIME) revert InvalidWithdrawalAmount(amount);
 
-    function _projectWithdrawalTotal(uint256 currentTotal, uint256 amount)
-        internal
-        pure
-        returns (WithdrawalProjectionStatus status, uint256 projectedTotal)
-    {
-        if (amount == 0 || amount >= GOLDILOCKS_PRIME) return (WithdrawalProjectionStatus.InvalidAmount, 0);
-        if (amount > type(uint256).max - currentTotal) return (WithdrawalProjectionStatus.TotalOverflow, 0);
-        return (WithdrawalProjectionStatus.Valid, currentTotal + amount);
-    }
+        uint256 currentTotal = _totalWithdrawalAmounts[token];
+        if (amount > type(uint256).max - currentTotal) {
+            revert TotalWithdrawalAmountOverflow(token, currentTotal, amount);
+        }
+        uint256 nextTotal = currentTotal + amount;
 
-    function _withdrawalTierAndTimestamp(
-        TokenFlowConfig storage config,
-        uint256 amount,
-        uint256 projectedTotal
-    ) internal view returns (WithdrawalTier tier, uint64 claimableAt) {
         uint32 delay;
-        if (projectedTotal > config.lifetimeWithdrawalThreshold) {
-            tier = WithdrawalTier.LifetimeThresholdExceeded;
-            delay = config.thresholdExceededWithdrawalDelay;
-        } else if (amount <= config.smallWithdrawalMax) {
-            tier = WithdrawalTier.Small;
-            delay = config.smallWithdrawalDelay;
-        } else {
-            tier = WithdrawalTier.Medium;
+        if (amount > config.mediumWithdrawalMax || nextTotal > config.totalWithdrawalCap) {
+            delay = config.largeWithdrawalDelay;
+        } else if (amount > config.smallWithdrawalMax) {
             delay = config.mediumWithdrawalDelay;
+        } else {
+            delay = config.smallWithdrawalDelay;
         }
-        uint256 timestamp = block.timestamp + delay;
-        if (timestamp > type(uint64).max) revert ClaimableAtOverflow();
-        claimableAt = uint64(timestamp);
+        uint256 claimTime = block.timestamp + delay;
+        if (claimTime > type(uint64).max) revert ClaimableAtOverflow();
+
+        _totalWithdrawalAmounts[token] = nextTotal;
+        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
+        emit WithdrawalPendingCreated(nonce, token, recipient, amount, uint64(claimTime));
     }
 
     function _validateFlowConfig(address token, TokenFlowConfig calldata config) internal pure {
         if (
-            !config.configured || config.minDepositAmount == 0
-                || config.minDepositAmount > config.depositBucketCapacity
-                || config.depositRefillPerSecond == 0 || config.custodyCap < config.minDepositAmount
+            !config.configured || config.minDepositAmount == 0 || config.depositCap < config.minDepositAmount
+                || config.smallWithdrawalMax > config.mediumWithdrawalMax
                 || config.smallWithdrawalDelay > config.mediumWithdrawalDelay
-                || config.mediumWithdrawalDelay > config.thresholdExceededWithdrawalDelay
+                || config.mediumWithdrawalDelay > config.largeWithdrawalDelay
         ) revert InvalidFlowConfig(token);
     }
 
-    function _materializeBucket(BucketState storage bucket, uint128 capacity, uint128 refillPerSecond)
-        internal
-        returns (uint128 available)
-    {
-        uint256 elapsed = block.timestamp - bucket.lastUpdated;
-        uint256 materialized = uint256(bucket.available) + elapsed * refillPerSecond;
-        available = materialized > capacity ? capacity : uint128(materialized);
-        bucket.available = available;
-        bucket.lastUpdated = uint64(block.timestamp);
-    }
-
-    function _previewBucket(BucketState storage bucket, uint128 capacity, uint128 refillPerSecond)
-        internal
-        view
-        returns (BucketState memory preview)
-    {
-        uint256 elapsed = block.timestamp - bucket.lastUpdated;
-        uint256 materialized = uint256(bucket.available) + elapsed * refillPerSecond;
-        preview.available = materialized > capacity ? capacity : uint128(materialized);
-        preview.lastUpdated = uint64(block.timestamp);
-    }
 
     function _custodyBalance(address token) internal view returns (uint256) {
         address custodyToken = token == address(0) ? _nativeWithdrawalAsset() : token;
@@ -1030,15 +864,6 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if (_globalPauseFlags != ALL_PAUSE_FLAGS) revert BridgeNotFullyPaused();
     }
 
-    function _availabilityTimestamp(uint256 shortfall, uint128 refillPerSecond)
-        internal
-        view
-        returns (uint64)
-    {
-        uint256 waitSeconds = (shortfall + refillPerSecond - 1) / refillPerSecond;
-        uint256 timestamp = block.timestamp + waitSeconds;
-        return timestamp > type(uint64).max ? type(uint64).max : uint64(timestamp);
-    }
 
     function _addressToBytes32(address a) internal pure returns (bytes32) {
         return bytes32(uint256(uint160(a)));

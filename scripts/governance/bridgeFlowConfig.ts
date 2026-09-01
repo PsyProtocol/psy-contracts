@@ -5,10 +5,9 @@ import { DRY_RUN, DryRunExecutor, GLOBAL_OVERRIDES } from "../../helpers/hardhat
 import { FlowLimitConfig, getTokenFlowConfigFromManifest } from "../upgrade/bridge";
 
 const TOKEN_FLOW_CONFIG_TUPLE =
-  "tuple(uint128 minDepositAmount,uint128 depositBucketCapacity," +
-  "uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax," +
-  "uint128 lifetimeWithdrawalThreshold," +
-  "uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 thresholdExceededWithdrawalDelay,bool configured)";
+  "tuple(uint128 minDepositAmount,uint128 depositCap,uint128 smallWithdrawalMax," +
+  "uint128 mediumWithdrawalMax,uint128 totalWithdrawalCap," +
+  "uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 largeWithdrawalDelay,bool configured)";
 
 export type TokenFlowConfigUpdate = {
   target: string;

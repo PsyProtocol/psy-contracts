@@ -72,14 +72,13 @@ export function tokenSetHash(tokens: string[]): string {
 export function defaultFlowConfig(overrides: Record<string, unknown> = {}) {
   return {
     minDepositAmount: 1,
-    depositBucketCapacity: 1_000_000_000_000n,
-    depositRefillPerSecond: 1_000_000,
-    custodyCap: 10_000_000_000_000n,
+    depositCap: 10_000_000_000_000n,
     smallWithdrawalMax: 1_000,
-    lifetimeWithdrawalThreshold: 10_000,
+    mediumWithdrawalMax: 5_000,
+    totalWithdrawalCap: 10_000,
     smallWithdrawalDelay: 0,
     mediumWithdrawalDelay: 3600,
-    thresholdExceededWithdrawalDelay: 86400,
+    largeWithdrawalDelay: 86400,
     configured: true,
     ...overrides,
   };
@@ -87,7 +86,9 @@ export function defaultFlowConfig(overrides: Record<string, unknown> = {}) {
 
 export async function configureFlowToken(bridge: any, token: string, overrides: Record<string, unknown> = {}) {
   const expectedHash = await bridge.getTokenFlowConfigHash(token);
-  await bridge.setTokenFlowConfig(token, defaultFlowConfig(overrides), expectedHash);
+  const config = defaultFlowConfig(overrides);
+  await bridge.setTokenFlowConfig(token, config, expectedHash);
+  return config;
 }
 
 export async function deployAccessLayer(admin: string, proposer?: string) {

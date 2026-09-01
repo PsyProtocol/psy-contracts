@@ -8,14 +8,13 @@ import { loadBridgeFlowLimitManifest, tokenSetHash, type FlowLimitConfig } from 
 function localFlowLimitConfig(): FlowLimitConfig {
   return {
     minDepositAmount: "1",
-    depositBucketCapacity: "1000000000000000000000000",
-    depositRefillPerSecond: "1000000000000000000",
-    custodyCap: "10000000000000000000000000",
+    depositCap: "10000000000000000000000000",
     smallWithdrawalMax: "10000000000000000000",
-    lifetimeWithdrawalThreshold: "1000000000000000000000",
+    mediumWithdrawalMax: "100000000000000000000",
+    totalWithdrawalCap: "1000000000000000000000",
     smallWithdrawalDelay: "0",
     mediumWithdrawalDelay: "0",
-    thresholdExceededWithdrawalDelay: "0",
+    largeWithdrawalDelay: "0",
     configured: true,
   };
 }
@@ -70,6 +69,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     { from: cfg.admin || deployer, log: true },
     "initializeWithdrawalTotals",
     tokens,
+    configs,
     historicalWithdrawalTotals,
     tokenSetHash(tokens),
     timelock.address,

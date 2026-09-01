@@ -5,14 +5,13 @@
   "configs": [
     {
       "minDepositAmount": "10000000000000000",
-      "depositBucketCapacity": "1000000000000000000000",
-      "depositRefillPerSecond": "100000000000000000",
-      "custodyCap": "10000000000000000000000",
+      "depositCap": "10000000000000000000000",
       "smallWithdrawalMax": "10000000000000000000",
-      "lifetimeWithdrawalThreshold": "100000000000000000000",
+      "mediumWithdrawalMax": "50000000000000000000",
+      "totalWithdrawalCap": "100000000000000000000",
       "smallWithdrawalDelay": "900",
       "mediumWithdrawalDelay": "21600",
-      "thresholdExceededWithdrawalDelay": "172800",
+      "largeWithdrawalDelay": "172800",
       "configured": true
     }
   ],
