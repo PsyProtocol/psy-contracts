@@ -3,7 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { deployments, ethers, network } from "hardhat";
-import { buildTokenFlowConfigUpdate } from "../../scripts/governance/bridgeFlowConfig";
+import { buildForceWithdrawalClaim, buildTokenFlowConfigUpdate } from "../../scripts/governance/bridgeFlowConfig";
 import { buildPermissionMigration } from "../../scripts/governance/permissions";
 import { decodeGovernanceTransaction, decodeSafeProposalFile } from "../../helpers/transaction-decoder";
 import { getTimeLockData, getTimelockActionStatus } from "../../helpers/timelock-helpers";
@@ -69,7 +69,7 @@ describe("governance operation tooling", function () {
     const token = ethers.Wallet.createRandom().address;
     await configureFlowToken(bridge, token);
     const config = Object.fromEntries(
-      Object.entries(defaultFlowConfig({ minDepositAmount: 25, depositCapacity: 2_000_000_000_000n }))
+      Object.entries(defaultFlowConfig({ minDepositAmount: 25, depositBucketCapacity: 2_000_000_000_000n }))
         .map(([key, value]) => [key, typeof value === "boolean" ? value : value.toString()]),
     ) as any;
 
@@ -82,6 +82,16 @@ describe("governance operation tooling", function () {
 
     await bridge.setTokenFlowConfig(decoded.token, decoded.next, decoded.expectedConfigHash);
     expect(await bridge.getTokenFlowConfigHash(token)).to.equal(update.nextConfigHash);
+  });
+
+  it("builds and decodes a governance pending-withdrawal claim", async function () {
+    const [owner] = await ethers.getSigners();
+    const { bridge } = await deployCoreSystem(owner.address, owner.address);
+    const claim = buildForceWithdrawalClaim(bridge, "0x1234");
+    const decoded = bridge.interface.decodeFunctionData("forceClaimWithdrawal", claim.data);
+    expect(decoded.nonce).to.equal(ethers.utils.hexZeroPad("0x1234", 32));
+    expect(decodeGovernanceTransaction(claim.target, claim.data).functionName)
+      .to.equal("forceClaimWithdrawal");
   });
 
   it("round-trips a nested Timelock payload and Safe proposal file", async function () {
@@ -107,21 +117,23 @@ describe("governance operation tooling", function () {
     expect(decoded.actionHash).to.match(/^0x[0-9a-f]{64}$/);
 
     const bridgeUpgradeInterface = new ethers.utils.Interface([
-      "function initializeFlowLimits(address[] tokens,(uint128 minDepositAmount,uint128 depositCapacity,uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax,uint128 mediumWithdrawalMax,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 largeWithdrawalDelay,bool configured)[] configs)",
+      "function initializeWithdrawalTotals(address[] configuredTokens,uint256[] historicalTotals,bytes32 expectedTokenSetHash,address forceClaimExecutor)",
     ]);
     const proxyAdminInterface = new ethers.utils.Interface([
       "function upgradeAndCall(address proxy,address implementation,bytes data)",
     ]);
-    const initData = bridgeUpgradeInterface.encodeFunctionData("initializeFlowLimits", [
+    const initData = bridgeUpgradeInterface.encodeFunctionData("initializeWithdrawalTotals", [
       [target],
-      [defaultFlowConfig()],
+      [123],
+      ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["address[]"], [[target]])),
+      timelock,
     ]);
     const upgradeData = proxyAdminInterface.encodeFunctionData("upgradeAndCall", [
       target,
       ethers.Wallet.createRandom().address,
       initData,
     ]);
-    expect(decodeGovernanceTransaction(timelock, upgradeData).inner?.functionName).to.equal("initializeFlowLimits");
+    expect(decodeGovernanceTransaction(timelock, upgradeData).inner?.functionName).to.equal("initializeWithdrawalTotals");
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "psy-safe-proposal-"));
     const file = path.join(dir, "proposal.json");

@@ -3,19 +3,19 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { ethers } from "hardhat";
 import { protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
 import { loadDeployConfig } from "./deploy-config";
-import { loadBridgeFlowLimitManifest, type FlowLimitConfig } from "../scripts/upgrade/bridge";
+import { loadBridgeFlowLimitManifest, tokenSetHash, type FlowLimitConfig } from "../scripts/upgrade/bridge";
 
 function localFlowLimitConfig(): FlowLimitConfig {
   return {
     minDepositAmount: "1",
-    depositCapacity: "1000000000000000000000000",
+    depositBucketCapacity: "1000000000000000000000000",
     depositRefillPerSecond: "1000000000000000000",
     custodyCap: "10000000000000000000000000",
     smallWithdrawalMax: "10000000000000000000",
-    mediumWithdrawalMax: "1000000000000000000000",
+    lifetimeWithdrawalThreshold: "1000000000000000000000",
     smallWithdrawalDelay: "0",
     mediumWithdrawalDelay: "0",
-    largeWithdrawalDelay: "0",
+    thresholdExceededWithdrawalDelay: "0",
     configured: true,
   };
 }
@@ -33,11 +33,14 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const configPath = process.env.BRIDGE_FLOW_LIMITS_FILE;
   let tokens: string[];
   let configs: FlowLimitConfig[];
+  let historicalWithdrawalTotals: string[];
 
+  const timelock = await deployments.get("ExecutorWithTimelock");
   if (configPath) {
     const manifest = loadBridgeFlowLimitManifest(configPath);
     tokens = manifest.tokens;
     configs = manifest.configs;
+    historicalWithdrawalTotals = manifest.historicalWithdrawalTotals;
   } else if (network.name === "hardhat" || network.name === "localhost") {
     const protocolNetwork = resolveProtocolNetworkName(network.name);
     const deployedTokens: string[] = [];
@@ -51,6 +54,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     }
     tokens = [ethers.constants.AddressZero, ...deployedTokens];
     configs = tokens.map(() => localFlowLimitConfig());
+    historicalWithdrawalTotals = tokens.map(() => "0");
   } else {
     throw new Error("BRIDGE_FLOW_LIMITS_FILE is required for a non-local Bridge deployment");
   }
@@ -61,8 +65,17 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     tokens,
     configs,
   );
+  await execute(
+    "Bridge",
+    { from: cfg.admin || deployer, log: true },
+    "initializeWithdrawalTotals",
+    tokens,
+    historicalWithdrawalTotals,
+    tokenSetHash(tokens),
+    timelock.address,
+  );
 };
 
 export default func;
 func.tags = ["bridge_flow_limits"];
-func.dependencies = ["bridge", "gateways"];
+func.dependencies = ["bridge", "gateways", "timelock"];

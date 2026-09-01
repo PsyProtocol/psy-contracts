@@ -37,6 +37,14 @@ contract WithdrawalBatchHashVerifier {
     }
 }
 
+contract RevertingTransferToken is MockERC20 {
+    constructor() MockERC20("Revert", "RVT") {}
+
+    function transfer(address, uint256) public pure override returns (bool) {
+        revert("transfer rejected");
+    }
+}
+
 contract BridgeTest is Test {
     address internal owner = address(0xA11CE);
     address internal user = address(0xB0B);
@@ -90,14 +98,14 @@ contract BridgeTest is Test {
     function _defaultFlowConfig() internal pure returns (Bridge.TokenFlowConfig memory) {
         return Bridge.TokenFlowConfig({
             minDepositAmount: 1,
-            depositCapacity: 1e24,
+            depositBucketCapacity: 1e24,
             depositRefillPerSecond: 1e18,
             custodyCap: 1e30,
             smallWithdrawalMax: 1e18,
-            mediumWithdrawalMax: 1e24,
+            lifetimeWithdrawalThreshold: 1e24,
             smallWithdrawalDelay: 0,
             mediumWithdrawalDelay: 0,
-            largeWithdrawalDelay: 0,
+            thresholdExceededWithdrawalDelay: 0,
             configured: true
         });
     }
@@ -110,6 +118,15 @@ contract BridgeTest is Test {
         bytes32 expectedConfigHash = bridge.getTokenFlowConfigHash(token);
         vm.prank(owner);
         bridge.setTokenFlowConfig(token, config, expectedConfigHash);
+    }
+
+    function _tokenSetHash(address[] memory tokens) internal pure returns (bytes32) {
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            for (uint256 j = i; j > 0 && uint160(tokens[j]) < uint160(tokens[j - 1]); --j) {
+                (tokens[j - 1], tokens[j]) = (tokens[j], tokens[j - 1]);
+            }
+        }
+        return keccak256(abi.encode(tokens));
     }
 
     function _setupBridgeSystem() internal returns (Bridge bridge, MockGnarkVerifier verifier) {
@@ -133,13 +150,13 @@ contract BridgeTest is Test {
         _configureFlowToken(bridge, address(0x1234));
     }
 
-    function _bridgeNonMappingState(
+    function _bridgeContractState(
         bytes32 root,
         uint256 provedCount,
         uint256 pendingCount,
         bytes32[32] memory frontier
-    ) internal pure returns (Bridge.NonMappingState memory state_) {
-        state_ = Bridge.NonMappingState({
+    ) internal pure returns (Bridge.BridgeContractState memory state_) {
+        state_ = Bridge.BridgeContractState({
             depositRoot: root,
             provedDepositCount: provedCount,
             pendingDepositCount: pendingCount,
@@ -169,12 +186,12 @@ contract BridgeTest is Test {
         assertEq(bridge.pendingDepositCount(), 1);
 
         bytes32[32] memory initialFrontier;
-        Bridge.NonMappingState memory expected = _bridgeNonMappingState(bytes32(uint256(0xCAFE)), 1, 1, initialFrontier);
+        Bridge.BridgeContractState memory expected = _bridgeContractState(bytes32(uint256(0xCAFE)), 1, 1, initialFrontier);
         bytes32[32] memory targetFrontier;
         for (uint256 i = 0; i < targetFrontier.length; ++i) {
             targetFrontier[i] = bytes32(i + 1);
         }
-        Bridge.NonMappingState memory target = _bridgeNonMappingState(bytes32(uint256(0xBEEF)), 0, 0, targetFrontier);
+        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(0xBEEF)), 0, 0, targetFrontier);
 
         vm.recordLogs();
         vm.prank(owner);
@@ -200,24 +217,24 @@ contract BridgeTest is Test {
         (Bridge bridge,) = _setupBridgeSystem();
 
         bytes32[32] memory frontier;
-        Bridge.NonMappingState memory current = _bridgeNonMappingState(EMPTY_DEPOSIT_ROOT, 0, 0, frontier);
+        Bridge.BridgeContractState memory current = _bridgeContractState(EMPTY_DEPOSIT_ROOT, 0, 0, frontier);
 
         vm.prank(user);
         vm.expectRevert(Bridge.UnauthorizedBridgeAdmin.selector);
         bridge.forceSetState(current, current);
 
-        Bridge.NonMappingState memory stale = _bridgeNonMappingState(bytes32(uint256(1)), 0, 0, frontier);
-        Bridge.NonMappingState memory target = _bridgeNonMappingState(bytes32(uint256(2)), 0, 0, frontier);
+        Bridge.BridgeContractState memory stale = _bridgeContractState(bytes32(uint256(1)), 0, 0, frontier);
+        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(2)), 0, 0, frontier);
         vm.prank(owner);
         vm.expectPartialRevert(Bridge.UnexpectedCurrentState.selector);
         bridge.forceSetState(stale, target);
 
-        Bridge.NonMappingState memory provedAbovePending = _bridgeNonMappingState(bytes32(uint256(2)), 1, 0, frontier);
+        Bridge.BridgeContractState memory provedAbovePending = _bridgeContractState(bytes32(uint256(2)), 1, 0, frontier);
         vm.prank(owner);
         vm.expectRevert(Bridge.InvalidForceSetState.selector);
         bridge.forceSetState(current, provedAbovePending);
 
-        Bridge.NonMappingState memory countIncrease = _bridgeNonMappingState(bytes32(uint256(2)), 0, 1, frontier);
+        Bridge.BridgeContractState memory countIncrease = _bridgeContractState(bytes32(uint256(2)), 0, 1, frontier);
         vm.prank(owner);
         vm.expectRevert(Bridge.InvalidForceSetState.selector);
         bridge.forceSetState(current, countIncrease);
@@ -695,8 +712,8 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.mediumWithdrawalMax = 200;
-        config.largeWithdrawalDelay = 3_600;
+        config.lifetimeWithdrawalThreshold = 200;
+        config.thresholdExceededWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
         uint256 amount = 250;
         bytes32 nonce = bytes32(uint256(88));
@@ -726,7 +743,7 @@ contract BridgeTest is Test {
         assertEq(claimableAt, block.timestamp + 3_600);
         assertTrue(bridge.claimedNullifiers(nonce));
 
-        config.largeWithdrawalDelay = 7_200;
+        config.thresholdExceededWithdrawalDelay = 7_200;
         _setFlowConfig(bridge, address(token), config);
         (,,, uint64 snapshottedClaimableAt) = bridge.pendingWithdrawals(nonce);
         assertEq(snapshottedClaimableAt, claimableAt, "config update must not change an existing ETA");
@@ -851,7 +868,7 @@ contract BridgeTest is Test {
 
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.minDepositAmount = 100;
-        config.depositCapacity = 500;
+        config.depositBucketCapacity = 500;
         config.depositRefillPerSecond = 1;
         config.custodyCap = 1_000;
         _setFlowConfig(bridge, tokenA, config);
@@ -875,7 +892,7 @@ contract BridgeTest is Test {
 
         bytes32 oldHash = bridge.getTokenFlowConfigHash(tokenA);
         Bridge.BucketState memory beforeUpdate = bridge.getMaterializedDepositBucket(tokenA);
-        config.depositCapacity = 1_000;
+        config.depositBucketCapacity = 1_000;
         _setFlowConfig(bridge, tokenA, config);
         Bridge.BucketState memory afterUpdate = bridge.getMaterializedDepositBucket(tokenA);
         assertEq(afterUpdate.available, beforeUpdate.available, "capacity increase must not gift deposit quota");
@@ -896,7 +913,7 @@ contract BridgeTest is Test {
         vm.etch(tokenB, address(mockToken).code);
 
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
-        config.depositCapacity = 10_000;
+        config.depositBucketCapacity = 10_000;
         config.depositRefillPerSecond = 1;
         _setFlowConfig(bridge, tokenA, config);
         _setFlowConfig(bridge, tokenB, config);
@@ -911,7 +928,7 @@ contract BridgeTest is Test {
 
         uint128 newCapacity = uint128(bound(uint256(capacitySeed), 1, 20_000));
         config.minDepositAmount = 1;
-        config.depositCapacity = newCapacity;
+        config.depositBucketCapacity = newCapacity;
         config.custodyCap = newCapacity;
         _setFlowConfig(bridge, tokenA, config);
 
@@ -925,7 +942,7 @@ contract BridgeTest is Test {
 
     function _defaultConfigForHash() internal pure returns (Bridge.TokenFlowConfig memory config) {
         config = _defaultFlowConfig();
-        config.depositCapacity = 10_000;
+        config.depositBucketCapacity = 10_000;
         config.depositRefillPerSecond = 1;
     }
 
@@ -934,7 +951,7 @@ contract BridgeTest is Test {
         address token = address(0x1234);
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.minDepositAmount = 100;
-        config.depositCapacity = 500;
+        config.depositBucketCapacity = 500;
         config.depositRefillPerSecond = 1;
         config.custodyCap = 1_000;
         _setFlowConfig(bridge, token, config);
@@ -954,30 +971,154 @@ contract BridgeTest is Test {
         bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 100, bytes32(uint256(10)), bytes32(uint256(11)));
     }
 
-    function testWithdrawalTierExactBoundaries() public {
+    function testInitializeWithdrawalTotalsValidatesInputsAndStoresAnyUint256Baseline() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        address otherToken = address(0x5678);
+        _configureFlowToken(bridge, otherToken);
+
+        address[] memory tokens = new address[](2);
+        tokens[0] = token;
+        tokens[1] = otherToken;
+        uint256[] memory totals = new uint256[](2);
+        totals[0] = type(uint256).max;
+        totals[1] = 42;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
+        assertEq(bridge.totalRegisteredWithdrawalAmount(token), type(uint256).max);
+        assertEq(bridge.totalRegisteredWithdrawalAmount(otherToken), 42);
+    }
+
+    function testInitializeWithdrawalTotalsRejectsDuplicatesAndUnconfiguredTokens() public {
+        (Bridge duplicateBridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        address[] memory duplicateTokens = new address[](2);
+        duplicateTokens[0] = token;
+        duplicateTokens[1] = token;
+        uint256[] memory duplicateTotals = new uint256[](2);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.DuplicateToken.selector, token));
+        duplicateBridge.initializeWithdrawalTotals(duplicateTokens, duplicateTotals, _tokenSetHash(duplicateTokens), address(this));
+
+        (Bridge unconfiguredBridge,) = _setupBridgeSystem();
+        address unconfigured = address(0x9876);
+        address[] memory tokens = new address[](1);
+        tokens[0] = unconfigured;
+        uint256[] memory totals = new uint256[](1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.TokenNotConfigured.selector, unconfigured));
+        unconfiguredBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
+    }
+
+    function testInitializeWithdrawalTotalsRejectsInvalidExecutorAndTokenSetHashAtomically() public {
+        (Bridge zeroExecutorBridge,) = _setupBridgeSystem();
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(0x1234);
+        uint256[] memory totals = new uint256[](1);
+        totals[0] = 77;
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.InvalidWithdrawalForceClaimExecutor.selector, address(0))
+        );
+        zeroExecutorBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(0));
+        assertEq(zeroExecutorBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+
+        (Bridge eoaExecutorBridge,) = _setupBridgeSystem();
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.InvalidWithdrawalForceClaimExecutor.selector, user));
+        eoaExecutorBridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), user);
+        assertEq(eoaExecutorBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+
+        (Bridge badHashBridge,) = _setupBridgeSystem();
+        vm.prank(owner);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Bridge.WithdrawalTotalsTokenSetHashMismatch.selector,
+                bytes32(uint256(1)),
+                _tokenSetHash(tokens)
+            )
+        );
+        badHashBridge.initializeWithdrawalTotals(tokens, totals, bytes32(uint256(1)), address(this));
+        assertEq(badHashBridge.totalRegisteredWithdrawalAmount(tokens[0]), 0);
+        assertEq(badHashBridge.withdrawalForceClaimExecutor(), address(0));
+        assertEq(badHashBridge.withdrawalTotalsTokenSetHash(), bytes32(0));
+    }
+
+    function testWithdrawalTierUsesLifetimeTotalBoundariesAndPreviewTotals() public {
         (Bridge bridge,) = _setupBridgeSystem();
         address token = address(0x1234);
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.mediumWithdrawalMax = 200;
+        config.lifetimeWithdrawalThreshold = 200;
         config.smallWithdrawalDelay = 10;
         config.mediumWithdrawalDelay = 20;
-        config.largeWithdrawalDelay = 30;
+        config.thresholdExceededWithdrawalDelay = 30;
         _setFlowConfig(bridge, token, config);
 
-        Bridge.WithdrawalPreview memory atSmall = bridge.previewWithdrawal(token, 100);
-        Bridge.WithdrawalPreview memory aboveSmall = bridge.previewWithdrawal(token, 101);
-        Bridge.WithdrawalPreview memory atMedium = bridge.previewWithdrawal(token, 200);
-        Bridge.WithdrawalPreview memory aboveMedium = bridge.previewWithdrawal(token, 201);
-        assertEq(uint8(atSmall.tier), uint8(Bridge.WithdrawalTier.Small));
-        assertEq(uint8(aboveSmall.tier), uint8(Bridge.WithdrawalTier.Medium));
-        assertEq(uint8(atMedium.tier), uint8(Bridge.WithdrawalTier.Medium));
-        assertEq(uint8(aboveMedium.tier), uint8(Bridge.WithdrawalTier.Large));
-        assertEq(atSmall.claimableAt, block.timestamp + 10);
-        assertEq(aboveSmall.claimableAt, block.timestamp + 20);
-        assertEq(atMedium.claimableAt, block.timestamp + 20);
-        assertEq(aboveMedium.claimableAt, block.timestamp + 30);
+        Bridge.WithdrawalQuote memory small = bridge.previewWithdrawal(token, 100);
+        Bridge.WithdrawalQuote memory medium = bridge.previewWithdrawal(token, 101);
+        assertEq(uint8(small.tier), uint8(Bridge.WithdrawalTier.Small));
+        assertEq(uint8(medium.tier), uint8(Bridge.WithdrawalTier.Medium));
+        assertEq(small.currentTotalRegisteredAmount, 0);
+        assertEq(small.projectedTotalRegisteredAmount, 100);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        uint256[] memory historicalTotals = new uint256[](1);
+        historicalTotals[0] = 100;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(tokens, historicalTotals, _tokenSetHash(tokens), address(this));
+        Bridge.WithdrawalQuote memory atCap = bridge.previewWithdrawal(token, 100);
+        Bridge.WithdrawalQuote memory aboveCap = bridge.previewWithdrawal(token, 101);
+        assertEq(uint8(atCap.tier), uint8(Bridge.WithdrawalTier.Small));
+        assertEq(uint8(aboveCap.tier), uint8(Bridge.WithdrawalTier.LifetimeThresholdExceeded));
+        assertEq(atCap.currentTotalRegisteredAmount, 100);
+        assertEq(atCap.projectedTotalRegisteredAmount, 200);
+        assertEq(aboveCap.projectedTotalRegisteredAmount, 201);
+        assertEq(atCap.claimableAt, block.timestamp + 10);
+        assertEq(aboveCap.claimableAt, block.timestamp + 30);
     }
+
+    function testWithdrawalQuoteFailsClosedWhenLifetimeProjectionOverflows() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        uint256[] memory totals = new uint256[](1);
+        totals[0] = type(uint256).max;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(tokens, totals, _tokenSetHash(tokens), address(this));
+
+
+        Bridge.WithdrawalQuote memory preview = bridge.previewWithdrawal(token, 1);
+        assertEq(uint8(preview.status), uint8(Bridge.WithdrawalStatus.InvalidAmount));
+        assertEq(preview.currentTotalRegisteredAmount, type(uint256).max);
+        assertEq(preview.projectedTotalRegisteredAmount, 0);
+    }
+
+    function testWithdrawalQuoteRejectsZeroAmount() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        Bridge.WithdrawalQuote memory quote = bridge.previewWithdrawal(address(0x1234), 0);
+        assertEq(uint8(quote.status), uint8(Bridge.WithdrawalStatus.InvalidAmount));
+    }
+
+    function testWithdrawalAmountGoldilocksBoundaryPreview() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
+        assertEq(
+            uint8(bridge.previewWithdrawal(token, 18446744069414584320).status),
+            uint8(Bridge.WithdrawalStatus.Accepted)
+        );
+        assertEq(
+            uint8(bridge.previewWithdrawal(token, 18446744069414584321).status),
+            uint8(Bridge.WithdrawalStatus.InvalidAmount)
+        );
+        assertEq(
+            uint8(bridge.previewWithdrawal(token, type(uint64).max).status),
+            uint8(Bridge.WithdrawalStatus.InvalidAmount)
+        );
+    }
+
 
     function testZeroDelaySmallAndMediumImmediatelyClaimableLargeDelayed() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
@@ -998,10 +1139,10 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.mediumWithdrawalMax = 200;
+        config.lifetimeWithdrawalThreshold = 200;
         config.smallWithdrawalDelay = 0;
         config.mediumWithdrawalDelay = 0;
-        config.largeWithdrawalDelay = 3_600;
+        config.thresholdExceededWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
 
         uint256 smallAmount = 50;
@@ -1083,23 +1224,94 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(user), smallAmount + mediumAmount + largeAmount);
     }
 
+    function testForceClaimWithdrawalBeforeDelayIsAdminOnlyPausedSafeAndOneShot() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
+        StateManager sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        vm.stopPrank();
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
+        config.smallWithdrawalMax = 10;
+        config.lifetimeWithdrawalThreshold = 20;
+        config.thresholdExceededWithdrawalDelay = 3_600;
+        _setFlowConfig(bridge, address(token), config);
+        token.mint(address(bridge), 30);
+
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0xFA)), 0);
+        vm.prank(owner);
+        sm.finalize(
+            _dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))),
+            withdrawalRoot, 0, 1, depositProof, withdrawalProof
+        );
+        bytes32 nonce = bytes32(uint256(0xFB));
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), 30, nonce, 0, 0);
+        WithdrawalBatchHashVerifier verifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(verifier));
+        uint256[8] memory proof;
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        address[] memory configuredTokens = new address[](1);
+        configuredTokens[0] = address(token);
+        uint256[] memory historicalTotals = new uint256[](1);
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(
+            configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this)
+        );
+
+        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.UnauthorizedWithdrawalForceClaimExecutor.selector, user));
+        bridge.forceClaimWithdrawal(nonce);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.UnauthorizedWithdrawalForceClaimExecutor.selector, owner));
+        bridge.forceClaimWithdrawal(nonce);
+        vm.prank(owner);
+        bridge.setTokenPauseFlags(address(token), 4);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingClaimsPaused.selector, address(token)));
+        bridge.forceClaimWithdrawal(nonce);
+        vm.prank(owner);
+        bridge.setTokenPauseFlags(address(token), 0);
+        bridge.forceClaimWithdrawal(nonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, nonce));
+        bridge.forceClaimWithdrawal(nonce);
+        assertEq(token.balanceOf(user), 30);
+    }
+
     function testZeroDelayTiersPreviewImmediateClaimableAt() public {
         (Bridge bridge,) = _setupBridgeSystem();
         address token = address(0x1234);
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
-        config.mediumWithdrawalMax = 200;
+        config.lifetimeWithdrawalThreshold = 200;
         config.smallWithdrawalDelay = 0;
         config.mediumWithdrawalDelay = 0;
-        config.largeWithdrawalDelay = 3_600;
+        config.thresholdExceededWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, token, config);
 
-        Bridge.WithdrawalPreview memory small = bridge.previewWithdrawal(token, 50);
-        Bridge.WithdrawalPreview memory medium = bridge.previewWithdrawal(token, 150);
-        Bridge.WithdrawalPreview memory large = bridge.previewWithdrawal(token, 250);
+        Bridge.WithdrawalQuote memory small = bridge.previewWithdrawal(token, 50);
+        Bridge.WithdrawalQuote memory medium = bridge.previewWithdrawal(token, 150);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        uint256[] memory historicalTotals = new uint256[](1);
+        historicalTotals[0] = 200;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(tokens, historicalTotals, _tokenSetHash(tokens), address(this));
+        Bridge.WithdrawalQuote memory large = bridge.previewWithdrawal(token, 1);
         assertEq(uint8(small.tier), uint8(Bridge.WithdrawalTier.Small));
         assertEq(uint8(medium.tier), uint8(Bridge.WithdrawalTier.Medium));
-        assertEq(uint8(large.tier), uint8(Bridge.WithdrawalTier.Large));
+        assertEq(uint8(large.tier), uint8(Bridge.WithdrawalTier.LifetimeThresholdExceeded));
         assertEq(small.claimableAt, block.timestamp, "zero-delay small tier preview must be immediate");
         assertEq(medium.claimableAt, block.timestamp, "zero-delay medium tier preview must be immediate");
         assertEq(large.claimableAt, block.timestamp + 3_600, "large tier preview must keep its delay");
@@ -1111,7 +1323,7 @@ contract BridgeTest is Test {
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalDelay = 0;
         config.mediumWithdrawalDelay = 0;
-        config.largeWithdrawalDelay = 3_600;
+        config.thresholdExceededWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, token, config);
 
         assertEq(
@@ -1133,7 +1345,7 @@ contract BridgeTest is Test {
         config.minDepositAmount = 0;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.minDepositAmount = config.depositCapacity + 1;
+        config.minDepositAmount = config.depositBucketCapacity + 1;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
         config.depositRefillPerSecond = 0;
@@ -1142,13 +1354,13 @@ contract BridgeTest is Test {
         config.custodyCap = config.minDepositAmount - 1;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.smallWithdrawalMax = config.mediumWithdrawalMax;
-        _expectInvalidFlowConfig(bridge, token, config);
+        config.lifetimeWithdrawalThreshold = 0;
+        _setFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
         config.smallWithdrawalDelay = config.mediumWithdrawalDelay + 1;
         _expectInvalidFlowConfig(bridge, token, config);
         config = _defaultFlowConfig();
-        config.mediumWithdrawalDelay = config.largeWithdrawalDelay + 1;
+        config.mediumWithdrawalDelay = config.thresholdExceededWithdrawalDelay + 1;
         _expectInvalidFlowConfig(bridge, token, config);
 
         vm.prank(owner);
@@ -1485,5 +1697,140 @@ contract BridgeTest is Test {
 
         assertEq(bridge.depositRoot(), bytes32(uint256(456)));
         assertEq(bridge.provedDepositCount(), 1);
+    }
+    function testBatchClaimWithdrawalTotalOverflowLeavesTotalMaxAndNoNullifierOrPending() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
+        StateManager sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        vm.stopPrank();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 1;
+        bytes32 nonce = bytes32(uint256(0xAB));
+
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
+        vm.prank(owner);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
+            withdrawalRoot,
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+
+        address[] memory configuredTokens = new address[](1);
+        configuredTokens[0] = address(token);
+        uint256[] memory historicalTotals = new uint256[](1);
+        historicalTotals[0] = type(uint256).max;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this));
+        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), type(uint256).max);
+
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
+        WithdrawalBatchHashVerifier verifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(verifier));
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Bridge.TotalRegisteredWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
+            )
+        );
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), type(uint256).max);
+        assertFalse(bridge.claimedNullifiers(nonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, 0);
+    }
+
+    function testForceClaimWithdrawalTransferRevertKeepsPendingTotalAndNullifier() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
+        StateManager sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        vm.stopPrank();
+        RevertingTransferToken token = new RevertingTransferToken();
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xCC));
+
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
+        vm.prank(owner);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
+            withdrawalRoot,
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
+        WithdrawalBatchHashVerifier verifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(verifier));
+        uint256[8] memory proof;
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        address[] memory configuredTokens = new address[](1);
+        configuredTokens[0] = address(token);
+        uint256[] memory historicalTotals = new uint256[](1);
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(configuredTokens, historicalTotals, _tokenSetHash(configuredTokens), address(this));
+
+        (address pendingToken, address pendingRecipient, uint256 pendingAmount, uint64 pendingClaimableAt) =
+            bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, amount);
+        assertEq(pendingRecipient, user);
+        assertTrue(bridge.claimedNullifiers(nonce));
+        uint256 totalBefore = bridge.totalRegisteredWithdrawalAmount(address(token));
+
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", "transfer rejected"));
+        bridge.forceClaimWithdrawal(nonce);
+
+        (address tokenAfter, address recipientAfter, uint256 amountAfter, uint64 claimableAtAfter) =
+            bridge.pendingWithdrawals(nonce);
+        assertEq(tokenAfter, pendingToken);
+        assertEq(recipientAfter, pendingRecipient);
+        assertEq(amountAfter, pendingAmount);
+        assertEq(claimableAtAfter, pendingClaimableAt);
+        assertEq(bridge.totalRegisteredWithdrawalAmount(address(token)), totalBefore);
+        assertTrue(bridge.claimedNullifiers(nonce));
     }
 }

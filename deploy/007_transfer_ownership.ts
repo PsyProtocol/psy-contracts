@@ -36,4 +36,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ["transfer_ownership"];
-func.dependencies = ["timelock_roles"];
+func.dependencies = ["timelock_roles", "wire"];

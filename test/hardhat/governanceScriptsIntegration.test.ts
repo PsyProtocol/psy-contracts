@@ -17,6 +17,7 @@ import {
   getChecksumAddress,
   hexDataSlice,
   hexZeroPad,
+  tokenSetHash,
   readStorageAt,
 } from "./helpers/deploySystem";
 
@@ -39,15 +40,17 @@ async function implementationOf(proxy: string): Promise<string> {
 
 function stringConfig(overrides: Record<string, unknown> = {}) {
   return Object.fromEntries(
-    Object.entries(defaultFlowConfig(overrides))
+    Object.entries({ ...defaultFlowConfig(overrides), lifetimeWithdrawalThreshold: overrides.lifetimeWithdrawalThreshold ?? 18_446_744_069_414_584_320n })
       .map(([key, value]) => [key, typeof value === "boolean" ? value : value.toString()]),
   );
 }
 
-function writeManifest(token: string, config: Record<string, unknown>): { dir: string; file: string } {
+function writeManifest(token: string, config: Record<string, unknown>, historicalWithdrawalTotal = "0"): { dir: string; file: string } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "psy-flow-config-"));
   const file = path.join(dir, "manifest.json");
-  fs.writeFileSync(file, JSON.stringify({ tokens: [token], configs: [config] }));
+  fs.writeFileSync(file, JSON.stringify({
+    tokens: [token], configs: [config], historicalWithdrawalTotals: [historicalWithdrawalTotal],
+  }));
   return { dir, file };
 }
 
@@ -79,6 +82,7 @@ describe("governance scripts local integration", function () {
       "PSY_SKIP_BRIDGE_FLOW_LIMITS",
       "BRIDGE_FLOW_LIMITS_FILE",
       "RESCUE_MODE",
+      "BRIDGE_V3_FLOW_TOKENS",
       "RESCUE_TOKEN",
       "RESCUE_TO",
       "RESCUE_AMOUNT",
@@ -97,10 +101,14 @@ describe("governance scripts local integration", function () {
 
   it("runs the complete proxy upgrade set and force-state recovery script", async function () {
     const token = await getDeployedContract("USDTToken");
-    const bridgeFactory = await ethers.getContractFactory("Bridge");
-    const bridgeInitData = bridgeFactory.interface.encodeFunctionData("initializeFlowLimits", [
+    const bridge = await getDeployedContract("Bridge");
+    const timelock = await deployments.get("ExecutorWithTimelock");
+    await bridge.initializeFlowLimits([token.address], [defaultFlowConfig()]);
+    const bridgeInitData = bridge.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [token.address],
-      [defaultFlowConfig()],
+      [0],
+      tokenSetHash([token.address]),
+      timelock.address,
     ]);
     const before = new Map<string, string>();
     for (const name of UPGRADEABLE_CONTRACTS) {
@@ -133,12 +141,16 @@ describe("governance scripts local integration", function () {
     const [, recipient] = await ethers.getSigners();
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Rescue", "RSC");
     await token.deployed();
-    const initial = writeManifest(token.address, stringConfig({ minDepositAmount: 10 }));
+    const initial = writeManifest(token.address, stringConfig({ minDepositAmount: 10 }), "321");
+      process.env.BRIDGE_V3_FLOW_TOKENS = JSON.stringify([token.address]);
+    const bridgeBeforeUpgrade = await getDeployedContract("Bridge");
+    await bridgeBeforeUpgrade.initializeFlowLimits([token.address], [defaultFlowConfig({ minDepositAmount: 10 })]);
     try {
       process.env.BRIDGE_FLOW_LIMITS_FILE = initial.file;
       await upgradeBridge();
       const bridge = await getDeployedContract("Bridge");
       expect((await bridge.getTokenFlowConfig(token.address)).minDepositAmount).to.equal(10);
+      expect(await bridge.totalRegisteredWithdrawalAmount(token.address)).to.equal(321);
 
       const next = writeManifest(token.address, stringConfig({ minDepositAmount: 20 }));
       try {

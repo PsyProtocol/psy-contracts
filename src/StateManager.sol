@@ -24,7 +24,7 @@ contract StateManager is OwnableUpgradeable {
     uint64 public constant BRIDGE_USER_ID = 524288;
     bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_FORCE_SET_STATE_V1");
 
-    struct NonMappingState {
+    struct StateManagerContractState {
         uint64 lastFinalizedCheckpointId;
         bytes32 lastVerifiedCheckpointRoot;
         bytes32 lastVerifiedDepositTreeRoot;
@@ -117,11 +117,11 @@ contract StateManager is OwnableUpgradeable {
     }
 
     function forceSetState(
-        NonMappingState calldata expected,
-        NonMappingState calldata target
+        StateManagerContractState calldata expected,
+        StateManagerContractState calldata target
     ) external onlyStateManagerAdmin {
         bytes32 actualStateHash = _forceSetStateHash(
-            NonMappingState({
+            StateManagerContractState({
                 lastFinalizedCheckpointId: lastFinalizedCheckpointId,
                 lastVerifiedCheckpointRoot: lastVerifiedCheckpointRoot,
                 lastVerifiedDepositTreeRoot: lastVerifiedDepositTreeRoot,
@@ -157,7 +157,7 @@ contract StateManager is OwnableUpgradeable {
         );
     }
 
-    function _forceSetStateHash(NonMappingState memory state_) internal pure returns (bytes32) {
+    function _forceSetStateHash(StateManagerContractState memory state_) internal pure returns (bytes32) {
         return keccak256(
             abi.encode(
                 FORCE_SET_STATE_HASH_DOMAIN,

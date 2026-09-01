@@ -44,6 +44,13 @@ task("bridge:set-flow-config", "Set one token's Bridge flow-limit config with th
     const { setBridgeTokenFlowConfig } = await import("../scripts/governance/bridgeFlowConfig");
     await setBridgeTokenFlowConfig(args.token, configPath, args.executionTime);
   });
+task("bridge:force-claim-withdrawal", "Settle a reviewed pending Bridge withdrawal via governance")
+  .addParam("nonce", "Pending withdrawal nonce", undefined, types.string)
+  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
+  .setAction(async (args: { nonce: string; executionTime?: string }) => {
+    const { forceClaimWithdrawal } = await import("../scripts/governance/bridgeFlowConfig");
+    await forceClaimWithdrawal(args.nonce, args.executionTime);
+  });
 
 task("governance:migrate-permissions", "Build the atomic Safe batch that transfers protocol control to Timelock")
   .addParam("legacy", "Comma-separated legacy admin accounts", undefined, types.string)

@@ -5,7 +5,9 @@ import path from "path";
 import { ethers } from "hardhat";
 import {
   getTokenFlowConfigFromManifest,
+  assertCompleteV3FlowTokenSet,
   loadBridgeFlowLimitManifest,
+  tokenSetHash,
 } from "../../scripts/upgrade/bridge";
 import { defaultFlowConfig } from "./helpers/deploySystem";
 
@@ -14,6 +16,14 @@ function stringConfig(overrides: Record<string, unknown> = {}) {
     Object.entries(defaultFlowConfig(overrides))
       .map(([key, value]) => [key, typeof value === "boolean" ? value : value.toString()]),
   );
+}
+
+function manifest(tokens: string[], configs: Record<string, unknown>[], historicalWithdrawalTotals?: string[]) {
+  return {
+    tokens,
+    configs,
+    historicalWithdrawalTotals: historicalWithdrawalTotals ?? tokens.map(() => "0"),
+  };
 }
 
 describe("Bridge flow-limit manifest validation", function () {
@@ -41,71 +51,99 @@ describe("Bridge flow-limit manifest validation", function () {
   }
 
   it("loads complete per-token configs and rejects a token omitted from the manifest", function () {
-    write({ tokens: [tokenA, tokenB], configs: [stringConfig(), stringConfig({ minDepositAmount: 2 })] });
-    const manifest = loadBridgeFlowLimitManifest(file);
-    expect(manifest.tokens).to.deep.equal([tokenA, tokenB]);
-    expect(manifest.configs[1].minDepositAmount).to.equal("2");
+    write(manifest([tokenA, tokenB], [stringConfig(), stringConfig({ minDepositAmount: 2 })], ["7", "9"]));
+    const loaded = loadBridgeFlowLimitManifest(file);
+    expect(loaded.tokens).to.deep.equal([tokenA, tokenB]);
+    expect(loaded.configs[1].minDepositAmount).to.equal("2");
+    expect(loaded.historicalWithdrawalTotals).to.deep.equal(["7", "9"]);
     expect(() => getTokenFlowConfigFromManifest(file, ethers.Wallet.createRandom().address))
       .to.throw("is not present");
   });
 
+  it("rejects an upgrade manifest subset before calldata encoding and accepts the complete canonical set", function () {
+    expect(() => assertCompleteV3FlowTokenSet([tokenA], [tokenA, tokenB]))
+      .to.throw("does not match authoritative V3 flow-token set");
+    expect(() => assertCompleteV3FlowTokenSet([tokenB, tokenA], [tokenA, tokenB])).not.to.throw();
+    expect(tokenSetHash([tokenB, tokenA])).to.equal(tokenSetHash([tokenA, tokenB]));
+  });
+
   it("rejects malformed top-level arrays, count mismatch, duplicate tokens, and invalid addresses", function () {
-    expectInvalid({}, "non-empty tokens and configs arrays");
-    expectInvalid({ tokens: [tokenA], configs: [] }, "tokens/configs length mismatch");
-    expectInvalid({ tokens: [tokenA, tokenA.toLowerCase()], configs: [stringConfig(), stringConfig()] }, "duplicate token");
-    expectInvalid({ tokens: ["not-an-address"], configs: [stringConfig()] }, "invalid address");
+    expectInvalid({}, "non-empty tokens, configs, and historicalWithdrawalTotals arrays");
+    expectInvalid(manifest([tokenA], []), "array length mismatch");
+    expectInvalid(manifest([tokenA, tokenA.toLowerCase()], [stringConfig(), stringConfig()]), "duplicate token");
+    expectInvalid(manifest(["not-an-address"], [stringConfig()]), "invalid address");
+    expectInvalid({ ...manifest([tokenA], [stringConfig()]), surprise: [] }, "unknown field surprise");
+    expectInvalid(
+      { tokens: [tokenA], configs: [stringConfig()] },
+      "non-empty tokens, configs, and historicalWithdrawalTotals arrays",
+    );
+    expectInvalid(manifest([tokenA], [stringConfig()], []), "array length mismatch");
   });
 
   it("rejects missing, extra, non-decimal, negative, and overflowing fields", function () {
     const missing = stringConfig();
     delete missing.minDepositAmount;
-    expectInvalid({ tokens: [tokenA], configs: [missing] }, "minDepositAmount must be an unsigned decimal string");
+    expectInvalid(manifest([tokenA], [missing]), "minDepositAmount must be an unsigned decimal string");
 
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), surprise: "1" }] },
+      manifest([tokenA], [{ ...stringConfig(), surprise: "1" }]),
       "unknown field surprise",
     );
-    for (const deletedField of ["maxDepositAmount", "withdrawalCapacity", "withdrawalRefillPerSecond"]) {
+    for (const deletedField of ["maxDepositAmount", "lifetimeWithdrawalThresholdacity", "withdrawalRefillPerSecond"]) {
       expectInvalid(
-        { tokens: [tokenA], configs: [{ ...stringConfig(), [deletedField]: "1" }] },
+        manifest([tokenA], [{ ...stringConfig(), [deletedField]: "1" }]),
         `unknown field ${deletedField}`,
       );
     }
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), minDepositAmount: -1 }] },
+      manifest([tokenA], [{ ...stringConfig(), minDepositAmount: -1 }]),
       "must be an unsigned decimal string",
     );
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), minDepositAmount: "1.5" }] },
+      manifest([tokenA], [{ ...stringConfig(), minDepositAmount: "1.5" }]),
       "must be an unsigned decimal string",
     );
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), depositCapacity: (1n << 128n).toString() }] },
+      manifest([tokenA], [{ ...stringConfig(), depositBucketCapacity: (1n << 128n).toString() }]),
       "exceeds its Solidity integer width",
     );
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), largeWithdrawalDelay: (1n << 32n).toString() }] },
+      manifest([tokenA], [{ ...stringConfig(), thresholdExceededWithdrawalDelay: (1n << 32n).toString() }]),
+      "exceeds its Solidity integer width",
+    );
+    const missingWithdrawalCap = stringConfig();
+    delete missingWithdrawalCap.lifetimeWithdrawalThreshold;
+    expectInvalid(
+      manifest([tokenA], [missingWithdrawalCap]),
+      "lifetimeWithdrawalThreshold must be an unsigned decimal string",
+    );
+    expectInvalid(
+      manifest([tokenA], [stringConfig({ lifetimeWithdrawalThreshold: (1n << 128n).toString() })]),
+      "exceeds its Solidity integer width",
+    );
+    expectInvalid(manifest([tokenA], [stringConfig()], ["-1"]), "must be an unsigned decimal string");
+    expectInvalid(
+      manifest([tokenA], [stringConfig()], [(1n << 256n).toString()]),
       "exceeds its Solidity integer width",
     );
   });
 
   it("rejects disabled and internally inconsistent token configs", function () {
     expectInvalid(
-      { tokens: [tokenA], configs: [{ ...stringConfig(), configured: false }] },
+      manifest([tokenA], [{ ...stringConfig(), configured: false }]),
       "configured must be true",
     );
     const invalidOverrides = [
       { minDepositAmount: 0 },
-      { minDepositAmount: 2, depositCapacity: 1 },
+      { minDepositAmount: 2, depositBucketCapacity: 1 },
       { depositRefillPerSecond: 0 },
       { minDepositAmount: 2, custodyCap: 1 },
-      { smallWithdrawalMax: 10, mediumWithdrawalMax: 10 },
       { smallWithdrawalDelay: 2, mediumWithdrawalDelay: 1 },
-      { mediumWithdrawalDelay: 2, largeWithdrawalDelay: 1 },
+      { mediumWithdrawalDelay: 2, thresholdExceededWithdrawalDelay: 1 },
     ];
     for (const overrides of invalidOverrides) {
       expectInvalid(
-        { tokens: [tokenA], configs: [stringConfig(overrides)] },
+        manifest([tokenA], [stringConfig(overrides)]),
         "violates Bridge TokenFlowConfig invariants",
       );
     }

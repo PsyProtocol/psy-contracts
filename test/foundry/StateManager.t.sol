@@ -94,14 +94,14 @@ contract StateManagerTest is Test {
         assertEq(sm.l1ChainIndex(), 0);
     }
 
-    function _nonMappingState(
+    function _stateManagerContractState(
         uint64 checkpointId,
         uint256 checkpointRoot,
         uint256 depositTreeRoot,
         uint256 withdrawalTreeRoot,
         uint256 withdrawalRoot
-    ) internal pure returns (StateManager.NonMappingState memory state_) {
-        state_ = StateManager.NonMappingState({
+    ) internal pure returns (StateManager.StateManagerContractState memory state_) {
+        state_ = StateManager.StateManagerContractState({
             lastFinalizedCheckpointId: checkpointId,
             lastVerifiedCheckpointRoot: bytes32(checkpointRoot),
             lastVerifiedDepositTreeRoot: bytes32(depositTreeRoot),
@@ -146,8 +146,8 @@ contract StateManagerTest is Test {
         assertTrue(sm.knownDepositSubtreeRoots(knownDepositRoot));
         assertTrue(sm.knownWithdrawalSubtreeRoots(knownWithdrawalRoot));
 
-        StateManager.NonMappingState memory expected = _nonMappingState(1, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
-        StateManager.NonMappingState memory target = _nonMappingState(0, 0x21, 0x22, 0x23, 0x24);
+        StateManager.StateManagerContractState memory expected = _stateManagerContractState(1, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
+        StateManager.StateManagerContractState memory target = _stateManagerContractState(0, 0x21, 0x22, 0x23, 0x24);
 
         vm.recordLogs();
         vm.prank(owner);
@@ -183,7 +183,7 @@ contract StateManagerTest is Test {
         provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
         vm.stopPrank();
 
-        StateManager.NonMappingState memory initial = _nonMappingState(0, 0, 0, 0, 0);
+        StateManager.StateManagerContractState memory initial = _stateManagerContractState(0, 0, 0, 0, 0);
         vm.prank(other);
         vm.expectRevert(StateManager.UnauthorizedStateManagerAdmin.selector);
         sm.forceSetState(initial, initial);
@@ -204,14 +204,14 @@ contract StateManagerTest is Test {
             withdrawalProof
         );
 
-        StateManager.NonMappingState memory current = _nonMappingState(1, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
-        StateManager.NonMappingState memory stale = _nonMappingState(0, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
-        StateManager.NonMappingState memory rollbackTarget = _nonMappingState(0, 6, 7, 8, 9);
+        StateManager.StateManagerContractState memory current = _stateManagerContractState(1, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
+        StateManager.StateManagerContractState memory stale = _stateManagerContractState(0, 2, uint256(depositRoot), uint256(withdrawalRoot), uint256(withdrawalProof[0]));
+        StateManager.StateManagerContractState memory rollbackTarget = _stateManagerContractState(0, 6, 7, 8, 9);
         vm.prank(owner);
         vm.expectPartialRevert(StateManager.UnexpectedCurrentState.selector);
         sm.forceSetState(stale, rollbackTarget);
 
-        StateManager.NonMappingState memory forwardTarget = _nonMappingState(2, 6, 7, 8, 9);
+        StateManager.StateManagerContractState memory forwardTarget = _stateManagerContractState(2, 6, 7, 8, 9);
         vm.prank(owner);
         vm.expectRevert(StateManager.InvalidForceSetState.selector);
         sm.forceSetState(current, forwardTarget);

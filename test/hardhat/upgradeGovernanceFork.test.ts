@@ -11,6 +11,7 @@ import {
   hexDataSlice,
   hexZeroPad,
   readStorageAt,
+  tokenSetHash,
   waitForContractDeployment,
   wireCoreAddresses,
 } from "./helpers/deploySystem";
@@ -128,14 +129,23 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     const token = await tokenFactory.deploy("ForkMock", "FMK");
     await waitForContractDeployment(token);
     const tokenAddress = await getContractAddress(token);
-    const initData = bridgeFactory.interface.encodeFunctionData("initializeFlowLimits", [
+    await bridge.proxy.initializeFlowLimits([tokenAddress], [defaultFlowConfig({ lifetimeWithdrawalThreshold: 444 })]);
+    const forceClaimExecutor = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(
+      owner.address, 1, 1, 1, 1,
+    );
+    await waitForContractDeployment(forceClaimExecutor);
+    const initData = bridgeFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [tokenAddress],
-      [defaultFlowConfig()],
+      [222],
+      tokenSetHash([tokenAddress]),
+      await getContractAddress(forceClaimExecutor),
     ]);
     await bridge.proxyAdmin.upgradeAndCall(bridge.proxy.address, await getContractAddress(bridgeImpl), initData);
     const upgradedBridge = bridgeFactory.attach(bridge.proxy.address) as any;
     if (upgradedBridge.address == null) upgradedBridge.address = bridge.proxy.address;
     expect((await upgradedBridge.getTokenFlowConfig(tokenAddress)).configured).to.equal(true);
+    expect((await upgradedBridge.getTokenFlowConfig(tokenAddress)).lifetimeWithdrawalThreshold).to.equal(444);
+    expect(await upgradedBridge.totalRegisteredWithdrawalAmount(tokenAddress)).to.equal(222);
     await token.mint(upgradedBridge.address, 123);
     await upgradedBridge.setGlobalPauseFlags(7);
     await expect(upgradedBridge.rescueERC20(tokenAddress, recipient.address, 123)).to.emit(upgradedBridge, "ERC20Rescued");
@@ -152,9 +162,14 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
     const { UPGRADEABLE_CONTRACTS, upgradeAllContracts } = await import("../../scripts/upgrade/utils");
     const bridgeFactory = await ethers.getContractFactory("Bridge");
     const usdtDeployment = await deployments.get("USDTToken");
-    const bridgeInitData = bridgeFactory.interface.encodeFunctionData("initializeFlowLimits", [
+    const bridgeBeforeUpgrade = await deployedContract("Bridge");
+    await bridgeBeforeUpgrade.initializeFlowLimits([usdtDeployment.address], [defaultFlowConfig()]);
+    const timelock = await deployments.get("ExecutorWithTimelock");
+    const bridgeInitData = bridgeBeforeUpgrade.interface.encodeFunctionData("initializeWithdrawalTotals", [
       [usdtDeployment.address],
-      [defaultFlowConfig()],
+      [0],
+      tokenSetHash([usdtDeployment.address]),
+      timelock.address,
     ]);
     const beforeImplementations = new Map<string, string>();
     const proxyAddresses = new Map<string, string>();

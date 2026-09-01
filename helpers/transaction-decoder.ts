@@ -8,7 +8,8 @@ const timelockInterface = new ethersLibrary.utils.Interface([
 ]);
 
 const protocolInterface = new ethersLibrary.utils.Interface([
-  "function setTokenFlowConfig(address token,(uint128 minDepositAmount,uint128 depositCapacity,uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax,uint128 mediumWithdrawalMax,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 largeWithdrawalDelay,bool configured) next,bytes32 expectedConfigHash)",
+  "function setTokenFlowConfig(address token,(uint128 minDepositAmount,uint128 depositBucketCapacity,uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax,uint128 lifetimeWithdrawalThreshold,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 thresholdExceededWithdrawalDelay,bool configured) next,bytes32 expectedConfigHash)",
+  "function forceClaimWithdrawal(bytes32 nonce)",
   "function setGlobalPauseFlags(uint8 flags)",
   "function setTokenPauseFlags(address token,uint8 flags)",
   "function rescueERC20(address token,address to,uint256 amount)",
@@ -21,7 +22,8 @@ const protocolInterface = new ethersLibrary.utils.Interface([
   "function transferOwnership(address newOwner)",
   "function setPendingAdmin(address newPendingAdmin)",
   "function acceptAdmin()",
-  "function initializeFlowLimits(address[] tokens,(uint128 minDepositAmount,uint128 depositCapacity,uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax,uint128 mediumWithdrawalMax,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 largeWithdrawalDelay,bool configured)[] configs)",
+  "function initializeFlowLimits(address[] tokens,(uint128 minDepositAmount,uint128 depositBucketCapacity,uint128 depositRefillPerSecond,uint128 custodyCap,uint128 smallWithdrawalMax,uint128 lifetimeWithdrawalThreshold,uint32 smallWithdrawalDelay,uint32 mediumWithdrawalDelay,uint32 thresholdExceededWithdrawalDelay,bool configured)[] configs)",
+  "function initializeWithdrawalTotals(address[] configuredTokens,uint256[] historicalTotals,bytes32 expectedTokenSetHash,address forceClaimExecutor)",
 ]);
 
 export type DecodedTransaction = {

@@ -60,17 +60,26 @@ export function hexZeroPad(value: string, length: number): string {
   return (ethers as any).zeroPadValue?.(value, length) ?? ethers.utils.hexZeroPad(value, length);
 }
 
+
+export function tokenSetHash(tokens: string[]): string {
+  const sorted = tokens.map(getChecksumAddress).sort((a, b) => {
+    const left = BigInt(a.toLowerCase());
+    const right = BigInt(b.toLowerCase());
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  return ethers.utils.keccak256(ethers.utils.defaultAbiCoder.encode(["address[]"], [sorted]));
+}
 export function defaultFlowConfig(overrides: Record<string, unknown> = {}) {
   return {
     minDepositAmount: 1,
-    depositCapacity: 1_000_000_000_000n,
+    depositBucketCapacity: 1_000_000_000_000n,
     depositRefillPerSecond: 1_000_000,
     custodyCap: 10_000_000_000_000n,
     smallWithdrawalMax: 1_000,
-    mediumWithdrawalMax: 10_000,
+    lifetimeWithdrawalThreshold: 10_000,
     smallWithdrawalDelay: 0,
     mediumWithdrawalDelay: 3600,
-    largeWithdrawalDelay: 86400,
+    thresholdExceededWithdrawalDelay: 86400,
     configured: true,
     ...overrides,
   };
