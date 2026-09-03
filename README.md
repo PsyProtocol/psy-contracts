@@ -70,7 +70,9 @@ All settings are read from env vars:
 ### 1) Required env vars
 - `KEYSTORE_PATH`: encrypted deployer keystore path
 - `WALLET_PASSWORD`: keystore password
-- `LOCALHOST_RPC_URL`, `SEPOLIA_RPC_URL`, or `ETH_RPC_URL`: network RPC URL
+- RPC for the selected network: `LOCALHOST_RPC_URL`, `LOCALHOST_BSC_RPC_URL`,
+  `LOCALHOST_BASE_RPC_URL`, `SEPOLIA_RPC_URL`, `BSC_TESTNET_RPC_URL`, or
+  `BASE_SEPOLIA_RPC_URL`
 - Optional per-network WETH envs in `helper-hardhat-config.ts` (`ETH_WETH`, `ARB_WETH`, ...)
 
 Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-keystore.mjs` or the `deploy:keystore:*` npm scripts.
@@ -82,10 +84,17 @@ Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-
 - Set `owner`, `bridgeAdmin`, `routerAdmin`, and `stateManagerAdmin` explicitly; do not assume they are interchangeable with `admin`.
 ### 3) Local deploy
 - `KEYSTORE_PATH=... WALLET_PASSWORD=... LOCALHOST_RPC_URL=http://127.0.0.1:8545 npm run deploy:keystore:localhost`
+- `KEYSTORE_PATH=... WALLET_PASSWORD=... LOCALHOST_BSC_RPC_URL=http://127.0.0.1:9545 npm run deploy:keystore:localhost-bsc`
+- `KEYSTORE_PATH=... WALLET_PASSWORD=... LOCALHOST_BASE_RPC_URL=http://127.0.0.1:10545 npm run deploy:keystore:localhost-base`
 
-### 4) Sepolia / Ethereum deploy
+### 4) Public testnet deploy
 - `KEYSTORE_PATH=... WALLET_PASSWORD=... SEPOLIA_RPC_URL=https://... npm run deploy:keystore:sepolia`
-- `KEYSTORE_PATH=... WALLET_PASSWORD=... ETH_RPC_URL=https://... npm run deploy:keystore:ethereum`
+- `KEYSTORE_PATH=... WALLET_PASSWORD=... BSC_TESTNET_RPC_URL=https://... npm run deploy:keystore:bsc-testnet`
+- `KEYSTORE_PATH=... WALLET_PASSWORD=... BASE_SEPOLIA_RPC_URL=https://... npm run deploy:keystore:base-sepolia`
+
+Every deploy fails closed when the RPC `eth_chainId` differs from
+`protocol-config`. The final deployment export also verifies the on-chain
+`StateManager.l1ChainIndex()` before writing `deployed-contracts.json`.
 
 ### 5) Post-deploy sanity checks
 - `StateManager.bridge == Bridge`
@@ -94,6 +103,8 @@ Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-
 - `Router.defaultERC20Gateway == ERC20Gateway`
 - `Router.ethGateway == ETHGateway`
 - `StateManager.zkVerifier != address(0)`
+- deployment `chainId` equals RPC `eth_chainId`
+- deployment `protocol.chain.l1ChainIndex` equals `StateManager.l1ChainIndex()`
 
 ### 6) Role model
 - `StateManager.appendDeposit`: only Bridge

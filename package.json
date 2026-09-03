@@ -13,7 +13,11 @@
     "deploy:devnet": "hardhat deploy --network devnet",
     "deploy:keystore": "node scripts/deploy-with-keystore.mjs deploy",
     "deploy:keystore:localhost": "node scripts/deploy-with-keystore.mjs deploy --network localhost --reset",
+    "deploy:keystore:localhost-bsc": "node scripts/deploy-with-keystore.mjs deploy --network localhostBsc --reset",
+    "deploy:keystore:localhost-base": "node scripts/deploy-with-keystore.mjs deploy --network localhostBase --reset",
     "deploy:keystore:sepolia": "node scripts/deploy-with-keystore.mjs deploy --network sepolia --reset",
+    "deploy:keystore:bsc-testnet": "node scripts/deploy-with-keystore.mjs deploy --network bscTestnet --reset",
+    "deploy:keystore:base-sepolia": "node scripts/deploy-with-keystore.mjs deploy --network baseSepolia --reset",
     "deploy:keystore:ethereum": "node scripts/deploy-with-keystore.mjs deploy --network ethereum --reset"
   },
   "devDependencies": {

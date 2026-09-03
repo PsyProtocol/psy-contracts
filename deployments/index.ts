@@ -1,4 +1,6 @@
-export type DeploymentContracts = {
+import type { ProtocolNetwork } from '../protocol-config/types'
+
+export type DeployedContracts = {
   network: string
   chainId: string | number
   generatedAt?: string
@@ -12,45 +14,59 @@ export type DeploymentContracts = {
   implementations?: Record<string, string>
 }
 
-let localhostModules: Record<string, DeploymentContracts> = {}
-let sepoliaModules: Record<string, DeploymentContracts> = {}
-let ethereumModules: Record<string, DeploymentContracts> = {}
+/** @deprecated Use DeployedContracts. */
+export type DeploymentContracts = DeployedContracts
+export type DeploymentRegistry = Partial<Record<ProtocolNetwork, DeployedContracts>>
+export type ActiveDeployments<N extends ProtocolNetwork> = Record<N, DeployedContracts>
+
+export function requireDeployments<N extends ProtocolNetwork>(
+  networks: readonly N[],
+  registry: DeploymentRegistry,
+): ActiveDeployments<N> {
+  const missing = networks.filter((network) => !registry[network])
+  if (missing.length) {
+    throw new Error(`Missing deployed-contracts.json for: ${missing.join(', ')}`)
+  }
+  return Object.fromEntries(
+    networks.map((network) => [network, registry[network] as DeployedContracts]),
+  ) as ActiveDeployments<N>
+}
+
+let deploymentModules: Record<string, DeployedContracts> = {}
 
 try {
-  localhostModules = import.meta.glob('./localhost/deployed-contracts.json', {
+  deploymentModules = import.meta.glob('./*/deployed-contracts.json', {
     eager: true,
     import: 'default',
-  }) as Record<string, DeploymentContracts>
-  sepoliaModules = import.meta.glob('./sepolia/deployed-contracts.json', {
-    eager: true,
-    import: 'default',
-  }) as Record<string, DeploymentContracts>
-  ethereumModules = import.meta.glob('./ethereum/deployed-contracts.json', {
-    eager: true,
-    import: 'default',
-  }) as Record<string, DeploymentContracts>
+  }) as Record<string, DeployedContracts>
 } catch {
   // Bun/Node do not provide Vite's import.meta.glob. Consumers fall back to
   // protocol-config when no generated deployment is available.
 }
 
-const localhost = localhostModules['./localhost/deployed-contracts.json']
-const sepolia = sepoliaModules['./sepolia/deployed-contracts.json']
-const ethereum = ethereumModules['./ethereum/deployed-contracts.json']
+const protocolNetworks = new Set<ProtocolNetwork>([
+  'localhost', 'localhostBsc', 'localhostBase',
+  'sepolia', 'bscTestnet', 'baseSepolia',
+  'ethereum', 'bsc', 'base',
+])
+
+export const deployments: DeploymentRegistry = Object.fromEntries(
+  Object.entries(deploymentModules).flatMap(([modulePath, deployment]) => {
+    const network = modulePath.match(/^\.\/([^/]+)\/deployed-contracts\.json$/)?.[1]
+    return network && protocolNetworks.has(network as ProtocolNetwork)
+      ? [[network, deployment]]
+      : []
+  }),
+) as DeploymentRegistry
 
 const importMetaEnv = import.meta.env
-
-const configuredNetwork = String(importMetaEnv?.VITE_NETWORK ?? 'localhost').trim().toLowerCase()
+const configuredNetwork = String(importMetaEnv?.VITE_NETWORK ?? 'localhost').trim()
 const isFork = String(importMetaEnv?.VITE_FORK ?? 'false').trim().toLowerCase() === 'true'
-const selectedNetwork = (isFork || configuredNetwork === 'localhost')
-  ? 'localhost'
-  : (configuredNetwork === 'sepolia' ? 'sepolia' : 'ethereum')
+const selectedNetwork: ProtocolNetwork = isFork ? 'localhost' : (
+  protocolNetworks.has(configuredNetwork as ProtocolNetwork)
+    ? configuredNetwork as ProtocolNetwork
+    : 'localhost'
+)
 
-const selectedDeployment =
-  selectedNetwork === 'localhost'
-    ? localhost
-    : selectedNetwork === 'sepolia'
-      ? sepolia
-      : ethereum
-
-export const currentDeployment: DeploymentContracts | undefined = selectedDeployment
+/** Compatibility export for callers that still operate on one selected L1. */
+export const currentDeployment: DeployedContracts | undefined = deployments[selectedNetwork]

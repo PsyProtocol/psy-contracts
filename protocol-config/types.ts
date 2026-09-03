@@ -1,8 +1,20 @@
-export type ProtocolNetwork = 'localhost' | 'sepolia' | 'ethereum'
+export type ProtocolNetwork =
+  | 'localhost'
+  | 'localhostBsc'
+  | 'localhostBase'
+  | 'sepolia'
+  | 'bscTestnet'
+  | 'baseSepolia'
+  | 'ethereum'
+  | 'bsc'
+  | 'base'
+export type BridgeChain = 'ethereum' | 'bsc' | 'base'
 export type ProtocolTokenSymbol = 'PSY' | 'USDT'
 
 export type ProtocolChainConfig = {
   network: ProtocolNetwork
+  /** Logical bridge chain. Testnets share their mainnet chain's index. */
+  bridgeChain: BridgeChain
   l1ChainId: number
   l1ChainIndex: number
   name: string

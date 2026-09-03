@@ -16,10 +16,15 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, network } = hre;
   const { log } = deployments;
   const protocolNetwork = resolveProtocolNetworkName(network.name);
+  const protocolChain = protocolConfig.chains[protocolNetwork];
   const actualChainId = Number(await hre.getChainId());
-  const exportedChainId = network.name === "localhost"
-    ? protocolConfig.chains.localhost.l1ChainId
-    : actualChainId;
+  if (actualChainId !== protocolChain.l1ChainId) {
+    throw new Error(
+      `Refusing deployment export for ${network.name}: RPC eth_chainId=${actualChainId} ` +
+        `does not match protocol-config l1ChainId=${protocolChain.l1ChainId}`,
+    );
+  }
+  const exportedChainId = actualChainId;
 
   const all = await deployments.all();
   const allAddresses: AddressMap = {};
@@ -47,6 +52,19 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
       continue;
     }
     canonicalContracts[name] = d.address;
+  }
+
+  const stateManagerDeployment = all.StateManager;
+  if (!stateManagerDeployment) {
+    throw new Error(`StateManager deployment missing for ${network.name}`);
+  }
+  const stateManager = await hre.ethers.getContractAt("StateManager", stateManagerDeployment.address);
+  const onChainL1ChainIndex = Number(await stateManager.l1ChainIndex());
+  if (onChainL1ChainIndex !== protocolChain.l1ChainIndex) {
+    throw new Error(
+      `Refusing deployment export for ${network.name}: StateManager.l1ChainIndex()=${onChainL1ChainIndex} ` +
+        `does not match protocol-config l1ChainIndex=${protocolChain.l1ChainIndex}`,
+    );
   }
 
   const coreNames = [
@@ -96,7 +114,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     generatedAt: new Date().toISOString(),
     protocol: {
       chain: {
-        ...protocolConfig.chains[protocolNetwork],
+        ...protocolChain,
         l1ChainId: exportedChainId,
       },
       tokens: resolvedTokens,

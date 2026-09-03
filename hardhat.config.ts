@@ -5,9 +5,10 @@ import { HardhatUserConfig } from "hardhat/config";
 import { mkNetworkCfg, type NetworkName, networkConfig } from "./helper-hardhat-config";
 import { protocolConfig } from "./protocol-config";
 import {
-  ETHERSCAN_KEY,
   SEPOLIA_ETHERSCAN_KEY,
   MAINNET_ETHERSCAN_KEY,
+  BSC_ETHERSCAN_KEY,
+  BASE_ETHERSCAN_KEY,
 } from "./helpers/hardhat-constants";
 import "./tasks/verify";
 import "./tasks/upgrade";
@@ -17,8 +18,14 @@ dotenv.config();
 const optNetworks = Object.fromEntries(
   [
     ["localhost", mkNetworkCfg("localhost")],
+    ["localhostBsc", mkNetworkCfg("localhostBsc")],
+    ["localhostBase", mkNetworkCfg("localhostBase")],
     ["sepolia", mkNetworkCfg("sepolia")],
+    ["bscTestnet", mkNetworkCfg("bscTestnet")],
+    ["baseSepolia", mkNetworkCfg("baseSepolia")],
     ["ethereum", mkNetworkCfg("ethereum")],
+    ["bsc", mkNetworkCfg("bsc")],
+    ["base", mkNetworkCfg("base")],
   ].filter(([, cfg]) => cfg !== undefined)
 );
 
@@ -55,7 +62,45 @@ const config: HardhatUserConfig = {
     apiKey: {
       sepolia: SEPOLIA_ETHERSCAN_KEY,
       ethereum: MAINNET_ETHERSCAN_KEY,
+      bscTestnet: BSC_ETHERSCAN_KEY,
+      bsc: BSC_ETHERSCAN_KEY,
+      baseSepolia: BASE_ETHERSCAN_KEY,
+      base: BASE_ETHERSCAN_KEY,
     },
+    customChains: [
+      {
+        network: "bscTestnet",
+        chainId: protocolConfig.chains.bscTestnet.l1ChainId,
+        urls: {
+          apiURL: "https://api-testnet.bscscan.com/api",
+          browserURL: protocolConfig.chains.bscTestnet.defaultExplorerUrl!,
+        },
+      },
+      {
+        network: "bsc",
+        chainId: protocolConfig.chains.bsc.l1ChainId,
+        urls: {
+          apiURL: "https://api.bscscan.com/api",
+          browserURL: protocolConfig.chains.bsc.defaultExplorerUrl!,
+        },
+      },
+      {
+        network: "baseSepolia",
+        chainId: protocolConfig.chains.baseSepolia.l1ChainId,
+        urls: {
+          apiURL: "https://api-sepolia.basescan.org/api",
+          browserURL: protocolConfig.chains.baseSepolia.defaultExplorerUrl!,
+        },
+      },
+      {
+        network: "base",
+        chainId: protocolConfig.chains.base.l1ChainId,
+        urls: {
+          apiURL: "https://api.basescan.org/api",
+          browserURL: protocolConfig.chains.base.defaultExplorerUrl!,
+        },
+      },
+    ],
   },
   paths: {
     sources: "./src",
