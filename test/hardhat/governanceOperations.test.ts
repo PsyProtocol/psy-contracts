@@ -27,7 +27,7 @@ describe("governance operation tooling", function () {
         { name: "PsyACLManager", contract: acl },
         { name: "Bridge", contract: bridge },
       ],
-      legacyAccounts: [owner.address],
+      stripAdmins: [owner.address],
     };
     const operations = await buildPermissionMigration(input);
     expect(operations[0].description).to.equal("grant DEFAULT_ADMIN_ROLE to Timelock");
@@ -55,7 +55,7 @@ describe("governance operation tooling", function () {
         timelockAddress: ethers.Wallet.createRandom().address,
         governanceSafe: other.address,
         ownables: [{ name: "Bridge", contract: bridge }],
-        legacyAccounts: [owner.address],
+        stripAdmins: [owner.address],
       });
     } catch (error) {
       message = (error as Error).message;
@@ -99,7 +99,7 @@ describe("governance operation tooling", function () {
     const timelock = ethers.Wallet.createRandom().address;
     const bridgeInterface = new ethers.utils.Interface(["function setGlobalPauseFlags(uint8 flags)"]);
     const timelockInterface = new ethers.utils.Interface([
-      "function queueTransaction(address,uint256,string,bytes,uint256,bool)",
+      "function queueTransaction(address,uint256,string,bytes,uint256)",
     ]);
     const innerData = bridgeInterface.encodeFunctionData("setGlobalPauseFlags", [7]);
     const outerData = timelockInterface.encodeFunctionData("queueTransaction", [
@@ -108,7 +108,6 @@ describe("governance operation tooling", function () {
       "",
       innerData,
       1_900_000_000,
-      false,
     ]);
     const decoded = decodeGovernanceTransaction(timelock, outerData);
     expect(decoded.functionName).to.equal("queueTransaction");
@@ -187,7 +186,7 @@ describe("governance operation tooling", function () {
     expect(shortEtaError).to.contain("below the current minimum");
 
     expect((await getTimelockActionStatus(target, data, executionTime)).state).to.equal("NotQueued");
-    await timelock.queueTransaction(target, 0, "", data, executionTime, false);
+    await timelock.queueTransaction(target, 0, "", data, executionTime);
     expect((await getTimelockActionStatus(target, data, executionTime)).state).to.equal("Waiting");
     await network.provider.send("evm_setNextBlockTimestamp", [Number(executionTime)]);
     await network.provider.send("evm_mine");
@@ -205,10 +204,10 @@ describe("governance operation tooling", function () {
     const nominationData = timelock.interface.encodeFunctionData("setPendingAdmin", [newAdmin.address]);
     const block = await ethers.provider.getBlock("latest");
     const executionTime = block.timestamp + 61;
-    await timelock.queueTransaction(timelock.address, 0, "", nominationData, executionTime, false);
+    await timelock.queueTransaction(timelock.address, 0, "", nominationData, executionTime);
     await network.provider.send("evm_setNextBlockTimestamp", [executionTime]);
     await network.provider.send("evm_mine");
-    await timelock.executeTransaction(timelock.address, 0, "", nominationData, executionTime, false);
+    await timelock.executeTransaction(timelock.address, 0, "", nominationData, executionTime);
     expect(await timelock.getPendingAdmin()).to.equal(newAdmin.address);
     await expect(timelock.acceptAdmin()).to.be.revertedWith("ONLY_BY_PENDING_ADMIN");
     await timelock.connect(newAdmin).acceptAdmin();

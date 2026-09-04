@@ -2,9 +2,9 @@ import fs from "fs";
 import { BigNumber, ethers as ethersLibrary } from "ethers";
 
 const timelockInterface = new ethersLibrary.utils.Interface([
-  "function queueTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime,bool withDelegatecall)",
-  "function executeTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime,bool withDelegatecall)",
-  "function cancelTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime,bool withDelegatecall)",
+  "function queueTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime)",
+  "function executeTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime)",
+  "function cancelTransaction(address target,uint256 value,string signature,bytes data,uint256 executionTime)",
 ]);
 
 const protocolInterface = new ethersLibrary.utils.Interface([
@@ -73,11 +73,11 @@ export function decodeGovernanceTransaction(target: string, data: string, value 
     arguments: parsed ? Array.from(parsed.args).map(jsonValue) : [],
   };
   if (parsed && ["queueTransaction", "executeTransaction", "cancelTransaction"].includes(parsed.name)) {
-    const [innerTarget, innerValue, callSignature, innerData, executionTime, withDelegatecall] = parsed.args;
-    const action = [innerTarget, innerValue, callSignature, innerData, executionTime, withDelegatecall];
+    const [innerTarget, innerValue, callSignature, innerData, executionTime] = parsed.args;
+    const action = [innerTarget, innerValue, callSignature, innerData, executionTime];
     decoded.actionHash = ethersLibrary.utils.keccak256(
       ethersLibrary.utils.defaultAbiCoder.encode(
-        ["address", "uint256", "string", "bytes", "uint256", "bool"],
+        ["address", "uint256", "string", "bytes", "uint256"],
         action,
       ),
     );

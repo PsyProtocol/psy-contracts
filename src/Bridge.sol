@@ -74,7 +74,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32[32] depositFrontier;
     }
 
-    struct V3TokenFlowConfig {
+    struct ImportedTokenFlowConfig {
         uint128 minDepositAmount;
         uint128 depositBucketCapacity;
         uint128 depositRefillPerSecond;
@@ -117,13 +117,13 @@ contract Bridge is Initializable, OwnableUpgradeable {
     mapping(uint256 => bytes32) public depositLeafHashes;
     address public depositBatchVerifier;
     address public withdrawalClaimVerifier;
-    // V3 storage is append-only after withdrawalClaimVerifier.
-    mapping(address => V3TokenFlowConfig) private _v3TokenFlowConfigs;
+    // Storage imported from the predecessor implementation is append-only after withdrawalClaimVerifier.
+    mapping(address => ImportedTokenFlowConfig) private _importedTokenFlowConfigs;
     mapping(address => bytes32) private _reservedDepositBucketSlot;
     mapping(bytes32 => PendingWithdrawal) public pendingWithdrawals;
     mapping(address => uint8) private _tokenPauseFlags;
     uint8 private _globalPauseFlags;
-    // V4 storage is append-only after current V3 storage.
+    // Governed storage is append-only after the imported storage above.
     mapping(address => uint256) private _totalWithdrawalAmounts;
     address public withdrawalForceClaimExecutor;
     bytes32 public withdrawalTotalsTokenSetHash;
@@ -298,7 +298,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         for (uint256 i = 0; i < configuredTokens.length; ++i) {
             address token = configuredTokens[i];
             TokenFlowConfig storage currentConfig = _tokenFlowConfigs[token];
-            if (!_v3TokenFlowConfigs[token].configured && !currentConfig.configured) revert TokenNotConfigured(token);
+            if (!_importedTokenFlowConfigs[token].configured && !currentConfig.configured) revert TokenNotConfigured(token);
             _validateFlowConfig(token, configs[i]);
             bytes32 oldHash = currentConfig.configured ? keccak256(abi.encode(token, currentConfig)) : bytes32(0);
             _tokenFlowConfigs[token] = configs[i];

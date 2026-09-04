@@ -1,3 +1,5 @@
+// Task actions use await import(...) instead of static imports: hardhat task registration must not
+// eagerly load ethers/providers, so each script is loaded only when its task actually runs.
 import { task, types } from "hardhat/config";
 
 task("governance:build", "Build or execute a Direct, Safe, Timelock, or Safe+Timelock transaction")
@@ -35,7 +37,7 @@ task("timelock:status", "Inspect a Timelock action's queue/readiness/expiry stat
   });
 
 task("bridge:set-flow-config", "Set one token's Bridge flow-limit config with the current on-chain hash")
-  .addParam("token", "Canonical token address", undefined, types.string)
+  .addParam("token", "Token address configured in the flow-limit manifest", undefined, types.string)
   .addOptionalParam("manifest", "Flow-limit manifest path", undefined, types.string)
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
   .setAction(async (args: { token: string; manifest?: string; executionTime?: string }) => {
@@ -53,17 +55,18 @@ task("bridge:force-claim-withdrawal", "Settle a reviewed pending Bridge withdraw
   });
 
 task("governance:migrate-permissions", "Build the atomic Safe batch that transfers protocol control to Timelock")
-  .addParam("legacy", "Comma-separated legacy admin accounts", undefined, types.string)
-  .setAction(async (args: { legacy: string }) => {
+  .addParam("stripAdmins", "Comma-separated admin accounts to strip of all ACL roles", undefined, types.string)
+  .setAction(async (args: { stripAdmins: string }) => {
     const { buildProtocolPermissionMigration } = await import("../scripts/governance/permissions");
-    await buildProtocolPermissionMigration(args.legacy);
+    await buildProtocolPermissionMigration(args.stripAdmins);
   });
 
-task("governance:verify-permissions", "Verify Timelock ownership/roles and supplied legacy admin removal")
-  .addParam("legacy", "Comma-separated legacy admin accounts", undefined, types.string)
-  .setAction(async (args: { legacy: string }) => {
+task("governance:verify-permissions", "Verify Timelock ownership/roles, admin role stripping, and proposer role separation")
+  .addParam("stripAdmins", "Comma-separated admin accounts to strip of all ACL roles", undefined, types.string)
+  .addOptionalParam("proposer", "Dedicated PROPOSER_ROLE bot address (must differ from the Timelock and Governance Safe)", undefined, types.string)
+  .setAction(async (args: { stripAdmins: string; proposer?: string }) => {
     const { verifyProtocolPermissions } = await import("../scripts/governance/permissions");
-    await verifyProtocolPermissions(args.legacy);
+    await verifyProtocolPermissions(args.stripAdmins, args.proposer);
   });
 
 task("governance:transfer-timelock-admin", "Build old-Safe action to nominate a new Timelock admin Safe")

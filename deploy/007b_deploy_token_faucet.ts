@@ -43,7 +43,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     log(`Skipping faucet ownership for external USDTToken: ${usdtDeployment.l1Address}`);
   }
 
-  await removeLegacyPsyFaucetToken(hre, faucetOwner);
+  await removeReplacedPsyFaucetToken(hre, faucetOwner);
 
   if (process.env.TRANSFER_PROTOCOL_OWNERSHIP_TO_TIMELOCK === "1") {
     const timelock = await get("ExecutorWithTimelock");
@@ -106,7 +106,7 @@ async function transferTokenOwnership(
   await execute(deployName, { from: currentOwner, log: true }, "transferOwnership", faucetAddress);
 }
 
-async function removeLegacyPsyFaucetToken(
+async function removeReplacedPsyFaucetToken(
   hre: HardhatRuntimeEnvironment,
   faucetOwner: string,
 ) {
@@ -116,7 +116,7 @@ async function removeLegacyPsyFaucetToken(
   const listed = (await read("TokenFaucetManager", "isListed", psy.address)) as boolean;
   if (!listed) return;
 
-  log("Removing legacy PsyToken from TokenFaucetManager");
+  log("Removing the replaced PsyToken from TokenFaucetManager");
   await execute("TokenFaucetManager", { from: faucetOwner, log: true }, "removeToken", psy.address);
 }
 

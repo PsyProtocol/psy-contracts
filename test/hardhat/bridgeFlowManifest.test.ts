@@ -5,7 +5,7 @@ import path from "path";
 import { ethers } from "hardhat";
 import {
   getTokenFlowConfigFromManifest,
-  assertCompleteV3FlowTokenSet,
+  assertCompleteFlowTokenSet,
   loadBridgeFlowLimitManifest,
   tokenSetHash,
 } from "../../scripts/upgrade/bridge";
@@ -60,10 +60,10 @@ describe("Bridge flow-limit manifest validation", function () {
       .to.throw("is not present");
   });
 
-  it("rejects an upgrade manifest subset before calldata encoding and accepts the complete canonical set", function () {
-    expect(() => assertCompleteV3FlowTokenSet([tokenA], [tokenA, tokenB]))
-      .to.throw("does not match authoritative V3 flow-token set");
-    expect(() => assertCompleteV3FlowTokenSet([tokenB, tokenA], [tokenA, tokenB])).not.to.throw();
+  it("rejects an upgrade manifest subset before calldata encoding and accepts the complete set", function () {
+    expect(() => assertCompleteFlowTokenSet([tokenA], [tokenA, tokenB]))
+      .to.throw("does not match the governance flow-token set");
+    expect(() => assertCompleteFlowTokenSet([tokenB, tokenA], [tokenA, tokenB])).not.to.throw();
     expect(tokenSetHash([tokenB, tokenA])).to.equal(tokenSetHash([tokenA, tokenB]));
   });
 

@@ -200,17 +200,17 @@ describe("Bridge per-token flow limits", function () {
     await bridge.setTokenPauseFlags(token.address, 4);
     const data = bridge.interface.encodeFunctionData("forceClaimWithdrawal", [nonce]);
     let executionTime = (await ethers.provider.getBlock("latest")).timestamp + 2;
-    await timelock.queueTransaction(bridge.address, 0, "", data, executionTime, false);
+    await timelock.queueTransaction(bridge.address, 0, "", data, executionTime);
     await network.provider.send("evm_setNextBlockTimestamp", [executionTime]);
-    await expect(timelock.executeTransaction(bridge.address, 0, "", data, executionTime, false))
+    await expect(timelock.executeTransaction(bridge.address, 0, "", data, executionTime))
       .to.be.revertedWith("FAILED_ACTION_EXECUTION");
     expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(30);
 
     await bridge.setTokenPauseFlags(token.address, 0);
     executionTime = (await ethers.provider.getBlock("latest")).timestamp + 2;
-    await timelock.queueTransaction(bridge.address, 0, "", data, executionTime, false);
+    await timelock.queueTransaction(bridge.address, 0, "", data, executionTime);
     await network.provider.send("evm_setNextBlockTimestamp", [executionTime]);
-    await expect(timelock.executeTransaction(bridge.address, 0, "", data, executionTime, false))
+    await expect(timelock.executeTransaction(bridge.address, 0, "", data, executionTime))
       .to.emit(bridge, "WithdrawalForceClaimed")
       .withArgs(nonce, timelock.address);
     expect(await token.balanceOf(recipient.address)).to.equal(30);

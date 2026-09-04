@@ -40,7 +40,7 @@ contract StateManager is OwnableUpgradeable {
     bytes32 public lastVerifiedDepositTreeRoot;
     bytes32 public lastVerifiedWithdrawalTreeRoot;
     bytes32 public withdrawalSubtreeRoot;
-    // Legacy reserved storage slots kept for upgrade safety.
+    // Reserved storage slots kept for upgrade safety.
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
 
@@ -357,7 +357,7 @@ contract StateManager is OwnableUpgradeable {
     function _verifyZkProof(address zkVerifier, bytes calldata proof, uint256 pub0, uint256 pub1) internal view returns (bool) {
         uint256[2] memory input = [pub0, pub1];
 
-        // Only support the canonical gnark verifier ABI.
+        // Only one gnark verifier ABI is supported.
         if (proof.length == 32 * 8) {
             uint256[8] memory p = abi.decode(proof, (uint256[8]));
             try IZKVerifierProof(zkVerifier).verifyProof(p, input) {

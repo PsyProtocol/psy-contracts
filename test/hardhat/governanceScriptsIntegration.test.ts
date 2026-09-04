@@ -82,7 +82,7 @@ describe("governance scripts local integration", function () {
       "PSY_SKIP_BRIDGE_FLOW_LIMITS",
       "BRIDGE_FLOW_LIMITS_FILE",
       "RESCUE_MODE",
-      "BRIDGE_V3_FLOW_TOKENS",
+      "BRIDGE_GOVERNANCE_FLOW_TOKENS",
       "RESCUE_TOKEN",
       "RESCUE_TO",
       "RESCUE_AMOUNT",
@@ -143,7 +143,7 @@ describe("governance scripts local integration", function () {
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Rescue", "RSC");
     await token.deployed();
     const initial = writeManifest(token.address, stringConfig({ minDepositAmount: 10 }), "321");
-      process.env.BRIDGE_V3_FLOW_TOKENS = JSON.stringify([token.address]);
+      process.env.BRIDGE_GOVERNANCE_FLOW_TOKENS = JSON.stringify([token.address]);
     const bridgeBeforeUpgrade = await getDeployedContract("Bridge");
     await bridgeBeforeUpgrade.initializeFlowLimits([token.address], [defaultFlowConfig({ minDepositAmount: 10 })]);
     try {
@@ -192,33 +192,63 @@ describe("governance scripts local integration", function () {
     }
   });
 
+  it("orders the executing Safe's DEFAULT_ADMIN revocation last regardless of input order", async function () {
+    const [safe, other] = await ethers.getSigners();
+    const acl = await getDeployedContract("PsyACLManager");
+    const timelock = await getDeployedContract("ExecutorWithTimelock");
+    const defaultAdminRole = await acl.DEFAULT_ADMIN_ROLE();
+    await acl.grantRole(defaultAdminRole, other.address);
+    const operations = await buildPermissionMigration({
+      acl,
+      timelockAddress: timelock.address,
+      governanceSafe: safe.address,
+      ownables: [],
+      stripAdmins: [safe.address, other.address],
+    });
+    expect(operations.length).to.be.greaterThan(0);
+    const lastOperation = operations[operations.length - 1];
+    const decoded = acl.interface.decodeFunctionData("revokeRole", lastOperation.data);
+    expect(lastOperation.target).to.equal(acl.address);
+    expect(decoded.role).to.equal(defaultAdminRole);
+    expect(decoded.account).to.equal(safe.address);
+  });
+
   it("runs the complete permission migration and verifies every deployed ownership boundary", async function () {
-    const [currentSafe] = await ethers.getSigners();
+    const [currentSafe, proposerBot] = await ethers.getSigners();
     const acl = await getDeployedContract("PsyACLManager");
     const timelock = await getDeployedContract("ExecutorWithTimelock");
     const ownables = await Promise.all(OWNABLES.map(async (name) => ({
       name,
       contract: await getDeployedContract(name),
     })));
+    // PROPOSER_ROLE is an operational bot role kept out of the governance cutover: move it from
+    // the replaced admin onto a dedicated bot address while the Safe still holds DEFAULT_ADMIN_ROLE.
+    const proposerRole = await acl.PROPOSER_ROLE();
+    await acl.grantRole(proposerRole, proposerBot.address);
+    await acl.revokeRole(proposerRole, currentSafe.address);
     const operations = await buildPermissionMigration({
       acl,
       timelockAddress: timelock.address,
       governanceSafe: currentSafe.address,
       ownables,
-      legacyAccounts: [currentSafe.address],
+      stripAdmins: [currentSafe.address],
     });
     expect(operations.length).to.be.greaterThan(10);
     for (const operation of operations) {
       await currentSafe.sendTransaction({ to: operation.target, data: operation.data });
     }
 
-    await verifyProtocolPermissions(currentSafe.address);
+    await verifyProtocolPermissions(currentSafe.address, proposerBot.address);
+    await expect(verifyProtocolPermissions(currentSafe.address)).to.be.rejectedWith("proposer must be configured");
+    await expect(verifyProtocolPermissions(currentSafe.address, currentSafe.address)).to.be.rejectedWith(
+      "proposer must not be the Governance Safe"
+    );
     expect(await buildPermissionMigration({
       acl,
       timelockAddress: timelock.address,
       governanceSafe: currentSafe.address,
       ownables,
-      legacyAccounts: [currentSafe.address],
+      stripAdmins: [currentSafe.address],
     })).to.deep.equal([]);
   });
 });

@@ -25,7 +25,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const allAddresses: AddressMap = {};
   const proxyAddresses: AddressMap = {};
   const implementationAddresses: AddressMap = {};
-  const canonicalContracts: AddressMap = {};
+  const primaryContracts: AddressMap = {};
 
   // ── Read verification metadata from verifiable.json ────────────
   let verificationMeta: Record<string, any> = {};
@@ -46,7 +46,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
       implementationAddresses[name] = d.address;
       continue;
     }
-    canonicalContracts[name] = d.address;
+    primaryContracts[name] = d.address;
   }
 
   const coreNames = [
@@ -102,7 +102,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
       tokens: resolvedTokens,
     },
     core: sortKeys(core),
-    contracts: sortKeys(canonicalContracts),
+    contracts: sortKeys(primaryContracts),
     proxies: sortKeys(proxyAddresses),
     implementations: sortKeys(implementationAddresses),
     /**

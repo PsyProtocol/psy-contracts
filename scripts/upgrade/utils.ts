@@ -151,7 +151,7 @@ export async function upgradeContract(
 
 export async function upgradeAllContracts(executionTime: string | undefined, bridgeUpgradeCallData: string): Promise<void> {
   if (bridgeUpgradeCallData === "0x") {
-    throw new Error("Bridge V4 requires non-empty initializeWithdrawalTotals calldata");
+    throw new Error("the governed Bridge upgrade requires non-empty initializeWithdrawalTotals calldata");
   }
   for (const name of UPGRADEABLE_CONTRACTS) {
     await upgradeContract(

@@ -85,13 +85,12 @@ contract ExecutorWithTimelock is IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) public override onlyAdmin returns (bytes32) {
         require(executionTime >= block.timestamp + _delay, "EXECUTION_TIME_UNDERESTIMATED");
-        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime, withDelegatecall));
+        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime));
         _queuedTransactions[actionHash] = true;
-        emit QueuedAction(actionHash, target, value, signature, data, executionTime, withDelegatecall);
+        emit QueuedAction(actionHash, target, value, signature, data, executionTime);
         return actionHash;
     }
 
@@ -100,12 +99,11 @@ contract ExecutorWithTimelock is IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) public override onlyAdmin returns (bytes32) {
-        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime, withDelegatecall));
+        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime));
         _queuedTransactions[actionHash] = false;
-        emit CancelledAction(actionHash, target, value, signature, data, executionTime, withDelegatecall);
+        emit CancelledAction(actionHash, target, value, signature, data, executionTime);
         return actionHash;
     }
 
@@ -114,10 +112,9 @@ contract ExecutorWithTimelock is IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) public payable override onlyAdmin returns (bytes memory) {
-        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime, withDelegatecall));
+        bytes32 actionHash = keccak256(abi.encode(target, value, signature, data, executionTime));
         require(_queuedTransactions[actionHash], "ACTION_NOT_QUEUED");
         require(block.timestamp >= executionTime, "TIMELOCK_NOT_FINISHED");
         require(block.timestamp <= executionTime + GRACE_PERIOD, "GRACE_PERIOD_FINISHED");
@@ -127,17 +124,10 @@ contract ExecutorWithTimelock is IExecutorWithTimelock {
             ? data
             : abi.encodePacked(bytes4(keccak256(bytes(signature))), data);
 
-        bool success;
-        bytes memory resultData;
-        if (withDelegatecall) {
-            require(msg.value >= value, "NOT_ENOUGH_MSG_VALUE");
-            (success, resultData) = target.delegatecall(callData);
-        } else {
-            (success, resultData) = target.call{value: value}(callData);
-        }
+        (bool success, bytes memory resultData) = target.call{value: value}(callData);
         require(success, "FAILED_ACTION_EXECUTION");
 
-        emit ExecutedAction(actionHash, target, value, signature, data, executionTime, withDelegatecall, resultData);
+        emit ExecutedAction(actionHash, target, value, signature, data, executionTime, resultData);
         return resultData;
     }
 }

@@ -11,8 +11,7 @@ interface IExecutorWithTimelock {
         uint256 value,
         string signature,
         bytes data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     );
     event CancelledAction(
         bytes32 actionHash,
@@ -20,8 +19,7 @@ interface IExecutorWithTimelock {
         uint256 value,
         string signature,
         bytes data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     );
     event ExecutedAction(
         bytes32 actionHash,
@@ -30,7 +28,6 @@ interface IExecutorWithTimelock {
         string signature,
         bytes data,
         uint256 executionTime,
-        bool withDelegatecall,
         bytes resultData
     );
 
@@ -47,8 +44,7 @@ interface IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) external returns (bytes32);
 
     function executeTransaction(
@@ -56,8 +52,7 @@ interface IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) external payable returns (bytes memory);
 
     function cancelTransaction(
@@ -65,7 +60,6 @@ interface IExecutorWithTimelock {
         uint256 value,
         string memory signature,
         bytes memory data,
-        uint256 executionTime,
-        bool withDelegatecall
+        uint256 executionTime
     ) external returns (bytes32);
 }

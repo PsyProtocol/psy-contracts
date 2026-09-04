@@ -98,7 +98,7 @@ Direct deploy private keys are intentionally disabled. Use `scripts/deploy-with-
 ### 6) Role model
 - `StateManager.appendDeposit`: only Bridge
 - `StateManager.finalize`: only Proposer
-- `Bridge.recordDeposit`: disabled; canonical path is Router -> Gateway -> Bridge.recordDepositFromGateway
+- `Bridge.recordDeposit`: disabled; the supported path is Router -> Gateway -> Bridge.recordDepositFromGateway
 - `Bridge.recordDepositFromGateway`: caller must match Router-resolved gateway
 
 
@@ -121,6 +121,9 @@ Governance executor:
 - `deploy/007d_grant_timelock_roles.ts` grants `DEFAULT_ADMIN_ROLE`, `BRIDGE_ADMIN_ROLE`, `ROUTER_ADMIN_ROLE`, and `STATE_MANAGER_ADMIN_ROLE` to the timelock when `GRANT_TIMELOCK_ROLES=1`.
 - `deploy/007e_transfer_proxy_admin_to_timelock.ts` transfers `DefaultProxyAdmin` ownership to the timelock when `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1`.
 - Set `TIMELOCK_ADMIN` to the multisig address, or it defaults to `cfg.owner`.
+- `PROPOSER_ROLE` is an operational bot role, intentionally separate from governance: it is held by a
+  dedicated proposer address that must be distinct from the deployer/admin, the Governance Safe, and
+  the timelock. It is not migrated or revoked during the governance cutover and survives cutovers by design.
 
 Notes:
 - Deploying `ExecutorWithTimelock` alone does not hand over every permission. By default, `cfg.admin` remains the ACL default admin and the `DefaultProxyAdmin` owner.
@@ -135,6 +138,14 @@ Upgrade modes use `DRY_RUN`:
 - `Safe`: write an offline Safe proposal JSON under `deployments/<network>/safe-proposals/`.
 - `SafeWithTimeLock`: write a Safe proposal that targets the timelock calldata.
 - Once `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1` has been applied, upgrades must go through `TimeLock` or `SafeWithTimeLock`.
+- Mainnet cutover gate: a mainnet deployment is only considered complete when all of the following hold:
+  `GRANT_TIMELOCK_ROLES=1` (ACL admin roles to the timelock), `TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1`
+  (proxy-admin ownership to the timelock; the deploy script now refuses to silently skip on non-local
+  networks), and `npx hardhat governance:verify-permissions --strip-admins <admin addresses> --proposer <bot>`
+  passes with no violations. The verifier enforces that no stripped account holds
+  BRIDGE_ADMIN/ROUTER_ADMIN/STATE_MANAGER_ADMIN/DEFAULT_ADMIN/GUARDIAN (the Governance Safe keeps
+  GUARDIAN by design) and that the proposer is a configured bot address distinct from the timelock
+  and the Governance Safe.
 
 Examples:
 

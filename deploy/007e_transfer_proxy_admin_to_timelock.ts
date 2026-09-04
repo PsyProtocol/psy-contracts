@@ -3,13 +3,22 @@ import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { loadDeployConfig } from "./deploy-config";
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
-  const { deployments, getNamedAccounts } = hre;
+  const { deployments, getNamedAccounts, network } = hre;
   const { execute, get, read, log } = deployments;
   const { deployer } = await getNamedAccounts();
   const cfg = await loadDeployConfig(hre);
   const txFrom = cfg.admin || deployer;
 
+  const LOCAL_NETWORKS = new Set(["localhost", "hardhat"]);
   if (process.env.TRANSFER_PROXY_ADMIN_TO_TIMELOCK !== "1") {
+    if (!LOCAL_NETWORKS.has(network.name)) {
+      throw new Error(
+        "007e_transfer_proxy_admin_to_timelock is a required mainnet cutover gate: " +
+          "set TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1 to transfer DefaultProxyAdmin to the timelock " +
+          "and then run 'npx hardhat governance:verify-permissions' until it is all-green. " +
+          "Refusing to silently skip proxy-admin cutover on " + network.name
+      );
+    }
     log("Skipping 007e_transfer_proxy_admin_to_timelock; set TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1 to enable");
     return;
   }

@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-contract LegacyBridgeV3 is Initializable, OwnableUpgradeable {
+contract BridgeUpgradeSource is Initializable, OwnableUpgradeable {
     struct TokenFlowConfig {
         uint128 minDepositAmount;
         uint128 depositBucketCapacity;

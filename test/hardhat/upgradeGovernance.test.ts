@@ -98,18 +98,18 @@ async function deploySystemWithTransparentBridge(owner: string, proposer: string
 }
 
 describe("governance upgrade and rescue", function () {
-  it("migrates the deployed V3 flow-config mapping into V4 storage atomically", async function () {
+  it("migrates the pre-governance flow-config mapping into governed storage atomically", async function () {
     const [owner] = await ethers.getSigners();
-    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Legacy", "LEG");
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("SourceToken", "SRC");
     await waitForContractDeployment(token);
     const tokenAddress = await getContractAddress(token);
-    const legacy = await deployTransparentWithImplementation(
-      "LegacyBridgeV3",
-      "LegacyBridgeV3",
+    const upgradeSource = await deployTransparentWithImplementation(
+      "BridgeUpgradeSource",
+      "BridgeUpgradeSource",
       owner.address,
       [owner.address, owner.address, owner.address, owner.address],
     );
-    await legacy.proxy.initializeFlowLimits([tokenAddress], [[
+    await upgradeSource.proxy.initializeFlowLimits([tokenAddress], [[
       10, 20, 3, 40, 5, 60, 7, 8, 9, true,
     ]]);
 
@@ -137,14 +137,15 @@ describe("governance upgrade and rescue", function () {
       tokenSetHash([tokenAddress]),
       await getContractAddress(executor),
     ]);
-    await legacy.proxyAdmin.upgradeAndCall(
-      legacy.proxy.address,
+    await upgradeSource.proxyAdmin.upgradeAndCall(
+      upgradeSource.proxy.address,
       await getContractAddress(implementation),
       initData,
     );
 
-    const upgraded = bridgeFactory.attach(legacy.proxy.address) as any;
-    if (upgraded.address == null) upgraded.address = legacy.proxy.address;
+    const upgraded = bridgeFactory.attach(upgradeSource.proxy.address) as any;
+    if (upgraded.address == null) upgraded.address = upgradeSource.proxy.address;
+
     const migrated = await upgraded.getTokenFlowConfig(tokenAddress);
     expect(migrated.minDepositAmount).to.equal(11);
     expect(migrated.depositCap).to.equal(22);
@@ -170,26 +171,26 @@ describe("governance upgrade and rescue", function () {
     const executionTime = block.timestamp + 3601;
     const data = getDefaultAbiCoder().encode(["uint256"], [7200]);
     await expect(
-      timelock.queueTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime, false),
+      timelock.queueTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime),
     ).to.emit(timelock, "QueuedAction");
 
     await expect(
-      timelock.executeTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime, false),
+      timelock.executeTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime),
     ).to.be.revertedWith("TIMELOCK_NOT_FINISHED");
 
     await network.provider.send("evm_increaseTime", [3601]);
     await network.provider.send("evm_mine");
     await expect(
-      timelock.executeTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime, false),
+      timelock.executeTransaction(timelockAddress, 0, "setDelay(uint256)", data, executionTime),
     ).to.emit(timelock, "NewDelay").withArgs(7200);
     expect(await timelock.getDelay()).to.equal(7200);
 
     const cancelBlock = await ethers.provider.getBlock("latest");
     const cancelExecutionTime = cancelBlock.timestamp + 7201;
     const cancelData = getDefaultAbiCoder().encode(["uint256"], [3600]);
-    await timelock.queueTransaction(timelockAddress, 0, "setDelay(uint256)", cancelData, cancelExecutionTime, false);
+    await timelock.queueTransaction(timelockAddress, 0, "setDelay(uint256)", cancelData, cancelExecutionTime);
     await expect(
-      timelock.cancelTransaction(timelockAddress, 0, "setDelay(uint256)", cancelData, cancelExecutionTime, false),
+      timelock.cancelTransaction(timelockAddress, 0, "setDelay(uint256)", cancelData, cancelExecutionTime),
     ).to.emit(timelock, "CancelledAction");
   });
 

@@ -6,7 +6,7 @@ import {
   TimeLockOperation,
 } from "./hardhat-constants";
 
-export type TimelockAction = [string, number, string, string, string, boolean];
+export type TimelockAction = [string, number, string, string, string];
 
 export type TimelockData = {
   timeLock: Contract;
@@ -46,10 +46,10 @@ export async function getExecutionTime(executionTime?: string): Promise<string> 
 
 async function buildTimeLockData(target: string, data: string, executionTime: string): Promise<TimelockData> {
   const timeLock = await getTimeLockExecutor();
-  const action: TimelockAction = [target, 0, "", data, executionTime, false];
+  const action: TimelockAction = [target, 0, "", data, executionTime];
   const actionHash = ethers.utils.keccak256(
     ethers.utils.defaultAbiCoder.encode(
-      ["address", "uint256", "string", "bytes", "uint256", "bool"],
+      ["address", "uint256", "string", "bytes", "uint256"],
       action,
     ),
   );

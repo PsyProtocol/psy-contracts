@@ -7,7 +7,7 @@ const UINT128_MAX = ethers.BigNumber.from(2).pow(128).sub(1);
 const UINT32_MAX = ethers.BigNumber.from(2).pow(32).sub(1);
 const UINT256_MAX = ethers.constants.MaxUint256;
 
-export function canonicalTokenSet(tokens: string[]): string[] {
+export function sortedTokenSet(tokens: string[]): string[] {
   return tokens.map((token) => ethers.utils.getAddress(token)).sort((a, b) => {
     const left = BigInt(a.toLowerCase());
     const right = BigInt(b.toLowerCase());
@@ -17,28 +17,28 @@ export function canonicalTokenSet(tokens: string[]): string[] {
 
 export function tokenSetHash(tokens: string[]): string {
   return ethers.utils.keccak256(
-    ethers.utils.defaultAbiCoder.encode(["address[]"], [canonicalTokenSet(tokens)]),
+    ethers.utils.defaultAbiCoder.encode(["address[]"], [sortedTokenSet(tokens)]),
   );
 }
 
-export function assertCompleteV3FlowTokenSet(tokens: string[], authoritativeTokens: string[]): void {
-  const actual = canonicalTokenSet(tokens);
-  const expected = canonicalTokenSet(authoritativeTokens);
+export function assertCompleteFlowTokenSet(tokens: string[], requiredTokens: string[]): void {
+  const actual = sortedTokenSet(tokens);
+  const expected = sortedTokenSet(requiredTokens);
   if (actual.length !== expected.length || actual.some((token, index) => token !== expected[index])) {
     throw new Error(
-      `Bridge V4 token inventory does not match authoritative V3 flow-token set: expected ${expected.join(",")}; received ${actual.join(",")}`,
+      `Bridge token inventory does not match the governance flow-token set: expected ${expected.join(",")}; received ${actual.join(",")}`,
     );
   }
 }
 
-function loadAuthoritativeV3FlowTokens(): string[] {
-  const raw = process.env.BRIDGE_V3_FLOW_TOKENS;
+function loadGovernanceFlowTokens(): string[] {
+  const raw = process.env.BRIDGE_GOVERNANCE_FLOW_TOKENS;
   if (!raw) {
-    throw new Error("BRIDGE_V3_FLOW_TOKENS is required for the Bridge V4 migration");
+    throw new Error("BRIDGE_GOVERNANCE_FLOW_TOKENS is required for the governed Bridge migration");
   }
   const parsed = JSON.parse(raw) as unknown;
   if (!Array.isArray(parsed) || parsed.length === 0 || parsed.some((token) => typeof token !== "string")) {
-    throw new Error("BRIDGE_V3_FLOW_TOKENS must be a non-empty JSON address array");
+    throw new Error("BRIDGE_GOVERNANCE_FLOW_TOKENS must be a non-empty JSON address array");
   }
   return parsed as string[];
 }
@@ -153,9 +153,9 @@ export function getTokenFlowConfigFromManifest(configPath: string, token: string
 
 export async function getBridgeWithdrawalTotalsInitData(): Promise<string> {
   const configPath = process.env.BRIDGE_FLOW_LIMITS_FILE;
-  if (!configPath) throw new Error("BRIDGE_FLOW_LIMITS_FILE is required for the atomic Bridge V4 upgrade");
+  if (!configPath) throw new Error("BRIDGE_FLOW_LIMITS_FILE is required for the atomic governed Bridge upgrade");
   const manifest = loadBridgeFlowLimitManifest(configPath);
-  assertCompleteV3FlowTokenSet(manifest.tokens, loadAuthoritativeV3FlowTokens());
+  assertCompleteFlowTokenSet(manifest.tokens, loadGovernanceFlowTokens());
   const timelock = await deployments.get("ExecutorWithTimelock");
   const bridgeFactory = await ethers.getContractFactory("Bridge");
   return bridgeFactory.interface.encodeFunctionData("initializeWithdrawalTotals", [

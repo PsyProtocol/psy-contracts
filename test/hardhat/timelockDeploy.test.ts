@@ -30,9 +30,9 @@ describe("timelock deployment defaults", function () {
 
   it("can opt into timelock role grants and proxy-admin ownership transfer", async function () {
     await ensureHardhatDeploymentChainId();
-    await deployments.fixture(["timelock"]);
+    await deployments.fixture(["transfer_ownership"]);
     process.env.GRANT_TIMELOCK_ROLES = "1";
-    process.env.REVOKE_LEGACY_ADMIN_ROLES = "1";
+    process.env.REVOKE_REPLACED_ADMIN_ROLES = "1";
     process.env.TRANSFER_PROTOCOL_OWNERSHIP_TO_TIMELOCK = "1";
     process.env.TRANSFER_PROXY_ADMIN_TO_TIMELOCK = "1";
     try {
@@ -52,17 +52,17 @@ describe("timelock deployment defaults", function () {
       const guardianRole = await acl.GUARDIAN_ROLE();
       const timelockContract = await ethers.getContractAt(timelock.abi, timelock.address);
       const governanceSafe = await timelockContract.getAdmin();
-      const [legacyAdmin] = await ethers.getSigners();
+      const [replacedAdmin] = await ethers.getSigners();
 
       expect(await acl.hasRole(defaultAdminRole, timelock.address)).to.equal(true);
       expect(await acl.hasRole(bridgeRole, timelock.address)).to.equal(true);
       expect(await acl.hasRole(routerRole, timelock.address)).to.equal(true);
       expect(await acl.hasRole(stateRole, timelock.address)).to.equal(true);
       expect(await acl.hasRole(guardianRole, governanceSafe)).to.equal(true);
-      expect(await acl.hasRole(defaultAdminRole, legacyAdmin.address)).to.equal(false);
-      expect(await acl.hasRole(bridgeRole, legacyAdmin.address)).to.equal(false);
-      expect(await acl.hasRole(routerRole, legacyAdmin.address)).to.equal(false);
-      expect(await acl.hasRole(stateRole, legacyAdmin.address)).to.equal(false);
+      expect(await acl.hasRole(defaultAdminRole, replacedAdmin.address)).to.equal(false);
+      expect(await acl.hasRole(bridgeRole, replacedAdmin.address)).to.equal(false);
+      expect(await acl.hasRole(routerRole, replacedAdmin.address)).to.equal(false);
+      expect(await acl.hasRole(stateRole, replacedAdmin.address)).to.equal(false);
       expect(await acl.owner()).to.equal(timelock.address);
       const bridgeDeployment = await deployments.get("Bridge");
       const bridge = await ethers.getContractAt(bridgeDeployment.abi, bridgeDeployment.address);
@@ -73,7 +73,7 @@ describe("timelock deployment defaults", function () {
       expect(await proxyAdmin.owner()).to.equal(timelock.address);
     } finally {
       delete process.env.GRANT_TIMELOCK_ROLES;
-      delete process.env.REVOKE_LEGACY_ADMIN_ROLES;
+      delete process.env.REVOKE_REPLACED_ADMIN_ROLES;
       delete process.env.TRANSFER_PROTOCOL_OWNERSHIP_TO_TIMELOCK;
       delete process.env.TRANSFER_PROXY_ADMIN_TO_TIMELOCK;
     }
