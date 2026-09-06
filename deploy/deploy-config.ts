@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
 import type { DeployFunction } from "hardhat-deploy/types";
-import { protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
+import { isLocalAnvilNetwork, protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
 
 export type DeployConfig = {
   admin: string;
@@ -127,7 +127,7 @@ export async function loadDeployConfig(hre: HardhatRuntimeEnvironment): Promise<
     }
   }
 
-  if (!["hardhat", "localhost"].includes(network.name)) {
+  if (!isLocalAnvilNetwork(network.name)) {
     const check = [cfg.admin, cfg.proposer, cfg.bridgeAdmin, cfg.routerAdmin, cfg.stateManagerAdmin];
     if (check.some((v) => PLACEHOLDER_ADDRESSES.has(v.toLowerCase()))) {
       throw new Error(

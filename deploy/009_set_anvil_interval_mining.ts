@@ -1,12 +1,13 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 
+import { isLocalAnvilNetwork } from "../protocol-config";
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, network } = hre;
   const { log } = deployments;
 
-  // Only applies to local anvil (localhost network)
-  if (network.name !== "localhost") {
+  // Only applies to local anvil instances (ETH, BSC, Base)
+  if (!isLocalAnvilNetwork(network.name)) {
     log("skipping anvil interval mining setup for non-local network");
     return;
   }

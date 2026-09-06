@@ -54,6 +54,15 @@ export function resolveProtocolNetworkName(networkName: string): keyof ProtocolC
   throw new Error(`Unsupported protocol network: ${networkName}`)
 }
 
+export function isLocalAnvilNetwork(networkName: string): boolean {
+  return (
+    networkName === 'hardhat' ||
+    networkName === 'localhost' ||
+    networkName === 'localhostBsc' ||
+    networkName === 'localhostBase'
+  )
+}
+
 export const protocolConfig: ProtocolConfig = {
   activeNetworks: ['sepolia', 'bscTestnet', 'baseSepolia'],
   chains: {

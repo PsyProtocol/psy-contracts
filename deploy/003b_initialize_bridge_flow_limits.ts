@@ -1,7 +1,7 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { ethers } from "hardhat";
-import { protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
+import { isLocalAnvilNetwork, protocolConfig, resolveProtocolNetworkName } from "../protocol-config";
 import { loadDeployConfig } from "./deploy-config";
 import { loadBridgeFlowLimitManifest, tokenSetHash, type FlowLimitConfig } from "../scripts/upgrade/bridge";
 
@@ -40,7 +40,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     tokens = manifest.tokens;
     configs = manifest.configs;
     historicalWithdrawalTotals = manifest.historicalWithdrawalTotals;
-  } else if (network.name === "hardhat" || network.name === "localhost") {
+  } else if (isLocalAnvilNetwork(network.name)) {
     const protocolNetwork = resolveProtocolNetworkName(network.name);
     const deployedTokens: string[] = [];
     for (const token of Object.values(protocolConfig.tokens)) {
