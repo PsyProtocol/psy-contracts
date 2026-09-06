@@ -8,6 +8,11 @@ typechain-types/
 
 # Local deployment artifacts
 deployments/localhost/
+deployments/localhostBsc/
+deployments/localhostBase/
+deployments/sepolia/
+deployments/bscTestnet/
+deployments/baseSepolia/
 deployments/hardhat/
 deployments/*/solcInputs/
 deployments/*/.chainId

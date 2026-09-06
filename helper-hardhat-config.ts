@@ -4,8 +4,14 @@ import { protocolConfig } from "./protocol-config";
 export type NetworkName =
   | "hardhat"
   | "localhost"
+  | "localhostBsc"
+  | "localhostBase"
   | "sepolia"
+  | "bscTestnet"
+  | "baseSepolia"
   | "ethereum"
+  | "bsc"
+  | "base"
 
 export type NetworkConfigItem = {
   chainId: number;
@@ -22,14 +28,38 @@ export const networkConfig: Record<NetworkName, NetworkConfigItem> = {
     chainId: protocolConfig.chains.localhost.l1ChainId,
     rpcUrl: process.env.LOCALHOST_RPC_URL || protocolConfig.chains.localhost.defaultRpcUrl,
   },
+  localhostBsc: {
+    chainId: protocolConfig.chains.localhostBsc.l1ChainId,
+    rpcUrl: process.env.LOCALHOST_BSC_RPC_URL || protocolConfig.chains.localhostBsc.defaultRpcUrl,
+  },
+  localhostBase: {
+    chainId: protocolConfig.chains.localhostBase.l1ChainId,
+    rpcUrl: process.env.LOCALHOST_BASE_RPC_URL || protocolConfig.chains.localhostBase.defaultRpcUrl,
+  },
   sepolia: {
     chainId: protocolConfig.chains.sepolia.l1ChainId,
     rpcUrl: process.env.SEPOLIA_RPC_URL || protocolConfig.chains.sepolia.defaultRpcUrl,
+  },
+  bscTestnet: {
+    chainId: protocolConfig.chains.bscTestnet.l1ChainId,
+    rpcUrl: process.env.BSC_TESTNET_RPC_URL || protocolConfig.chains.bscTestnet.defaultRpcUrl,
+  },
+  baseSepolia: {
+    chainId: protocolConfig.chains.baseSepolia.l1ChainId,
+    rpcUrl: process.env.BASE_SEPOLIA_RPC_URL || protocolConfig.chains.baseSepolia.defaultRpcUrl,
   },
   ethereum: {
     chainId: protocolConfig.chains.ethereum.l1ChainId,
     rpcUrl: process.env.ETH_RPC_URL || protocolConfig.chains.ethereum.defaultRpcUrl,
     weth: process.env.ETH_WETH,
+  },
+  bsc: {
+    chainId: protocolConfig.chains.bsc.l1ChainId,
+    rpcUrl: process.env.BSC_RPC_URL || protocolConfig.chains.bsc.defaultRpcUrl,
+  },
+  base: {
+    chainId: protocolConfig.chains.base.l1ChainId,
+    rpcUrl: process.env.BASE_RPC_URL || protocolConfig.chains.base.defaultRpcUrl,
   },
 };
 
