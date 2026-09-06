@@ -1,6 +1,7 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { loadDeployConfig } from "./deploy-config";
+import { isLocalAnvilNetwork } from "../protocol-config";
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, getNamedAccounts, network } = hre;
@@ -9,9 +10,8 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const cfg = await loadDeployConfig(hre);
   const txFrom = cfg.admin || deployer;
 
-  const LOCAL_NETWORKS = new Set(["localhost", "hardhat"]);
   if (process.env.TRANSFER_PROXY_ADMIN_TO_TIMELOCK !== "1") {
-    if (!LOCAL_NETWORKS.has(network.name)) {
+    if (!isLocalAnvilNetwork(network.name)) {
       throw new Error(
         "007e_transfer_proxy_admin_to_timelock is a required mainnet cutover gate: " +
           "set TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1 to transfer DefaultProxyAdmin to the timelock " +

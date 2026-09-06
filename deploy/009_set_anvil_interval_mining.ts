@@ -24,4 +24,4 @@ export default func;
 func.tags = ["anvil_interval_mining"];
 func.dependencies = ["export_deployed_contracts"];
 func.skip = async (hre: HardhatRuntimeEnvironment) =>
-  hre.network.name !== "localhost";
+  !isLocalAnvilNetwork(hre.network.name);
