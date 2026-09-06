@@ -1,7 +1,10 @@
 import "@nomicfoundation/hardhat-toolbox";
 import "hardhat-deploy";
 import * as dotenv from "dotenv";
-import { HardhatUserConfig } from "hardhat/config";
+import fs from "fs";
+import path from "path";
+import { HardhatUserConfig, subtask } from "hardhat/config";
+import { TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS } from "hardhat/builtin-tasks/task-names";
 import { mkNetworkCfg, type NetworkName, networkConfig } from "./helper-hardhat-config";
 import { protocolConfig } from "./protocol-config";
 import {
@@ -14,6 +17,32 @@ import "./tasks/upgrade";
 import "./tasks/governance";
 
 dotenv.config();
+
+function listSolidityFiles(dir: string): string[] {
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listSolidityFiles(fullPath));
+      continue;
+    }
+    if (entry.isFile() && entry.name.endsWith(".sol")) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+}
+
+subtask(TASK_COMPILE_SOLIDITY_GET_SOURCE_PATHS).setAction(async (_, hre, runSuper) => {
+  const sources = await runSuper();
+  const fixtures = listSolidityFiles(
+    path.join(hre.config.paths.root, "test", "fixtures", "contracts")
+  );
+  return [...sources, ...fixtures];
+});
 
 const optNetworks = Object.fromEntries(
   [

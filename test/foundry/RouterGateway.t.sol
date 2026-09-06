@@ -9,10 +9,10 @@ import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
 import {ERC20Gateway} from "../../src/ERC20Gateway.sol";
 import {ETHGateway} from "../../src/ETHGateway.sol";
-import {MockERC20} from "../../src/MockERC20.sol";
-import {MockWETH} from "../../src/MockWETH.sol";
-import {MockGnarkVerifier} from "../../src/MockGnarkVerifier.sol";
-import {TestERC1967Proxy} from "../../src/TestERC1967Proxy.sol";
+import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
+import {MockWETH} from "../fixtures/contracts/MockWETH.sol";
+import {MockGnarkVerifier} from "../fixtures/contracts/MockGnarkVerifier.sol";
+import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
 
 contract RouterGatewayTest is Test {
     address internal owner = address(0xA11CE);

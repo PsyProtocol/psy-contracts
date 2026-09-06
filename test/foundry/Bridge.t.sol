@@ -7,9 +7,9 @@ import {StateManager} from "../../src/StateManager.sol";
 import {Router} from "../../src/Router.sol";
 import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
-import {MockERC20} from "../../src/MockERC20.sol";
-import {MockGnarkVerifier} from "../../src/MockGnarkVerifier.sol";
-import {TestERC1967Proxy} from "../../src/TestERC1967Proxy.sol";
+import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
+import {MockGnarkVerifier} from "../fixtures/contracts/MockGnarkVerifier.sol";
+import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
 
 contract DepositBatchHashVerifier {
     bytes32 internal immutable expectedHash;

@@ -104,8 +104,8 @@ describe("governance upgrade and rescue", function () {
     await waitForContractDeployment(token);
     const tokenAddress = await getContractAddress(token);
     const legacy = await deployTransparentWithImplementation(
-      "LegacyBridgeV3",
-      "LegacyBridgeV3",
+      "BridgeUpgradeSource",
+      "BridgeUpgradeSource",
       owner.address,
       [owner.address, owner.address, owner.address, owner.address],
     );

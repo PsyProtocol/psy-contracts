@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import "./IncrementalMerkleTree.sol";
+import "../../../src/IncrementalMerkleTree.sol";
 
 contract IncrementalMerkleTreeHarness is IncrementalMerkleTree {
     function initializeHarness(uint8 depth_, uint16 rootHistorySize_) external initializer {
