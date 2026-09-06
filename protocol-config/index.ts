@@ -95,7 +95,12 @@ export const protocolConfig: ProtocolConfig = {
       bridgeChain: 'ethereum',
       l1ChainId: 11155111,
       l1ChainIndex: 0,
-      name: 'Sepolia',
+      // "Ethereum Sepolia", not "Sepolia": Base Sepolia is also configured, so
+      // the bare name is ambiguous everywhere it is shown — the bridge's route
+      // picker, the faucet page, activity rows. Display only; the `network` key
+      // above is what tooling matches on, and no address or validation reads
+      // this field. Matches the name the ops runtime manifest already uses.
+      name: 'Ethereum Sepolia',
       shortName: 'ETH',
       nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
       defaultRpcUrl: SEPOLIA_DEFAULT_RPC_URL,
