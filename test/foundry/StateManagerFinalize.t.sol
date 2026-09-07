@@ -5,8 +5,8 @@ import "forge-std/Test.sol";
 import {StateManager} from "../../src/StateManager.sol";
 import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
-import {MockGnarkVerifier} from "../../src/MockGnarkVerifier.sol";
-import {TestERC1967Proxy} from "../../src/TestERC1967Proxy.sol";
+import {MockGnarkVerifier} from "../fixtures/contracts/MockGnarkVerifier.sol";
+import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
 
 contract ExpectedFinalizeHashVerifier {
     bytes32 internal immutable expectedHash;

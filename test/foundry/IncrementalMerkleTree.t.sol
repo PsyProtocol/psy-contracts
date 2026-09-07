@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
-import {IncrementalMerkleTreeHarness} from "../../src/IncrementalMerkleTreeHarness.sol";
+import {IncrementalMerkleTreeHarness} from "../fixtures/contracts/IncrementalMerkleTreeHarness.sol";
 
 contract IncrementalMerkleTreeTest is Test {
     function testAppendAndKnownRoot() public {
