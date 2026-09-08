@@ -1,4 +1,4 @@
-import type { ProtocolConfig } from './types'
+import type { ProtocolConfig, ProtocolNetwork, ProtocolTokenSymbol } from './types'
 
 const ENV =
   (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env || {}
@@ -190,7 +190,11 @@ export const protocolConfig: ProtocolConfig = {
     },
     USDT: {
       symbol: 'USDT',
-      displaySymbol: 'USDT',
+      // Psy's own testnet token, not Tether's. It used to be shown — and
+      // deployed — as "USDT"/"Tether USD", which is what had MetaMask flag it
+      // as a malicious token: a contract claiming to be Tether at an address
+      // that is not Tether's. The deployments below that ARE Tether say so.
+      displaySymbol: 'pUSDT',
       icon: '/tokens/usdt.svg',
       decimals: 6,
       l2TokenContractId: '0x0000000000000000000000000000000000000000000000000000000000000004',
@@ -201,10 +205,58 @@ export const protocolConfig: ProtocolConfig = {
         sepolia: { deployName: 'USDTToken' },
         bscTestnet: { deployName: 'USDTToken' },
         baseSepolia: { deployName: 'USDTToken' },
-        ethereum: { l1Address: '0xdAC17F958D2ee523a2206206994597C13D831ec7' },
+        // Tether's real contract. Genuinely USDT, and must keep saying so.
+        ethereum: { l1Address: '0xdAC17F958D2ee523a2206206994597C13D831ec7', displaySymbol: 'USDT' },
       },
     },
   },
+}
+
+/**
+ * What to show a user for `token` on `network`.
+ *
+ * Lives here, next to the data it reads, rather than in the app: one token key
+ * can name genuinely different assets per network — the USDT key is Psy's own
+ * testnet token, displayed pUSDT so it does not claim to be Tether, and on
+ * Ethereum it is Tether's real contract, which must still read USDT.
+ */
+export function getTokenDisplaySymbol(
+  token: ProtocolTokenSymbol,
+  network?: ProtocolNetwork,
+  config: ProtocolConfig = protocolConfig,
+): string {
+  const entry = config.tokens[token]
+  if (!entry) return String(token)
+  const perNetwork = network ? entry.deployments[network]?.displaySymbol : undefined
+  return perNetwork ?? entry.displaySymbol
+}
+
+/**
+ * The token key `raw` names, matching keys and display symbols alike.
+ *
+ * Display symbols resolve because they reach lookups whether or not they are
+ * supposed to: persisted transaction metadata and activity rows carry whatever
+ * string was current when they were written, and once a display symbol differs
+ * from its key, a value that used to resolve would silently stop resolving.
+ */
+export function tokenKeyForSymbol(
+  raw: unknown,
+  config: ProtocolConfig = protocolConfig,
+): ProtocolTokenSymbol | null {
+  const needle = String(raw ?? '').trim().toLowerCase()
+  if (!needle) return null
+  const keys = Object.keys(config.tokens) as ProtocolTokenSymbol[]
+  const byKey = keys.find((key) => key.toLowerCase() === needle)
+  if (byKey) return byKey
+  return (
+    keys.find((key) => {
+      const entry = config.tokens[key]
+      if (entry.displaySymbol.toLowerCase() === needle) return true
+      return Object.values(entry.deployments).some(
+        (deployment) => deployment?.displaySymbol?.toLowerCase() === needle,
+      )
+    }) ?? null
+  )
 }
 
 /**

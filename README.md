@@ -96,6 +96,29 @@ Every deploy fails closed when the RPC `eth_chainId` differs from
 `protocol-config`. The final deployment export also verifies the on-chain
 `StateManager.l1ChainIndex()` before writing `deployed-contracts.json`.
 
+#### Test token metadata
+
+New `USDTToken` deployments on Ethereum Sepolia, BSC Testnet, and Base Sepolia
+use `Psy USDT` for ERC-20 `name()` and `pUSDT` for `symbol()` (lowercase `p`,
+uppercase `USDT`). Local deployments use the same contract. This is Psy testnet USDT
+for bridge testing, not an official Tether token and not redeemable for USD.
+Decimals remain 6 and the deployment script still mints 1 billion tokens.
+
+`USDTToken`, the protocol key `USDT`, L2 token ID 4, and the deployment JSON
+keys remain unchanged for compatibility. This change only renames the on-chain
+test token; it does not update DApp or wallet display labels. The configured
+Ethereum mainnet USDT address is unchanged.
+
+Existing deployed tokens cannot be renamed: they have no metadata setter or
+upgrade proxy. Do not overwrite existing deployment addresses to apply this
+change. A fresh deployment or separately reviewed migration must account for
+Router mappings, Faucet configuration, outstanding claims, and old balances.
+
+After an authorized deployment, verify `name()`, `symbol()`, and `decimals()`
+on each chain. Provide the chain ID, new token address, verified source code,
+and faucet address to the wallet security team for review. Renaming does not
+automatically remove an existing Blockaid or MetaMask warning.
+
 ### 5) Post-deploy sanity checks
 - `StateManager.bridge == Bridge`
 - `StateManager.proposer == expected proposer`
