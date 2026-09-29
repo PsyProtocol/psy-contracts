@@ -2,6 +2,10 @@
 pragma solidity ^0.8.24;
 
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import {BridgeOpening} from "./BridgeOpening.sol";
+import {IAggregateVerifier} from "./IAggregateVerifier.sol";
+import {IAggregateBridge} from "./IAggregateBridge.sol";
+import {IEthereumRewardPayer} from "./IEthereumRewardPayer.sol";
 
 interface IPsyAddressesProviderSM {
     function ACL_MANAGER_ID() external view returns (bytes32);
@@ -15,12 +19,9 @@ interface IPsyACLManagerSM {
     function isStateManagerAdmin(address account) external view returns (bool);
 }
 
-interface IZKVerifierProof {
-    function verifyProof(uint256[8] calldata proof, uint256[2] calldata input) external view;
-}
 
 contract StateManager is OwnableUpgradeable {
-    uint256 public constant VERSION = 2;
+    uint256 public constant VERSION = 3;
     uint64 public constant BRIDGE_USER_ID = 524288;
     bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_FORCE_SET_STATE_V1");
 
@@ -43,6 +44,17 @@ contract StateManager is OwnableUpgradeable {
     // Reserved storage slots kept for upgrade safety.
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
+    bytes private _aggregateConfig;
+    bytes32 public configHash;
+    address public aggregateVerifier;
+    address public aggregateBridge;
+    uint32 public depositCount;
+    bytes32 public depositSubtreeRoot;
+    bool private _applyingAggregate;
+
+    event AggregateFinalized(bytes32 indexed statementB, uint64 endCheckpointId, bytes32 endCheckpointRoot, bytes32 localDepositRoot, uint32 localDepositCount, bytes32 localWithdrawalRoot);
+    error UnauthorizedInitializer();
+    error AggregateReentrancy();
 
     event Finalized(
         uint64 indexed newLastFinalizedCheckpointId,
@@ -74,11 +86,6 @@ contract StateManager is OwnableUpgradeable {
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
     error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
-    modifier onlyBridge() {
-        IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
-        if (msg.sender != provider.getAddress(provider.BRIDGE_ID())) revert OnlyBridge();
-        _;
-    }
 
     modifier onlyProposer() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
@@ -100,16 +107,29 @@ contract StateManager is OwnableUpgradeable {
     }
 
     function initialize(
-        address owner_,
-        address addressesProvider_,
-        uint8 l1ChainIndex_
+        address owner_, address addressesProvider_, uint8 l1ChainIndex_,
+        bytes calldata networkConfig, address verifier
     ) external initializer {
         __Ownable_init(owner_);
         if (addressesProvider_ == address(0)) revert ZeroAddress();
         addressesProvider = addressesProvider_;
         l1ChainIndex = l1ChainIndex_;
-        knownDepositSubtreeRoots[bytes32(0)] = true;
-        knownWithdrawalSubtreeRoots[bytes32(0)] = true;
+        BridgeOpening.ChainConfig memory chain = _initializeAggregation(networkConfig, verifier);
+        lastFinalizedCheckpointId = chain.bootstrapId;
+        lastVerifiedCheckpointRoot = chain.bootstrapRoot;
+    }
+
+
+    function _initializeAggregation(bytes calldata networkConfig, address verifier) internal returns (BridgeOpening.ChainConfig memory chain) {
+        if (configHash != bytes32(0) || verifier.code.length == 0) revert VerifierNotSet();
+        BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(networkConfig);
+        IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
+        address bridge = provider.getAddress(provider.BRIDGE_ID());
+        chain = BridgeOpening.localChain(config, l1ChainIndex, bridge, address(this));
+        _aggregateConfig = networkConfig;
+        configHash = config.configHash;
+        aggregateVerifier = verifier;
+        aggregateBridge = bridge;
     }
 
     function getRevision() external pure virtual returns (uint256) {
@@ -170,201 +190,43 @@ contract StateManager is OwnableUpgradeable {
         );
     }
 
-    function finalize(
-        bytes calldata proof,
-        bytes32 depositTreeRoot,
-        bytes32[2] calldata checkpointRoots,
-        bytes32 withdrawalTreeRoot,
-        uint8 provenChainIndex,
-        uint64 newCheckpointId,
-        bytes32[9] calldata depositMerkleProof,
-        bytes32[9] calldata withdrawalMerkleProof
-    ) external onlyProposer {
-        IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
-        address zkVerifier = provider.getAddress(provider.ZK_VERIFIER_ID());
-        if (zkVerifier == address(0)) revert VerifierNotSet();
-        if (provenChainIndex != l1ChainIndex) revert InvalidProvenChainIndex();
-
-        bool isFirstFinalize = lastFinalizedCheckpointId == 0;
-
-        if (!isFirstFinalize) {
-            if (checkpointRoots[0] != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
+    function finalizeCheckpointAggregate(uint256[8] calldata proof, bytes calldata completeOpening) external onlyProposer {
+        if (_applyingAggregate) revert AggregateReentrancy();
+        if (configHash == bytes32(0) || aggregateVerifier.code.length == 0) revert VerifierNotSet();
+        BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(_aggregateConfig);
+        BridgeOpening.localChain(config, l1ChainIndex, aggregateBridge, address(this));
+        BridgeOpening.BOpening memory b = BridgeOpening.readB(completeOpening, config);
+        IAggregateVerifier(aggregateVerifier).verifyProof(proof, BridgeOpening.proofInputs(b.statementB));
+        uint256 ordinal = BridgeOpening.chainOrdinal(config, l1ChainIndex);
+        BridgeOpening.ChainStart memory start = b.a.starts[ordinal];
+        if (start.startCheckpointId != lastFinalizedCheckpointId || start.startCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
+        IAggregateBridge bridge = IAggregateBridge(aggregateBridge);
+        BridgeOpening.ChainEnd memory end = b.ends[ordinal];
+        if (bridge.configHash() != configHash || bridge.depositRoot() != end.depositRoot || bridge.provedDepositCount() != end.depositCount) revert InvalidDepositMerkleProof();
+        bool localWithdrawal;
+        for (uint256 i; i < b.withdrawals.length; ++i) {
+            if (b.withdrawals[i].chainIndex == l1ChainIndex) { localWithdrawal = true; break; }
         }
-
-        require(newCheckpointId > lastFinalizedCheckpointId, "newCheckpointId must advance past lastFinalizedCheckpointId");
-        uint64 numCheckpointsAggregated = newCheckpointId - lastFinalizedCheckpointId;
-
-        _validateBridgeTreeProofs(
-            depositTreeRoot,
-            withdrawalTreeRoot,
-            depositMerkleProof,
-            withdrawalMerkleProof,
-            isFirstFinalize
-        );
-        _verifyFinalizeProof(
-            zkVerifier,
-            proof,
-            checkpointRoots,
-            depositTreeRoot,
-            withdrawalTreeRoot,
-            newCheckpointId,
-            numCheckpointsAggregated
-        );
-
-        knownDepositSubtreeRoots[depositMerkleProof[0]] = true;
-        knownWithdrawalSubtreeRoots[withdrawalMerkleProof[0]] = true;
-        lastVerifiedCheckpointRoot = checkpointRoots[1];
-        lastVerifiedDepositTreeRoot = depositTreeRoot;
-        lastVerifiedWithdrawalTreeRoot = withdrawalTreeRoot;
-        withdrawalSubtreeRoot = withdrawalMerkleProof[0];
-        lastFinalizedCheckpointId = newCheckpointId;
-
-        emit Finalized(
-            lastFinalizedCheckpointId,
-            lastVerifiedCheckpointRoot,
-            depositTreeRoot,
-            withdrawalTreeRoot
-        );
-    }
-
-    function _verifyTopTreeProof(bytes32 expectedRoot, bytes32[9] calldata proof, uint8 index) internal pure returns (bool) {
-        if (expectedRoot == bytes32(0)) {
-            bool allZero = true;
-            for (uint8 i = 0; i < 9; ++i) {
-                if (proof[i] != bytes32(0)) {
-                    allZero = false;
-                    break;
-                }
-            }
-            if (allZero) return true;
-        }
-
-        bytes32 cur = proof[0];
-        for (uint8 level = 0; level < 8; ++level) {
-            bytes32 sibling = proof[level + 1];
-            if (((index >> level) & 1) == 0) {
-                cur = keccak256(abi.encodePacked(cur, sibling));
-            } else {
-                cur = keccak256(abi.encodePacked(sibling, cur));
-            }
-        }
-        return cur == expectedRoot;
-    }
-
-    function _validateBridgeTreeProofs(
-        bytes32 depositTreeRoot,
-        bytes32 withdrawalTreeRoot,
-        bytes32[9] calldata depositMerkleProof,
-        bytes32[9] calldata withdrawalMerkleProof,
-        bool isFirstFinalize
-    ) internal view {
-        if (!_verifyTopTreeProof(depositTreeRoot, depositMerkleProof, l1ChainIndex)) {
-            revert InvalidDepositMerkleProof();
-        }
-        if (withdrawalTreeRoot == bytes32(0)) {
-            // Keep empty-withdrawal bootstrap open until a non-zero withdrawal root has
-            // been finalized. Catch-up finalizes with no withdrawals must not brick.
-            if (!isFirstFinalize && lastVerifiedWithdrawalTreeRoot != bytes32(0)) {
-                revert WithdrawalBootstrapExpired();
-            }
+        bool localRewards = l1ChainIndex == config.ethereumIndex && b.rewards.length != 0;
+        if (lastFinalizedCheckpointId == b.a.endCheckpointId && !localWithdrawal && !localRewards) {
+            emit AggregateFinalized(b.statementB, b.a.endCheckpointId, b.a.endCheckpointRoot, end.depositRoot, end.depositCount, end.withdrawalRoot);
             return;
         }
-        if (!_verifyTopTreeProof(withdrawalTreeRoot, withdrawalMerkleProof, l1ChainIndex)) {
-            revert InvalidWithdrawalMerkleProof();
+        _applyingAggregate = true;
+        if (lastFinalizedCheckpointId != b.a.endCheckpointId) {
+            lastFinalizedCheckpointId = b.a.endCheckpointId;
+            lastVerifiedCheckpointRoot = b.a.endCheckpointRoot;
+            depositSubtreeRoot = end.depositRoot;
+            depositCount = end.depositCount;
+            withdrawalSubtreeRoot = end.withdrawalRoot;
         }
-    }
-
-
-    function _verifyFinalizeProof(
-        address zkVerifier,
-        bytes calldata proof,
-        bytes32[2] calldata checkpointRoots,
-        bytes32 depositTreeRoot,
-        bytes32 withdrawalTreeRoot,
-        uint64 newCheckpointId,
-        uint64 numCheckpointsAggregated
-    ) internal view {
-        bytes32 msgHash = _computeGnarkPublicInputsHash(
-            checkpointRoots,
-            depositTreeRoot,
-            withdrawalTreeRoot,
-            newCheckpointId,
-            numCheckpointsAggregated
-        );
-        uint256 pub0 = uint256(uint128(uint256(msgHash) >> 128));
-        uint256 pub1 = uint256(uint128(uint256(msgHash)));
-        if (!_verifyZkProof(zkVerifier, proof, pub0, pub1)) revert InvalidProof();
-    }
-
-    function _reverseBytes16(uint128 x) internal pure returns (uint128 y) {
-        bytes16 b = bytes16(x);
-        for (uint256 i = 0; i < 16; ++i) {
-            y |= uint128(uint8(b[i])) << uint8(i * 8);
+        if (localWithdrawal) bridge.registerAggregateWithdrawals(b.withdrawals);
+        if (localRewards) {
+            IEthereumRewardPayer payer = IEthereumRewardPayer(config.rewardPayer);
+            if (payer.configHash() != configHash || payer.stateManager() != address(this) || payer.ethereumChainId() != block.chainid) revert InvalidProvenChainIndex();
+            payer.payRewards(b.rewards);
         }
-    }
-
-    function _pairSwapU32x8(bytes32 root) internal pure returns (bytes32) {
-        uint256 x = uint256(root);
-        return bytes32(
-            (x & (uint256(0xffffffff) << 192)) << 32 |
-            (x & (uint256(0xffffffff) << 224)) >> 32 |
-            (x & (uint256(0xffffffff) << 128)) << 32 |
-            (x & (uint256(0xffffffff) << 160)) >> 32 |
-            (x & (uint256(0xffffffff) << 64)) << 32 |
-            (x & (uint256(0xffffffff) << 96)) >> 32 |
-            (x & uint256(0xffffffff)) << 32 |
-            (x & (uint256(0xffffffff) << 32)) >> 32
-        );
-    }
-
-    function _computeGnarkPublicInputsHash(
-        bytes32[2] calldata checkpointRoots,
-        bytes32 depositTreeRoot,
-        bytes32 withdrawalTreeRoot,
-        uint64 newCheckpointId,
-        uint64 numCheckpointsAggregated
-    ) internal pure returns (bytes32) {
-        // BridgeWrap hashes the original BridgeAgg public inputs with mixed widths:
-        // [0..4): old checkpoint root limbs as four uint64 values in PI order
-        // [4..12): deposit tree root limbs as eight uint32 values
-        // [12..20): withdrawal tree root limbs as eight uint32 values
-        // [20..24): new checkpoint root limbs as four uint64 values in PI order
-        // [24]: terminal checkpoint id (end_checkpoint_index / to_checkpoint) as uint64.
-        // [25]: number of aggregated checkpoint proofs as uint64.
-        // The L1 chain index is no longer a public input: a single finalize proof
-        // can be reused across chains. The L1-side guard (provenChainIndex ==
-        // l1ChainIndex) is enforced in finalize() via calldata.
-        uint256 oldRoot = uint256(checkpointRoots[0]);
-        uint256 newRoot = uint256(checkpointRoots[1]);
-        return keccak256(
-            abi.encodePacked(
-                uint64(oldRoot),
-                uint64(oldRoot >> 64),
-                uint64(oldRoot >> 128),
-                uint64(oldRoot >> 192),
-                _pairSwapU32x8(depositTreeRoot),
-                _pairSwapU32x8(withdrawalTreeRoot),
-                uint64(newRoot),
-                uint64(newRoot >> 64),
-                uint64(newRoot >> 128),
-                uint64(newRoot >> 192),
-                newCheckpointId,
-                numCheckpointsAggregated
-            )
-        );
-    }
-
-    function _verifyZkProof(address zkVerifier, bytes calldata proof, uint256 pub0, uint256 pub1) internal view returns (bool) {
-        uint256[2] memory input = [pub0, pub1];
-
-        // Only one gnark verifier ABI is supported.
-        if (proof.length == 32 * 8) {
-            uint256[8] memory p = abi.decode(proof, (uint256[8]));
-            try IZKVerifierProof(zkVerifier).verifyProof(p, input) {
-                return true;
-            } catch {}
-        }
-
-        return false;
+        _applyingAggregate = false;
+        emit AggregateFinalized(b.statementB, b.a.endCheckpointId, b.a.endCheckpointRoot, end.depositRoot, end.depositCount, end.withdrawalRoot);
     }
 }
