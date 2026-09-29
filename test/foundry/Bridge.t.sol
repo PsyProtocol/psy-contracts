@@ -49,7 +49,7 @@ contract BridgeTest is Test {
     address internal owner = address(0xA11CE);
     address internal user = address(0xB0B);
     bytes32 internal constant EMPTY_DEPOSIT_ROOT =
-        0xd65af5933a094e8329332a714327ba72b1e4dac93c0cde8ee479b9bb36c3fc43;
+        0xe479b9bb36c3fc43b1e4dac93c0cde8e29332a714327ba72d65af5933a094e83;
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_WORDS = 41;
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_COUNT = 32;
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS =
