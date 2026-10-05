@@ -11,6 +11,10 @@ library BridgeOpening {
     bytes32 internal constant LEAF = keccak256("PsyBridge/TwoArtifact/1/Leaf");
     bytes32 internal constant EMPTY = keccak256("PsyBridge/TwoArtifact/1/Empty");
     bytes32 internal constant NODE = keccak256("PsyBridge/TwoArtifact/1/Node");
+    bytes32 internal constant AGGREGATE_HEADER = keccak256("PsyBridge/TwoArtifact/1/AggregateHeader");
+    uint256 internal constant CLAIM_TREE_MAX_CAPACITY = 131072;
+    uint8 internal constant WITHDRAWAL_PUBLICATION_FAMILY = 2;
+    uint8 internal constant REWARD_PUBLICATION_FAMILY = 3;
 
     struct ChainConfig { uint8 chainIndex; uint256 chainId; address bridge; address stateManager; uint64 bootstrapId; bytes32 bootstrapRoot; }
     struct NetworkConfig {
@@ -40,6 +44,24 @@ library BridgeOpening {
         ChainStart[] starts; DepositTransition[] deposits; DepositLeaf[] depositLeaves; bytes32 statementA;
     }
     struct BOpening { AOpening a; ChainEnd[] ends; WithdrawalLeaf[] withdrawals; RewardLeaf[] rewards; bytes32 statementB; }
+    struct InclusionAggregateHeader {
+        uint8 family;
+        bytes32 configHash;
+        bytes32 windowId;
+        uint64 endCheckpointId;
+        bytes32 endCheckpointRoot;
+        uint32 aggregateCapacity;
+        uint32 totalCount;
+        uint32 segmentCount;
+        uint32 segmentIndex;
+        uint32 firstOrdinal;
+        uint32 count;
+        bytes32[] withdrawalRoots;
+        bytes32 oldNullifierRoot;
+        bytes32 newNullifierRoot;
+        bytes32 openingDigest;
+        bytes32 claimTreeRoot;
+    }
     struct Cursor { uint256 offset; }
     error InvalidEncoding();
     error InvalidConfig();
@@ -47,6 +69,7 @@ library BridgeOpening {
     error InvalidCount();
     error InvalidCursor();
     error InvalidDepositState();
+    error InvalidProof();
 
     function readWord(bytes memory body, Cursor memory cursor) private pure returns (uint256 value) {
         if (cursor.offset > body.length || body.length - cursor.offset < 32) revert InvalidEncoding();
@@ -69,6 +92,27 @@ library BridgeOpening {
             packed = (packed << 64) | limb;
         }
         return bytes32(packed);
+    }
+    function readPacked(bytes memory body, uint256 offset, uint256 width) private pure returns (uint256 value) {
+        if (offset > body.length || body.length - offset < width) revert InvalidEncoding();
+        assembly ("memory-safe") {
+            value := shr(mul(sub(32, width), 8), mload(add(add(body, 32), offset)))
+        }
+    }
+    function readPacked32(bytes memory body, uint256 offset) private pure returns (bytes32 value) {
+        if (offset > body.length || body.length - offset < 32) revert InvalidEncoding();
+        assembly ("memory-safe") {
+            value := mload(add(add(body, 32), offset))
+        }
+    }
+    function readCanonicalHash4(bytes memory body, uint256 offset) private pure returns (bytes32 packed) {
+        uint256 value;
+        for (uint256 limb; limb < 4; ++limb) {
+            uint256 felt = readPacked(body, offset + limb * 8, 8);
+            if (felt >= GOLDILOCKS_PRIME) revert InvalidEncoding();
+            value = (value << 64) | felt;
+        }
+        packed = bytes32(value);
     }
     function slice(bytes memory body, uint256 start, uint256 end) private pure returns (bytes memory out) {
         if (end > body.length || start > end) revert InvalidEncoding();
@@ -284,5 +328,113 @@ library BridgeOpening {
     }
     function proofInputs(bytes32 digest) internal pure returns (uint256[2] memory) {
         return [uint256(uint128(uint256(digest) >> 128)), uint256(uint128(uint256(digest)))];
+    }
+    function readInclusionAggregateHeader(bytes memory body) internal pure returns (InclusionAggregateHeader memory header) {
+        uint256 offset;
+        header.family = uint8(readPacked(body, offset, 1));
+        offset = 1;
+        header.configHash = readPacked32(body, offset);
+        offset += 32;
+        header.windowId = readPacked32(body, offset);
+        offset += 32;
+        header.endCheckpointId = uint64(readPacked(body, offset, 8));
+        offset += 8;
+        header.endCheckpointRoot = readCanonicalHash4(body, offset);
+        offset += 32;
+        header.aggregateCapacity = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        header.totalCount = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        header.segmentCount = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        header.segmentIndex = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        header.firstOrdinal = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        header.count = uint32(readPacked(body, offset, 4));
+        offset += 4;
+        if (header.family == WITHDRAWAL_PUBLICATION_FAMILY) {
+            if (body.length < offset + 64) revert InvalidEncoding();
+            uint256 rootBytes = body.length - offset - 64;
+            if (rootBytes % 32 != 0) revert InvalidCount();
+            uint256 chains = rootBytes / 32;
+            if (chains == 0 || chains > 256) revert InvalidCount();
+            header.withdrawalRoots = new bytes32[](chains);
+            for (uint256 i; i < chains; ++i) {
+                header.withdrawalRoots[i] = readCanonicalHash4(body, offset);
+                offset += 32;
+            }
+        } else if (header.family == REWARD_PUBLICATION_FAMILY) {
+            header.oldNullifierRoot = readCanonicalHash4(body, offset);
+            offset += 32;
+            header.newNullifierRoot = readCanonicalHash4(body, offset);
+            offset += 32;
+        } else {
+            revert InvalidConfig();
+        }
+        header.openingDigest = readPacked32(body, offset);
+        offset += 32;
+        header.claimTreeRoot = readPacked32(body, offset);
+        offset += 32;
+        if (offset != body.length) revert InvalidEncoding();
+        validateInclusionHeader(header);
+    }
+    function inclusionHeaderDigest(bytes memory headerBytes) internal pure returns (bytes32) {
+        readInclusionAggregateHeader(headerBytes);
+        return keccak256(abi.encodePacked(AGGREGATE_HEADER, headerBytes));
+    }
+    function inclusionProofInputs(bytes memory headerBytes) internal pure returns (uint256[6] memory inputs) {
+        InclusionAggregateHeader memory header = readInclusionAggregateHeader(headerBytes);
+        uint256[2] memory opening = proofInputs(header.openingDigest);
+        uint256[2] memory claim = proofInputs(header.claimTreeRoot);
+        uint256[2] memory digest = proofInputs(keccak256(abi.encodePacked(AGGREGATE_HEADER, headerBytes)));
+        inputs[0] = opening[0];
+        inputs[1] = opening[1];
+        inputs[2] = claim[0];
+        inputs[3] = claim[1];
+        inputs[4] = digest[0];
+        inputs[5] = digest[1];
+    }
+    function verifyClaimPath(InclusionAggregateHeader memory header, uint32 localOrdinal, bytes32 leafCommit, bytes32[] memory siblings) internal pure returns (bytes32) {
+        uint256 depth = claimDepth(header.aggregateCapacity);
+        if (siblings.length != depth || localOrdinal >= header.count || header.count > header.aggregateCapacity) revert InvalidCount();
+        bytes32 state = keccak256(abi.encodePacked(LEAF, bytes32(uint256(12)), bytes32(uint256(header.count)), bytes32(uint256(localOrdinal)), leafCommit));
+        for (uint256 level; level < depth; ++level) {
+            bytes32 sibling = siblings[level];
+            bytes32 left = (uint256(localOrdinal) & (1 << level)) == 0 ? state : sibling;
+            bytes32 right = (uint256(localOrdinal) & (1 << level)) == 0 ? sibling : state;
+            state = keccak256(abi.encodePacked(NODE, bytes32(uint256(12)), bytes32(level + 1), left, right));
+        }
+        if (state != header.claimTreeRoot) revert InvalidProof();
+        return leafCommit;
+    }
+    function validateInclusionHeader(InclusionAggregateHeader memory header) private pure {
+        uint32 capacity = header.aggregateCapacity;
+        if (capacity != 1024 && capacity != 2048 && capacity != 4096 && capacity != 8192) revert InvalidCount();
+        uint32 total = header.totalCount;
+        uint32 segments = total == 0 ? 0 : uint32((uint256(total) + capacity - 1) / capacity);
+        if (header.segmentCount != segments) revert InvalidCount();
+        if (total == 0) {
+            if (header.segmentIndex != 0 || header.firstOrdinal != 0 || header.count != 0 || header.openingDigest != bytes32(0) || header.claimTreeRoot != bytes32(0)) revert InvalidCount();
+        } else {
+            if (header.segmentIndex >= segments) revert InvalidCount();
+            uint256 first = uint256(header.segmentIndex) * capacity;
+            if (first > type(uint32).max || header.firstOrdinal != first) revert InvalidCount();
+            uint256 remaining = uint256(total) - first;
+            uint256 expected = remaining < capacity ? remaining : uint256(capacity);
+            if (header.count == 0 || header.count != expected) revert InvalidCount();
+        }
+        if (header.family == WITHDRAWAL_PUBLICATION_FAMILY) {
+            if (header.withdrawalRoots.length == 0 || header.withdrawalRoots.length > 256 || header.oldNullifierRoot != bytes32(0) || header.newNullifierRoot != bytes32(0)) revert InvalidCount();
+        } else if (header.totalCount == 0 && header.oldNullifierRoot != header.newNullifierRoot) {
+            revert InvalidCursor();
+        }
+    }
+    function claimDepth(uint256 capacity) private pure returns (uint256 depth) {
+        if (capacity == 0 || capacity > CLAIM_TREE_MAX_CAPACITY || (capacity & (capacity - 1)) != 0) revert InvalidCount();
+        while (capacity > 1) {
+            capacity >>= 1;
+            ++depth;
+        }
     }
 }
