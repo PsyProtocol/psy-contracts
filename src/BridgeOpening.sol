@@ -12,6 +12,8 @@ library BridgeOpening {
     bytes32 internal constant EMPTY = keccak256("PsyBridge/TwoArtifact/1/Empty");
     bytes32 internal constant NODE = keccak256("PsyBridge/TwoArtifact/1/Node");
     bytes32 internal constant AGGREGATE_HEADER = keccak256("PsyBridge/TwoArtifact/1/AggregateHeader");
+    bytes32 internal constant RECORD = keccak256("PsyBridge/TwoArtifact/1/Record");
+    bytes32 internal constant CUMULATIVE_RECORD = keccak256("PsyBridge/CumulativeReward/1/Record");
     uint256 internal constant CLAIM_TREE_MAX_CAPACITY = 131072;
     uint8 internal constant WITHDRAWAL_PUBLICATION_FAMILY = 2;
     uint8 internal constant REWARD_PUBLICATION_FAMILY = 3;
@@ -38,6 +40,7 @@ library BridgeOpening {
     struct DepositLeaf { uint8 chainIndex; uint32 absoluteIndex; bytes32 shieldAddress; address token; bytes32 l2TokenContractId; uint256 amount; bytes32 noteCommitment; }
     struct WithdrawalLeaf { uint8 chainIndex; uint32 senderUserId; address recipient; address token; uint256 amount; bytes32 nonce; }
     struct RewardLeaf { uint64 claimCheckpointId; uint32 userId; uint8 height; uint32 pathIndex; uint32 nullifierIndex; address recipient; }
+    struct CumulativeRewardLeaf { bytes32 economicDomain; uint32 userId; uint256 totalAmount; address recipient; bool initialized; }
     struct ChainEnd { uint8 chainIndex; bytes32 depositRoot; uint32 depositCount; bytes32 withdrawalRoot; }
     struct AOpening {
         bytes32 configHash; bytes32 windowId; uint64 endCheckpointId; bytes32 endCheckpointRoot;
@@ -436,5 +439,38 @@ library BridgeOpening {
             capacity >>= 1;
             ++depth;
         }
+    }
+    function readWithdrawalLeaf(bytes memory body) internal pure returns (WithdrawalLeaf memory leaf) {
+        if (body.length != 192) revert InvalidEncoding();
+        Cursor memory cursor;
+        leaf.chainIndex = uint8(readUint(body, cursor, 8));
+        leaf.senderUserId = uint32(readUint(body, cursor, 32));
+        leaf.recipient = readAddress(body, cursor);
+        leaf.token = readAddress(body, cursor);
+        leaf.amount = readWord(body, cursor);
+        leaf.nonce = bytes32(readWord(body, cursor));
+        if (cursor.offset != 192) revert InvalidEncoding();
+        if (leaf.recipient == address(0) || leaf.amount == 0 || leaf.amount >= GOLDILOCKS_PRIME) revert InvalidEncoding();
+    }
+    function withdrawalLeafCommit(bytes memory body) internal pure returns (bytes32) {
+        readWithdrawalLeaf(body);
+        return keccak256(abi.encodePacked(RECORD, bytes32(uint256(2)), body));
+    }
+    function readCumulativeRewardLeaf(bytes memory body) internal pure returns (CumulativeRewardLeaf memory leaf) {
+        if (body.length != 160) revert InvalidEncoding();
+        Cursor memory cursor;
+        leaf.economicDomain = bytes32(readWord(body, cursor));
+        leaf.userId = uint32(readUint(body, cursor, 32));
+        leaf.totalAmount = readWord(body, cursor);
+        leaf.recipient = readAddress(body, cursor);
+        uint256 flag = readUint(body, cursor, 64);
+        if (flag > 1) revert InvalidEncoding();
+        leaf.initialized = flag == 1;
+        if (cursor.offset != 160) revert InvalidEncoding();
+        if (!leaf.initialized && leaf.recipient != address(0)) revert InvalidEncoding();
+    }
+    function cumulativeRewardLeafCommit(bytes memory body) internal pure returns (bytes32) {
+        readCumulativeRewardLeaf(body);
+        return keccak256(abi.encodePacked(CUMULATIVE_RECORD, body));
     }
 }

@@ -23,6 +23,18 @@ contract BridgeOpeningHarness {
     function verifyClaimPath(BridgeOpening.InclusionAggregateHeader memory header, uint32 localOrdinal, bytes32 leafCommit, bytes32[] memory siblings) external pure returns (bytes32) {
         return BridgeOpening.verifyClaimPath(header, localOrdinal, leafCommit, siblings);
     }
+    function readWithdrawalLeaf(bytes calldata body) external pure returns (BridgeOpening.WithdrawalLeaf memory) {
+        return BridgeOpening.readWithdrawalLeaf(body);
+    }
+    function withdrawalLeafCommit(bytes calldata body) external pure returns (bytes32) {
+        return BridgeOpening.withdrawalLeafCommit(body);
+    }
+    function readCumulativeRewardLeaf(bytes calldata body) external pure returns (BridgeOpening.CumulativeRewardLeaf memory) {
+        return BridgeOpening.readCumulativeRewardLeaf(body);
+    }
+    function cumulativeRewardLeafCommit(bytes calldata body) external pure returns (bytes32) {
+        return BridgeOpening.cumulativeRewardLeafCommit(body);
+    }
 }
 
 contract BridgeOpeningTest is Test {
@@ -421,5 +433,132 @@ contract BridgeOpeningTest is Test {
         depthSeventeen.claimTreeRoot = bytes32(uint256(deep[0]) ^ 1);
         vm.expectRevert(BridgeOpening.InvalidProof.selector);
         harness.verifyClaimPath(depthSeventeen, 0, commit, path);
+    }
+    function withdrawalLeafBytes() private pure returns (bytes memory) {
+        return abi.encode(
+            uint256(255),
+            uint256(type(uint32).max),
+            address(0x1111111111111111111111111111111111111111),
+            address(0),
+            uint256(18446744069414584320),
+            bytes32(type(uint256).max)
+        );
+    }
+    function cumulativeRewardLeafBytes() private pure returns (bytes memory) {
+        return abi.encode(
+            bytes32(type(uint256).max),
+            uint256(type(uint32).max),
+            (uint256(0x01020304) << 224) | 1500,
+            address(0),
+            uint256(1)
+        );
+    }
+    function testWithdrawalLeafReadsWordsAndRecordCommit() public view {
+        bytes memory body = withdrawalLeafBytes();
+        assertEq(body.length, 192);
+        BridgeOpening.WithdrawalLeaf memory leaf = harness.readWithdrawalLeaf(body);
+        assertEq(leaf.chainIndex, 255);
+        assertEq(leaf.senderUserId, type(uint32).max);
+        assertEq(leaf.recipient, address(0x1111111111111111111111111111111111111111));
+        assertEq(leaf.token, address(0));
+        assertEq(leaf.amount, 18446744069414584320);
+        assertEq(leaf.nonce, bytes32(type(uint256).max));
+        assertEq(harness.withdrawalLeafCommit(body), keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(2)), body)));
+    }
+    function testWithdrawalLeafNonceChangesCommit() public view {
+        bytes memory body = withdrawalLeafBytes();
+        bytes32 previous = harness.withdrawalLeafCommit(body);
+        bytes memory zeroNonce = replaceWord(bytes.concat(body), 5, 0);
+        assertEq(harness.readWithdrawalLeaf(zeroNonce).nonce, bytes32(0));
+        bytes32 changed = harness.withdrawalLeafCommit(zeroNonce);
+        assertNotEq(changed, previous);
+        assertEq(changed, keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(2)), zeroNonce)));
+    }
+    function testWithdrawalLeafRejectsLengthPaddingAndAmount() public {
+        bytes memory body = withdrawalLeafBytes();
+        bytes memory short = new bytes(191);
+        for (uint256 i; i < short.length; ++i) short[i] = body[i];
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalLeaf(short);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.withdrawalLeafCommit(bytes.concat(body, bytes1(0)));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 0, 256));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 1, uint256(1) << 32));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 2, (uint256(1) << 160) | uint256(uint160(address(0x1111111111111111111111111111111111111111)))));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 3, uint256(1) << 160));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 4, 0));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 4, 18446744069414584321));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 2, 0));
+    }
+    function testCumulativeRewardLeafReadsUint256AndRecordCommit() public view {
+        bytes memory body = cumulativeRewardLeafBytes();
+        assertEq(body.length, 160);
+        BridgeOpening.CumulativeRewardLeaf memory leaf = harness.readCumulativeRewardLeaf(body);
+        assertEq(leaf.economicDomain, bytes32(type(uint256).max));
+        assertEq(leaf.userId, type(uint32).max);
+        assertEq(leaf.totalAmount, (uint256(0x01020304) << 224) | 1500);
+        assertEq(leaf.recipient, address(0));
+        assertTrue(leaf.initialized);
+        bytes32 commit = harness.cumulativeRewardLeafCommit(body);
+        assertEq(commit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), body)));
+        assertNotEq(commit, keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(3)), body)));
+    }
+    function testCumulativeRewardLeafAllowsZeroTotalAndUninitialized() public view {
+        bytes memory body = cumulativeRewardLeafBytes();
+        bytes32 previous = harness.cumulativeRewardLeafCommit(body);
+        bytes memory zeroTotal = replaceWord(bytes.concat(body), 2, 0);
+        BridgeOpening.CumulativeRewardLeaf memory cleared = harness.readCumulativeRewardLeaf(zeroTotal);
+        assertEq(cleared.totalAmount, 0);
+        assertTrue(cleared.initialized);
+        assertEq(cleared.recipient, address(0));
+        bytes32 clearedCommit = harness.cumulativeRewardLeafCommit(zeroTotal);
+        assertNotEq(clearedCommit, previous);
+        assertEq(clearedCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), zeroTotal)));
+        bytes memory dormant = replaceWord(bytes.concat(body), 4, 0);
+        BridgeOpening.CumulativeRewardLeaf memory uninitialized = harness.readCumulativeRewardLeaf(dormant);
+        assertFalse(uninitialized.initialized);
+        assertEq(uninitialized.recipient, address(0));
+        assertEq(uninitialized.totalAmount, (uint256(0x01020304) << 224) | 1500);
+        bytes32 dormantCommit = harness.cumulativeRewardLeafCommit(dormant);
+        assertNotEq(dormantCommit, previous);
+        assertEq(dormantCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), dormant)));
+        bytes memory openDomain = replaceWord(bytes.concat(body), 0, 0);
+        assertEq(harness.readCumulativeRewardLeaf(openDomain).economicDomain, bytes32(0));
+        bytes memory bound = replaceWord(bytes.concat(body), 3, uint256(uint160(address(15))));
+        BridgeOpening.CumulativeRewardLeaf memory paid = harness.readCumulativeRewardLeaf(bound);
+        assertEq(paid.recipient, address(15));
+        assertTrue(paid.initialized);
+        assertNotEq(harness.cumulativeRewardLeafCommit(bound), previous);
+        bytes memory maxTotal = replaceWord(bytes.concat(body), 2, type(uint256).max);
+        assertEq(harness.readCumulativeRewardLeaf(maxTotal).totalAmount, type(uint256).max);
+        assertEq(harness.cumulativeRewardLeafCommit(maxTotal), keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), maxTotal)));
+        assertNotEq(harness.cumulativeRewardLeafCommit(maxTotal), previous);
+    }
+    function testCumulativeRewardLeafRejectsLengthPaddingBooleanAndRecipient() public {
+        bytes memory body = cumulativeRewardLeafBytes();
+        bytes memory short = new bytes(159);
+        for (uint256 i; i < short.length; ++i) short[i] = body[i];
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readCumulativeRewardLeaf(short);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.cumulativeRewardLeafCommit(bytes.concat(body, bytes1(0)));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 1, uint256(1) << 32));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 3, uint256(1) << 160));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 4, 2));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.cumulativeRewardLeafCommit(replaceWord(bytes.concat(body), 4, uint256(1) << 64));
+        bytes memory recipient = replaceWord(bytes.concat(body), 3, uint256(uint160(address(15))));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.cumulativeRewardLeafCommit(replaceWord(recipient, 4, 0));
     }
 }
