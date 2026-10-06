@@ -225,14 +225,9 @@ contract StateManager is OwnableUpgradeable {
         bool advance = a.endCheckpointId > lastFinalizedCheckpointId;
         if (!advance && a.endCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
         for (uint256 i; i < config.chains.length; ++i) {
-            if (advance) {
-                if (settlement.finalizations[i].startCheckpointRoot != a.starts[i].startCheckpointRoot) revert InvalidCheckpointContinuity();
-            } else if (settlement.finalizations[i].checkpointCount == 0) {
-                revert InvalidCheckpointContinuity();
-            }
+            _ensureFinalizationSlot(a.starts[i], settlement.finalizations[i], a.endCheckpointId, a.endCheckpointRoot);
             if (settlement.endpoints[i].depositRoot != a.deposits[i].newRoot || settlement.endpoints[i].depositCount != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
         }
-        if (advance && uint256(settlement.finalizations[ordinal].checkpointCount) != uint256(a.endCheckpointId) - lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
         if (depositVerifier.code.length == 0 || finalizeVerifier.code.length == 0) revert VerifierNotSet();
         if (_zeroProof(depositProof) || _zeroProof(settlementProof)) revert InvalidProof();
         IAggregateVerifier(depositVerifier).verifyProof(depositProof, BridgeOpening.proofInputs(a.depositOpeningDigest));
@@ -257,6 +252,14 @@ contract StateManager is OwnableUpgradeable {
         emit WithdrawalAggregateApplied(BridgeOpening.withdrawalFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
         if (l1ChainIndex == config.ethereumIndex) emit RewardAggregateApplied(BridgeOpening.rewardFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
         emit SettlementAggregateApplied(settlement.openingDigest, settlement.windowId, a.endCheckpointId, a.endCheckpointRoot, settlement.batchRoot);
+    }
+
+    function _ensureFinalizationSlot(BridgeOpening.ChainStart memory start, BridgeOpening.FinalizationSlot memory slot, uint64 endCheckpointId, bytes32 endCheckpointRoot) private pure {
+        if (start.startCheckpointId < endCheckpointId) {
+            if (slot.startCheckpointRoot != start.startCheckpointRoot || uint256(slot.checkpointCount) != uint256(endCheckpointId) - uint256(start.startCheckpointId)) revert InvalidCheckpointContinuity();
+            return;
+        }
+        if (start.startCheckpointRoot != endCheckpointRoot || slot.checkpointCount == 0) revert InvalidCheckpointContinuity();
     }
 
     function _zeroProof(uint256[8] calldata proof) private pure returns (bool) {
