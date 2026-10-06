@@ -12,6 +12,7 @@ import { forceSetState } from "../../scripts/upgrade/forceSetState";
 import { UPGRADEABLE_CONTRACTS, upgradeAllContracts } from "../../scripts/upgrade/utils";
 import { getDeployedContract } from "../../helpers/contracts-helpers";
 import {
+  atomicDeployPrerequisitesMissing,
   defaultFlowConfig,
   ensureHardhatDeploymentChainId,
   getChecksumAddress,
@@ -58,6 +59,7 @@ describe("governance scripts local integration", function () {
   this.timeout(120000);
 
   beforeEach(async function () {
+    if (atomicDeployPrerequisitesMissing()) this.skip();
     await ensureHardhatDeploymentChainId();
     process.env.PSY_SKIP_BRIDGE_FLOW_LIMITS = "1";
     await deployments.fixture(["token_faucet"]);

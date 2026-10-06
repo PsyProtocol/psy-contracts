@@ -1,23 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
-
-function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
-  const proof = new Array(9).fill(ethers.constants.HashZero);
-  proof[0] = leaf;
-  let cur = leaf;
-  for (let i = 0; i < 8; i++) {
-    const sib = ethers.utils.keccak256(ethers.utils.solidityPack(["string", "uint8"], ["sib", i]));
-    proof[i + 1] = sib;
-    const bit = (index >> i) & 1;
-    cur = bit === 0
-      ? ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [cur, sib]))
-      : ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [sib, cur]));
-  }
-  return { proof, root: cur };
-}
+import { registerWithdrawal } from "./helpers/withdrawalClaim";
 
 function addrToBytes32(addr: string): string {
   return ethers.utils.hexZeroPad(addr, 32);
@@ -144,28 +128,8 @@ describe("Deposit And Claim", function () {
     const erc20Nonce = 42n;
     await token.mint(bridge.address, erc20Amount);
 
-    const depositLeaf1 = ethers.constants.HashZero;
-    const depositTop1 = mkTopProof(depositLeaf1, 0);
-    const withdrawalTop1 = mkTopProof(ethers.utils.hexZeroPad("0x1111", 32), 0);
-    const roots1 = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-    await sm.finalize(DUMMY_GNARK_PROOF, depositTop1.root, roots1, withdrawalTop1.root, 0, 1, depositTop1.proof, withdrawalTop1.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs: erc20PublicInputs, slotData: erc20SlotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawalTop1.proof[0],
-      recipient: user.address,
-      token: token.address,
-      amount: erc20Amount,
-      nonce: erc20Nonce,
-      destinationChainIndex: 0,
-    });
-
-    await expect(
-      bridge.batchClaimWithdrawal(proof, erc20PublicInputs, erc20SlotData)
-    ).to.not.be.reverted;
+    await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
+      token: token.address, amount: erc20Amount, nonce: erc20Nonce });
     expect(await token.balanceOf(user.address)).to.equal(0);
     await bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32));
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
@@ -176,27 +140,10 @@ describe("Deposit And Claim", function () {
     await weth.deposit({ value: ethAmount });
     await weth.transfer(bridge.address, ethAmount);
 
-    const depositLeaf2 = ethers.constants.HashZero;
-    const depositTop2 = mkTopProof(depositLeaf2, 0);
-    const withdrawalTop2 = mkTopProof(ethers.utils.hexZeroPad("0x2222", 32), 0);
-    const roots2 = [
-      roots1[1],
-      ethers.utils.hexZeroPad("0x04", 32),
-    ];
-    await sm.finalize(DUMMY_GNARK_PROOF, depositTop2.root, roots2, withdrawalTop2.root, 0, 2, depositTop2.proof, withdrawalTop2.proof);
-
-    const { publicInputs: ethPublicInputs, slotData: ethSlotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawalTop2.proof[0],
-      recipient: user.address,
-      token: ethers.constants.AddressZero,
-      amount: ethAmount,
-      nonce: ethNonce,
-      destinationChainIndex: 0,
-    });
-
-    await expect(
-      bridge.batchClaimWithdrawal(proof, ethPublicInputs, ethSlotData)
-    ).to.not.changeEtherBalance(user, ethAmount);
+    const before = await ethers.provider.getBalance(user.address);
+    await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
+      token: ethers.constants.AddressZero, amount: ethAmount, nonce: ethNonce });
+    expect(await ethers.provider.getBalance(user.address)).to.equal(before);
     await expect(
       bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))
     ).to.changeEtherBalance(user, ethAmount);

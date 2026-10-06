@@ -25,12 +25,12 @@ async function getContractAddress(contract: any): Promise<string> {
   throw new Error("Unable to resolve deployed contract address");
 }
 
-export async function deployProxy(contractName: string, initArgs: unknown[] = []) {
+export async function deployProxy(contractName: string, initArgs: unknown[] | null = []) {
   const implementationFactory = await ethers.getContractFactory(contractName);
   const implementation = await implementationFactory.deploy();
   await waitForContractDeployment(implementation);
 
-  const initData = implementationFactory.interface.encodeFunctionData("initialize", initArgs);
+  const initData = initArgs === null ? "0x" : implementationFactory.interface.encodeFunctionData("initialize", initArgs);
   const proxyFactory = await ethers.getContractFactory("TestERC1967Proxy");
   const implementationAddress = await getContractAddress(implementation);
   const proxy = await proxyFactory.deploy(implementationAddress, initData);

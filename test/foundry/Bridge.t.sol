@@ -10,32 +10,9 @@ import {PsyACLManager} from "../../src/PsyACLManager.sol";
 import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
 import {MockGnarkVerifier} from "../fixtures/contracts/MockGnarkVerifier.sol";
 import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
+import {BridgeOpening} from "../../src/BridgeOpening.sol";
+import {AtomicBridgeFixture} from "../fixtures/contracts/AtomicBridgeFixture.sol";
 
-contract DepositBatchHashVerifier {
-    bytes32 internal immutable expectedHash;
-
-    constructor(bytes32 expectedHash_) {
-        expectedHash = expectedHash_;
-    }
-
-    function verifyProof(uint256[8] calldata, uint256[2] calldata pubs) external view {
-        bytes32 actualHash = bytes32((uint256(pubs[0]) << 128) | uint256(pubs[1]));
-        require(actualHash == expectedHash, "unexpected hash");
-    }
-}
-
-contract WithdrawalBatchHashVerifier {
-    bytes32 internal immutable expectedHash;
-
-    constructor(bytes32 expectedHash_) {
-        expectedHash = expectedHash_;
-    }
-
-    function verifyProof(uint256[8] calldata, uint256[2] calldata pubs) external view {
-        bytes32 actualHash = bytes32((uint256(pubs[0]) << 128) | uint256(pubs[1]));
-        require(actualHash == expectedHash, "unexpected hash");
-    }
-}
 
 contract RevertingTransferToken is MockERC20 {
     constructor() MockERC20("Revert", "RVT") {}
@@ -45,55 +22,9 @@ contract RevertingTransferToken is MockERC20 {
     }
 }
 
-contract BridgeTest is Test {
+contract BridgeTest is AtomicBridgeFixture {
     address internal owner = address(0xA11CE);
     address internal user = address(0xB0B);
-    bytes32 internal constant EMPTY_DEPOSIT_ROOT =
-        0xe479b9bb36c3fc43b1e4dac93c0cde8e29332a714327ba72d65af5933a094e83;
-    uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_WORDS = 41;
-    uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_COUNT = 32;
-    uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS =
-        DEPOSIT_BATCH_APPEND_SLOT_WORDS * DEPOSIT_BATCH_APPEND_SLOT_COUNT;
-
-    function _deployAddressesProvider() internal returns (PsyAddressesProvider provider) {
-        PsyAddressesProvider impl = new PsyAddressesProvider();
-        bytes memory initData = abi.encodeCall(PsyAddressesProvider.initialize, (owner));
-        provider = PsyAddressesProvider(address(new TestERC1967Proxy(address(impl), initData)));
-    }
-
-    function _deployACL() internal returns (PsyACLManager acl) {
-        PsyACLManager impl = new PsyACLManager();
-        bytes memory initData = abi.encodeCall(PsyACLManager.initialize, (owner, owner, owner, owner, owner));
-        acl = PsyACLManager(address(new TestERC1967Proxy(address(impl), initData)));
-    }
-
-    function _deployStateManager(PsyAddressesProvider provider) internal returns (StateManager sm) {
-        StateManager impl = new StateManager();
-        bytes memory initData = abi.encodeCall(StateManager.initialize, (owner, address(provider), uint8(0)));
-        TestERC1967Proxy proxy = new TestERC1967Proxy(address(impl), initData);
-        sm = StateManager(address(proxy));
-    }
-
-    function _deployRouter(PsyAddressesProvider provider) internal returns (Router router) {
-        Router impl = new Router();
-        bytes memory initData = abi.encodeCall(Router.initialize, (owner, address(provider)));
-        TestERC1967Proxy proxy = new TestERC1967Proxy(address(impl), initData);
-        router = Router(address(proxy));
-    }
-
-    function _deployBridge(
-        PsyAddressesProvider provider,
-        address depositBatchVerifier,
-        address withdrawalClaimVerifier
-    ) internal returns (Bridge bridge) {
-        Bridge impl = new Bridge();
-        bytes memory initData = abi.encodeCall(
-            Bridge.initialize,
-            (owner, address(provider), depositBatchVerifier, withdrawalClaimVerifier)
-        );
-        TestERC1967Proxy proxy = new TestERC1967Proxy(address(impl), initData);
-        bridge = Bridge(payable(address(proxy)));
-    }
 
     function _defaultFlowConfig() internal pure returns (Bridge.TokenFlowConfig memory) {
         return Bridge.TokenFlowConfig({
@@ -134,38 +65,18 @@ contract BridgeTest is Test {
     }
 
     function _setupBridgeSystem() internal returns (Bridge bridge, MockGnarkVerifier verifier) {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        provider.setAddress(provider.ERC20_GATEWAY_ID(), owner);
-        vm.stopPrank();
+        _deployAtomic(owner, owner);
+        bridge = atomicBridge;
+        verifier = depositVerifier;
         MockERC20 mockToken = new MockERC20("Mock", "MOCK");
         vm.etch(address(0x1234), address(mockToken).code);
         _configureFlowToken(bridge, address(0x1234));
     }
 
-    function _bridgeContractState(
-        bytes32 root,
-        uint256 provedCount,
-        uint256 pendingCount,
-        bytes32[32] memory frontier
-    ) internal pure returns (Bridge.BridgeContractState memory state_) {
-        state_ = Bridge.BridgeContractState({
-            depositRoot: root,
-            provedDepositCount: provedCount,
-            pendingDepositCount: pendingCount,
-            depositFrontier: frontier
-        });
+    function _bridgeContractState(bytes32 root, uint256 provedCount, uint256 pendingCount)
+        internal pure returns (Bridge.BridgeContractState memory)
+    {
+        return Bridge.BridgeContractState(root, provedCount, pendingCount);
     }
 
     function testForceSetStateRestoresFieldsLeavesMappingsAndRetryIsNoOp() public {
@@ -178,24 +89,15 @@ contract BridgeTest is Test {
         vm.store(address(bridge), keccak256(abi.encode(claimedNonce, uint256(1))), bytes32(uint256(1)));
         assertTrue(bridge.claimedNullifiers(claimedNonce));
 
-        // Seed live non-mapping storage through the legitimate batchAppend path.
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(0xCAFE)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        uint256[8] memory proof;
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(0xCAFE)), 0, 1, _recordedLeaf());
         vm.prank(owner);
-        bridge.batchAppend(proof, publicInputs, slotData);
+        _apply(w);
         assertEq(bridge.depositRoot(), bytes32(uint256(0xCAFE)));
         assertEq(bridge.provedDepositCount(), 1);
         assertEq(bridge.pendingDepositCount(), 1);
 
-        bytes32[32] memory initialFrontier;
-        Bridge.BridgeContractState memory expected = _bridgeContractState(bytes32(uint256(0xCAFE)), 1, 1, initialFrontier);
-        bytes32[32] memory targetFrontier;
-        for (uint256 i = 0; i < targetFrontier.length; ++i) {
-            targetFrontier[i] = bytes32(i + 1);
-        }
-        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(0xBEEF)), 0, 0, targetFrontier);
+        Bridge.BridgeContractState memory expected = _bridgeContractState(bytes32(uint256(0xCAFE)), 1, 1);
+        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(0xBEEF)), 0, 0);
 
         vm.recordLogs();
         vm.prank(owner);
@@ -207,7 +109,6 @@ contract BridgeTest is Test {
         assertEq(bridge.depositRoot(), target.depositRoot);
         assertEq(bridge.provedDepositCount(), target.provedDepositCount);
         assertEq(bridge.pendingDepositCount(), target.pendingDepositCount);
-        assertEq(keccak256(abi.encode(bridge.getDepositFrontier())), keccak256(abi.encode(targetFrontier)));
         assertEq(bridge.depositLeafHashes(0), recordedLeaf);
         assertTrue(bridge.claimedNullifiers(claimedNonce));
 
@@ -220,25 +121,24 @@ contract BridgeTest is Test {
     function testForceSetStateFailsClosedOnAuthCasAndInvariants() public {
         (Bridge bridge,) = _setupBridgeSystem();
 
-        bytes32[32] memory frontier;
-        Bridge.BridgeContractState memory current = _bridgeContractState(EMPTY_DEPOSIT_ROOT, 0, 0, frontier);
+        Bridge.BridgeContractState memory current = _bridgeContractState(EMPTY_DEPOSIT_ROOT, 0, 0);
 
         vm.prank(user);
         vm.expectRevert(Bridge.UnauthorizedBridgeAdmin.selector);
         bridge.forceSetState(current, current);
 
-        Bridge.BridgeContractState memory stale = _bridgeContractState(bytes32(uint256(1)), 0, 0, frontier);
-        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(2)), 0, 0, frontier);
+        Bridge.BridgeContractState memory stale = _bridgeContractState(bytes32(uint256(1)), 0, 0);
+        Bridge.BridgeContractState memory target = _bridgeContractState(bytes32(uint256(2)), 0, 0);
         vm.prank(owner);
         vm.expectPartialRevert(Bridge.UnexpectedCurrentState.selector);
         bridge.forceSetState(stale, target);
 
-        Bridge.BridgeContractState memory provedAbovePending = _bridgeContractState(bytes32(uint256(2)), 1, 0, frontier);
+        Bridge.BridgeContractState memory provedAbovePending = _bridgeContractState(bytes32(uint256(2)), 1, 0);
         vm.prank(owner);
         vm.expectRevert(Bridge.InvalidForceSetState.selector);
         bridge.forceSetState(current, provedAbovePending);
 
-        Bridge.BridgeContractState memory countIncrease = _bridgeContractState(bytes32(uint256(2)), 0, 1, frontier);
+        Bridge.BridgeContractState memory countIncrease = _bridgeContractState(bytes32(uint256(2)), 0, 1);
         vm.prank(owner);
         vm.expectRevert(Bridge.InvalidForceSetState.selector);
         bridge.forceSetState(current, countIncrease);
@@ -246,24 +146,10 @@ contract BridgeTest is Test {
         assertEq(bridge.depositRoot(), EMPTY_DEPOSIT_ROOT);
         assertEq(bridge.provedDepositCount(), 0);
         assertEq(bridge.pendingDepositCount(), 0);
-        assertEq(keccak256(abi.encode(bridge.getDepositFrontier())), keccak256(abi.encode(frontier)));
     }
 
     function testRecordDepositDisabled() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
 
@@ -277,442 +163,68 @@ contract BridgeTest is Test {
     }
 
     function testRecordDepositFromGatewayRejectsZeroAmount() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        provider.setAddress(provider.ERC20_GATEWAY_ID(), owner);
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
 
         vm.prank(owner);
         vm.expectRevert(Bridge.ZeroAmount.selector);
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 0, bytes32(uint256(123)), bytes32(uint256(456)));
     }
 
-    function _mkTopProof(bytes32 leaf, uint8 index) internal pure returns (bytes32[9] memory p, bytes32 root) {
-        p[0] = leaf;
-        bytes32 cur = leaf;
-        for (uint8 i = 0; i < 8; ++i) {
-            bytes32 sib = keccak256(abi.encodePacked("sib", i));
-            p[i + 1] = sib;
-            if (((index >> i) & 1) == 0) {
-                cur = keccak256(abi.encodePacked(cur, sib));
-            } else {
-                cur = keccak256(abi.encodePacked(sib, cur));
-            }
-        }
-        root = cur;
+    function _recordedLeaf() internal pure returns (BridgeOpening.DepositLeaf[] memory leaves) {
+        leaves = new BridgeOpening.DepositLeaf[](1);
+        leaves[0] = BridgeOpening.DepositLeaf(0, 0, bytes32(uint256(2)), address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(3)));
     }
 
-    function _roots(bytes32 first, bytes32 last) internal pure returns (bytes32[2] memory r) {
-        r[0] = first;
-        r[1] = last;
+    function _depositWindow(bytes32 oldRoot, bytes32 newRoot, uint32 oldCount, uint32 newCount, BridgeOpening.DepositLeaf[] memory leaves) internal view returns (Window memory) {
+        return _window(manager.lastFinalizedCheckpointId() + 1, bytes32(uint256(manager.lastFinalizedCheckpointId() + 1)), BridgeOpening.DepositTransition(0, oldRoot, newRoot, oldCount, newCount), leaves, new BridgeOpening.WithdrawalLeaf[](0));
     }
 
-    function _dummyGnarkProof() internal pure returns (bytes memory proof) {
-        uint256[8] memory proofWords = [uint256(1), 2, 3, 4, 5, 6, 7, 8];
-        return abi.encode(proofWords);
+    function _register(address recipient, address token, uint256 amount, bytes32 nonce) internal {
+        Window memory w = _withdrawalWindow(recipient, token, amount, nonce);
+        vm.prank(owner);
+        _apply(w);
     }
-
-    function _bytes32ToWords(bytes32 value) internal pure returns (uint256[] memory out) {
-        out = new uint256[](8);
-        for (uint256 i = 0; i < 8; ++i) {
-            out[i] = uint32(uint256(value >> ((7 - i) * 32)));
-        }
-    }
-
-    function _bytes32ToWordsLE(bytes32 value) internal pure returns (uint256[] memory out) {
-        out = new uint256[](8);
-        for (uint256 i = 0; i < 8; ++i) {
-            out[i] = uint32(uint256(value >> (i * 32)));
-        }
-    }
-
-    function _uint256ToWords(uint256 value) internal pure returns (uint256[] memory out) {
-        out = _bytes32ToWords(bytes32(value));
-    }
-
-    function _buildWithdrawalClaimPublicInputs(
-        bytes32 withdrawalRoot,
-        bytes32 leafHash,
-        address recipient,
-        address token,
-        uint256 amount,
-        bytes32 nonce,
-        uint32 destinationChainIndex
-    ) internal pure returns (uint256[] memory out) {
-        out = new uint256[](51);
-        uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
-        uint256[] memory leafWords = _bytes32ToWords(leafHash);
-        uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(recipient))));
-        uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(token))));
-        uint256[] memory amountWords = _uint256ToWords(amount);
-        uint256[] memory nonceWords = _bytes32ToWords(nonce);
-
-        for (uint256 i = 0; i < 8; ++i) {
-            out[i] = rootWords[i];
-            out[8 + i] = leafWords[i];
-            out[16 + i] = recipientWords[i];
-            out[24 + i] = tokenWords[i];
-            out[32 + i] = amountWords[i];
-            out[40 + i] = nonceWords[i];
-        }
-        out[48] = destinationChainIndex;
-        out[49] = 0;
-        out[50] = 524288;
-    }
-
-    function _buildWithdrawalBatchClaimPublicInputsSingle(
-        bytes32 withdrawalRoot,
-        uint32 senderUserId,
-        address recipient,
-        address token,
-        uint256 amount,
-        bytes32 nonce,
-        uint32 destinationChainIndex,
-        uint32 leafIndex
-    ) internal pure returns (uint256[18] memory out, uint256[1088] memory slotData) {
-        uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
-        uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(recipient))));
-        uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(token))));
-        uint256[] memory amountWords = _uint256ToWords(amount);
-        uint256[] memory nonceWords = _bytes32ToWords(nonce);
-        for (uint256 i = 0; i < 8; ++i) {
-            out[i] = rootWords[i];
-        }
-        out[8] = 1;
-        out[9] = 524288;
-        slotData[0] = senderUserId;
-        for (uint256 i = 0; i < 8; ++i) {
-            slotData[1 + i] = recipientWords[i];
-            slotData[9 + i] = tokenWords[i];
-            slotData[17 + i] = amountWords[i];
-            slotData[25 + i] = nonceWords[i];
-        }
-        slotData[33] = destinationChainIndex;
-        uint256[] memory batchCommitWords = _bytes32ToWords(_computeWithdrawalBatchSlotDataCommit(slotData));
-        for (uint256 i = 0; i < 8; ++i) {
-            out[10 + i] = batchCommitWords[i];
-        }
-        leafIndex;
-    }
-
-    function _computeWithdrawalBatchClaimPublicInputsHash(
-        uint256[18] memory pi
-    ) internal pure returns (bytes32) {
-        bytes memory buf = new bytes((18 / 2) * 8);
-        for (uint256 k = 0; k < 18 / 2; ++k) {
-            uint64 packed = (uint64(pi[2 * k]) << 32) | uint64(pi[2 * k + 1]);
-            uint256 offset = k * 8;
-            buf[offset] = bytes1(uint8(packed >> 56));
-            buf[offset + 1] = bytes1(uint8(packed >> 48));
-            buf[offset + 2] = bytes1(uint8(packed >> 40));
-            buf[offset + 3] = bytes1(uint8(packed >> 32));
-            buf[offset + 4] = bytes1(uint8(packed >> 24));
-            buf[offset + 5] = bytes1(uint8(packed >> 16));
-            buf[offset + 6] = bytes1(uint8(packed >> 8));
-            buf[offset + 7] = bytes1(uint8(packed));
-        }
-        return keccak256(buf);
-    }
-
-    function _computeWithdrawalBatchSlotDataCommit(
-        uint256[1088] memory slotData
-    ) internal pure returns (bytes32) {
-        bytes memory buf = new bytes(1088 * 4);
-        for (uint256 k = 0; k < 1088; ++k) {
-            uint256 word = slotData[k];
-            uint256 offset = k * 4;
-            buf[offset] = bytes1(uint8(word >> 24));
-            buf[offset + 1] = bytes1(uint8(word >> 16));
-            buf[offset + 2] = bytes1(uint8(word >> 8));
-            buf[offset + 3] = bytes1(uint8(word));
-        }
-        return keccak256(buf);
-    }
-
-    function _buildDepositBatchPublicInputs(
-        bytes32 oldRoot,
-        bytes32 newRoot,
-        uint32 fromIndex,
-        uint32 toIndex,
-        bytes32 batchCommit
-    ) internal pure returns (uint256[] memory out) {
-        out = new uint256[](18 + 32 * 8 + 32 * 16 + 1 + 8);
-
-        uint256[] memory oldRootWords = _bytes32ToWordsLE(oldRoot);
-        uint256[] memory newRootWords = _bytes32ToWordsLE(newRoot);
-        uint256[] memory batchCommitWords = _bytes32ToWords(batchCommit);
-
-        for (uint256 i = 0; i < 8; ++i) {
-            out[i] = oldRootWords[i];
-            out[8 + i] = newRootWords[i];
-        }
-        out[16] = fromIndex;
-        out[17] = toIndex;
-        uint256 antiForgeryOffset = 18 + 32 * 8 + 32 * 16 + 1;
-        for (uint256 i = 0; i < 8; ++i) {
-            out[antiForgeryOffset + i] = batchCommitWords[i];
-        }
-    }
-
-    function _setWord(uint256[] memory arr, uint256 idx, uint256 value) internal pure {
-        arr[idx] = value;
-    }
-
-    function _computeDepositBatchPublicInputsHash(uint256[] memory pi) internal pure returns (bytes32) {
-        bytes memory buf = new bytes(pi.length * 4);
-        for (uint256 k = 0; k < pi.length; ++k) {
-            uint256 word = pi[k];
-            uint256 offset = k * 4;
-            buf[offset] = bytes1(uint8(word >> 24));
-            buf[offset + 1] = bytes1(uint8(word >> 16));
-            buf[offset + 2] = bytes1(uint8(word >> 8));
-            buf[offset + 3] = bytes1(uint8(word));
-        }
-        return keccak256(abi.encodePacked(keccak256(buf)));
-    }
-
-    function _computeDepositBatchSlotDataCommit(
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData
-    ) internal pure returns (bytes32) {
-        bytes memory buf = new bytes(DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS * 4);
-        for (uint256 k = 0; k < DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS; ++k) {
-            uint256 word = slotData[k];
-            uint256 offset = k * 4;
-            buf[offset] = bytes1(uint8(word >> 24));
-            buf[offset + 1] = bytes1(uint8(word >> 16));
-            buf[offset + 2] = bytes1(uint8(word >> 8));
-            buf[offset + 3] = bytes1(uint8(word));
-        }
-        return keccak256(buf);
-    }
-
-    function _computeDepositLeafHash(
-        bytes32 shieldAddress,
-        bytes32 tokenBytes32,
-        bytes32 l2TokenContractId,
-        uint256 amount,
-        uint32 chainIndex,
-        bytes32 noteCommitment
-    ) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(
-                shieldAddress,
-                tokenBytes32,
-                l2TokenContractId,
-                amount,
-                chainIndex,
-                noteCommitment
-            )
-        );
-    }
-
-    function _buildDepositBatchSlotDataSingle(
-        bytes32 shieldAddress,
-        bytes32 tokenBytes32,
-        bytes32 l2TokenContractId,
-        uint256 amount,
-        uint32 chainIndex,
-        bytes32 noteCommitment
-    ) internal pure returns (uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData) {
-        uint256[] memory shieldWords = _bytes32ToWords(shieldAddress);
-        uint256[] memory tokenWords = _bytes32ToWords(tokenBytes32);
-        uint256[] memory l2TokenWords = _bytes32ToWords(l2TokenContractId);
-        uint256[] memory amountWords = _uint256ToWords(amount);
-        for (uint256 i = 0; i < 8; ++i) {
-            slotData[i] = shieldWords[i];
-            slotData[8 + i] = tokenWords[i];
-            slotData[16 + i] = l2TokenWords[i];
-            slotData[24 + i] = amountWords[i];
-            slotData[33 + i] = _bytes32ToWords(noteCommitment)[i];
-        }
-        slotData[32] = chainIndex;
-    }
-
-    function _buildRecordedDepositSlotDataSingle()
-        internal
-        pure
-        returns (uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData)
-    {
-        return _buildDepositBatchSlotDataSingle(
-            bytes32(uint256(2)),
-            bytes32(uint256(uint160(address(0x1234)))),
-            bytes32(uint256(1)),
-            1,
-            0,
-            bytes32(uint256(3))
-        );
-    }
-
     function testClaimWithdrawalWithProof() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
+        (Bridge bridge,) = _setupBridgeSystem();
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
-
-        uint256 amount = 123;
-        bytes32 nonce = bytes32(uint256(77));
-        token.mint(address(bridge), amount);
-
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-
-        vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
-
-        uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifierBatch =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifierBatch));
-
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
-
+        token.mint(address(bridge), 123);
+        bytes32 nonce = bytes32(uint256(1));
+        _register(user, address(token), 123, nonce);
         assertEq(token.balanceOf(user), 0);
         vm.prank(user);
         bridge.claimPendingWithdrawal(nonce);
-        assertEq(token.balanceOf(user), amount);
+        assertEq(token.balanceOf(user), 123);
+        assertEq(token.balanceOf(address(bridge)), 0);
     }
 
     function testClaimWithdrawalRejectsRecipientHighBits() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
-        MockERC20 token = new MockERC20("Mock", "MOCK");
-        _configureFlowToken(bridge, address(token));
-        uint256 amount = 123;
-        bytes32 nonce = bytes32(uint256(77));
-        token.mint(address(bridge), amount);
-
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-
+        (Bridge bridge,) = _setupBridgeSystem();
+        Window memory w = _withdrawalWindow(user, address(0x1234), 1, bytes32(uint256(1)));
+        bytes memory opening = w.withdrawals;
+        assembly ("memory-safe") { mstore(add(opening, 512), shl(160, 1)) }
         vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
-
-        uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        slotData[1] = 1;
-        WithdrawalBatchHashVerifier verifierBatch =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifierBatch));
-
-        vm.prank(user);
-        vm.expectRevert(Bridge.AddressHighBitsNonZero.selector);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        _apply(w);
+        assertFalse(bridge.claimedNullifiers(bytes32(uint256(1))));
     }
 
-    function testClaimWithdrawalAcceptsPreviouslyFinalizedSubtreeRoot() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
+    function testRegisteredWithdrawalRemainsClaimableAfterLaterCheckpoint() public {
+        (Bridge bridge,) = _setupBridgeSystem();
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
-        uint256 amount = 123;
-        bytes32 nonce = bytes32(uint256(77));
-        token.mint(address(bridge), amount);
-
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProofA, bytes32 depositRootA) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProofA, bytes32 withdrawalRootA) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-
+        token.mint(address(bridge), 123);
+        bytes32 nonce = bytes32(uint256(1));
+        _register(user, address(token), 123, nonce);
+        Window memory w = _emptyWindow(2, bytes32(uint256(2)));
         vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRootA, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRootA, 0, 1, depositProofA, withdrawalProofA);
-
-        bytes32 depositLeafB = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProofB, bytes32 depositRootB) = _mkTopProof(depositLeafB, 0);
-        (bytes32[9] memory withdrawalProofB, bytes32 withdrawalRootB) = _mkTopProof(bytes32(uint256(0x5678)), 0);
-
-        vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRootB, _roots(bytes32(uint256(2)), bytes32(uint256(3))), withdrawalRootB, 0, 2, depositProofB, withdrawalProofB);
-
-        uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProofA[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifierBatch =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifierBatch));
-
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
-
-        assertEq(token.balanceOf(user), 0);
-        vm.prank(user);
+        _apply(w);
         bridge.claimPendingWithdrawal(nonce);
-        assertEq(token.balanceOf(user), amount);
+        assertEq(token.balanceOf(user), 123);
+        assertEq(manager.lastFinalizedCheckpointId(), 2);
     }
-
     function testBatchClaimWithdrawalSnapshotsDelayAndSettlesFullAmountOnce() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
+        (Bridge bridge,) = _setupBridgeSystem();
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 100;
@@ -724,23 +236,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(88));
         token.mint(address(bridge), amount);
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-
-        vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
-
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-
-        uint256[8] memory proof;
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        _register(user, address(token), amount, nonce);
 
         (,, uint256 pendingAmount, uint64 claimableAt) = bridge.pendingWithdrawals(nonce);
         assertEq(token.balanceOf(user), 0);
@@ -774,91 +270,31 @@ contract BridgeTest is Test {
         bridge.claimPendingWithdrawal(nonce);
     }
 
-    function testBatchClaimWithdrawalRejectsZeroRealCount() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
-        uint256[18] memory publicInputs;
-        uint256[1088] memory slotData;
-        for (uint256 i = 0; i < 8; ++i) {
-            publicInputs[i] = _bytes32ToWords(bytes32(uint256(1)))[i];
-        }
-        publicInputs[8] = 0;
-        publicInputs[9] = 524288;
-
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+    function testEmptyWithdrawalFamilyRequiresZeroProof() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        Window memory w = _emptyWindow(1, bytes32(uint256(1)));
+        w.withdrawalProof[0] = 1;
         vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-
-        uint256[8] memory proof;
-        vm.prank(user);
-        vm.expectRevert(Bridge.InvalidRealCount.selector);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        vm.expectRevert(StateManager.InvalidProof.selector);
+        _apply(w);
+        assertEq(manager.lastFinalizedCheckpointId(), 0);
+        assertEq(bridge.provedDepositCount(), 0);
+        w.withdrawalProof[0] = 0;
+        vm.prank(owner);
+        _apply(w);
+        assertEq(manager.lastFinalizedCheckpointId(), 1);
     }
 
     function testBatchClaimWithdrawalHonorsRegistrationPauseWithoutConsumingNullifier() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
-
-        MockERC20 token = new MockERC20("Mock", "MOCK");
-        _configureFlowToken(bridge, address(token));
-        uint256 amount = 123;
+        (Bridge bridge,) = _setupBridgeSystem();
+        address token = address(0x1234);
         bytes32 nonce = bytes32(uint256(99));
-
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x9876)), 0);
+        Window memory w = _withdrawalWindow(user, token, 123, nonce);
         vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
-
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(
-                withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0
-            );
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.startPrank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-        bridge.setTokenPauseFlags(address(token), 2);
-        vm.stopPrank();
-
-        uint256[8] memory proof;
-        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalRegistrationPaused.selector, address(token)));
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        bridge.setTokenPauseFlags(token, 2);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalRegistrationPaused.selector, token));
+        _apply(w);
         assertFalse(bridge.claimedNullifiers(nonce));
         (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, 0);
@@ -997,20 +433,7 @@ contract BridgeTest is Test {
 
 
     function testZeroDelaySmallAndMediumImmediatelyClaimableLargeDelayed() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
@@ -1030,48 +453,9 @@ contract BridgeTest is Test {
         bytes32 largeNonce = bytes32(uint256(0x33));
         token.mint(address(bridge), smallAmount + mediumAmount + largeAmount);
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
-
-        uint256[8] memory proof;
-        (uint256[18] memory smallInputs, uint256[1088] memory smallSlotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), smallAmount, smallNonce, 0, 0);
-        WithdrawalBatchHashVerifier smallVerifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(smallInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(smallVerifier));
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, smallInputs, smallSlotData);
-
-        (uint256[18] memory mediumInputs, uint256[1088] memory mediumSlotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), mediumAmount, mediumNonce, 0, 0);
-        WithdrawalBatchHashVerifier mediumVerifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(mediumInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(mediumVerifier));
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, mediumInputs, mediumSlotData);
-
-        (uint256[18] memory largeInputs, uint256[1088] memory largeSlotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), largeAmount, largeNonce, 0, 0);
-        WithdrawalBatchHashVerifier largeVerifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(largeInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(largeVerifier));
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, largeInputs, largeSlotData);
+        _register(user, address(token), smallAmount, smallNonce);
+        _register(user, address(token), mediumAmount, mediumNonce);
+        _register(user, address(token), largeAmount, largeNonce);
 
         (,, uint256 smallPending, uint64 smallClaimableAt) = bridge.pendingWithdrawals(smallNonce);
         (,, uint256 mediumPending, uint64 mediumClaimableAt) = bridge.pendingWithdrawals(mediumNonce);
@@ -1102,19 +486,7 @@ contract BridgeTest is Test {
     }
 
     function testForceClaimWithdrawalBeforeDelayIsAdminOnlyPausedSafeAndOneShot() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
         MockERC20 token = new MockERC20("Mock", "MOCK");
         Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
         config.smallWithdrawalMax = 10;
@@ -1124,23 +496,8 @@ contract BridgeTest is Test {
         _setFlowConfig(bridge, address(token), config);
         token.mint(address(bridge), 30);
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0xFA)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot, 0, 1, depositProof, withdrawalProof
-        );
         bytes32 nonce = bytes32(uint256(0xFB));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), 30, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-        uint256[8] memory proof;
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        _register(user, address(token), 30, nonce);
         address[] memory configuredTokens = new address[](1);
         configuredTokens[0] = address(token);
         uint256[] memory historicalTotals = new uint256[](1);
@@ -1272,312 +629,129 @@ contract BridgeTest is Test {
         assertEq(MockERC20(token).balanceOf(user), 100);
     }
 
-    function testBatchAppendRejectsDepositRootMismatch() public {
+    function testAtomicDepositRejectsRootMismatch() public {
         (Bridge bridge,) = _setupBridgeSystem();
-
         vm.prank(owner);
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(bytes32(uint256(123)), bytes32(uint256(456)), 0, 1, bytes32(0));
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData;
-        uint256[8] memory proof;
-
+        Window memory w = _depositWindow(bytes32(uint256(123)), bytes32(uint256(456)), 0, 1, _recordedLeaf());
         vm.prank(owner);
         vm.expectRevert(Bridge.DepositRootMismatch.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
+        _apply(w);
+        assertEq(bridge.depositRoot(), EMPTY_DEPOSIT_ROOT);
+        assertEq(manager.lastFinalizedCheckpointId(), 0);
     }
 
-    function testBatchAppendRejectsFrontierMismatch() public {
+    function testAtomicDepositRejectsBeyondPendingRange() public {
         (Bridge bridge,) = _setupBridgeSystem();
-
-        vm.prank(owner);
-        bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        _setWord(publicInputs, 18 + 32 * 8, 1);
-        uint256[8] memory proof;
-
-        vm.prank(owner);
-        vm.expectRevert(Bridge.DepositFrontierMismatch.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
-    }
-
-    function testBatchAppendRejectsInvalidBatchRange() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 1, 0, bytes32(0));
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData;
-        uint256[8] memory proof;
-
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _recordedLeaf());
         vm.prank(owner);
         vm.expectRevert(Bridge.InvalidBatchRange.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
+        _apply(w);
+        assertEq(bridge.provedDepositCount(), 0);
     }
 
-    function testBatchAppendRejectsInvalidPublicInputsPacking() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-
+    function testAtomicDepositRejectsDecreasingCount() public {
+        _setupBridgeSystem();
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, EMPTY_DEPOSIT_ROOT, 1, 0, new BridgeOpening.DepositLeaf[](0));
         vm.prank(owner);
-        bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        assembly ("memory-safe") {
-            mstore(publicInputs, sub(mload(publicInputs), 0x20))
-        }
-        uint256[8] memory proof;
-
-        vm.prank(owner);
-        vm.expectRevert(Bridge.InvalidPublicInputs.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
+        _apply(w);
     }
 
-    function testBatchAppendRejectsInvalidDepositBatchProof() public {
+    function testAtomicDepositRejectsMalformedOpening() public {
+        _setupBridgeSystem();
+        Window memory w = _emptyWindow(1, bytes32(uint256(1)));
+        w.deposits = bytes.concat(w.deposits, bytes32(0));
+        vm.prank(owner);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        _apply(w);
+    }
+
+    function testAtomicDepositVerifierRejectionRollsBack() public {
         (Bridge bridge, MockGnarkVerifier verifier) = _setupBridgeSystem();
-
         vm.prank(owner);
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _recordedLeaf());
         verifier.setShouldVerify(false);
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        uint256[8] memory proof;
-
         vm.prank(owner);
-        vm.expectRevert(Bridge.InvalidDepositBatchProof.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
+        vm.expectRevert(abi.encodeWithSignature("Error(string)", "invalid proof"));
+        _apply(w);
+        assertEq(bridge.depositRoot(), EMPTY_DEPOSIT_ROOT);
+        assertEq(bridge.provedDepositCount(), 0);
+        assertEq(bridge.pendingDepositCount(), 1);
+        assertEq(manager.lastFinalizedCheckpointId(), 0);
     }
 
-    function testBatchAppendRejectsDepositAntiForgeryMismatch() public {
+    function testAtomicDepositRejectsEachCustodyFieldMutation() public {
         (Bridge bridge,) = _setupBridgeSystem();
-
         vm.prank(owner);
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, bytes32(uint256(999)));
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[8] memory proof;
-
-        vm.prank(owner);
-        vm.expectRevert(Bridge.DepositBatchCommitMismatch.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
-    }
-
-    function testBatchAppendRejectsAmountMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(2)),
-            address(0x1234),
-            bytes32(uint256(1)),
-            2,
-            1,
-            bytes32(uint256(3))
-        );
-    }
-
-    function testBatchAppendRejectsShieldAddressMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(999)),
-            address(0x1234),
-            bytes32(uint256(1)),
-            1,
-            1,
-            bytes32(uint256(3))
-        );
-    }
-
-    function testBatchAppendRejectsTokenMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(2)),
-            address(0x9999),
-            bytes32(uint256(1)),
-            1,
-            1,
-            bytes32(uint256(3))
-        );
-    }
-
-    function testBatchAppendRejectsL2TokenContractIdMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(2)),
-            address(0x1234),
-            bytes32(uint256(999)),
-            1,
-            1,
-            bytes32(uint256(3))
-        );
-    }
-
-    function testBatchAppendRejectsSourceChainIndexMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(2)),
-            address(0x1234),
-            bytes32(uint256(1)),
-            1,
-            9,
-            bytes32(uint256(3))
-        );
-    }
-
-    function testBatchAppendRejectsNoteCommitmentMutation() public {
-        _assertSingleDepositFieldMutationReverts(
-            bytes32(uint256(2)),
-            address(0x1234),
-            bytes32(uint256(1)),
-            1,
-            1,
-            bytes32(uint256(999))
-        );
-    }
-
-    function testBatchAppendRejectsForgedRealCount() public {
-        (Bridge bridge,) = _setupBridgeSystem();
-
-        for (uint256 i = 0; i < 10; ++i) {
+        for (uint256 field; field < 7; ++field) {
+            BridgeOpening.DepositLeaf[] memory leaves = _recordedLeaf();
+            if (field == 0) leaves[0].shieldAddress = bytes32(uint256(999));
+            if (field == 1) leaves[0].token = address(0x9999);
+            if (field == 2) leaves[0].l2TokenContractId = bytes32(uint256(999));
+            if (field == 3) leaves[0].amount = 2;
+            if (field == 4) leaves[0].noteCommitment = bytes32(uint256(999));
+            if (field == 5) leaves[0].chainIndex = 9;
+            if (field == 6) leaves[0].absoluteIndex = 1;
+            Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, leaves);
             vm.prank(owner);
-            bridge.recordDepositFromGateway(
-                address(0x1234),
-                bytes32(uint256(i + 1)),
-                i + 1,
-                bytes32(uint256(0x200 + i)),
-                bytes32(uint256(0x300 + i))
-            );
+            vm.expectRevert(field < 5 ? Bridge.DepositBatchCommitMismatch.selector : BridgeOpening.InvalidOrdering.selector);
+            _apply(w);
+            assertEq(bridge.provedDepositCount(), 0);
+            assertEq(manager.lastFinalizedCheckpointId(), 0);
         }
-
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData;
-        for (uint256 i = 0; i < 5; ++i) {
-            uint256 base = i * DEPOSIT_BATCH_APPEND_SLOT_WORDS;
-            uint256[] memory shieldWords = _bytes32ToWords(bytes32(uint256(0x200 + i)));
-            uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(address(0x1234)))));
-            uint256[] memory l2TokenWords = _bytes32ToWords(bytes32(uint256(i + 1)));
-            uint256[] memory amountWords = _uint256ToWords(i + 1);
-            uint256[] memory noteWords = _bytes32ToWords(bytes32(uint256(0x300 + i)));
-            for (uint256 j = 0; j < 8; ++j) {
-                slotData[base + j] = shieldWords[j];
-                slotData[base + 8 + j] = tokenWords[j];
-                slotData[base + 16 + j] = l2TokenWords[j];
-                slotData[base + 24 + j] = amountWords[j];
-                slotData[base + 33 + j] = noteWords[j];
-            }
-            slotData[base + 32] = 0;
-        }
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 10, _computeDepositBatchSlotDataCommit(slotData));
-        uint256[8] memory proof;
-
-        vm.prank(owner);
-        vm.expectRevert(Bridge.DepositBatchCommitMismatch.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
     }
 
-    function _assertSingleDepositFieldMutationReverts(
-        bytes32 mutatedShieldAddress,
-        address mutatedToken,
-        bytes32 mutatedL2TokenContractId,
-        uint256 mutatedAmount,
-        uint32 mutatedChainIndex,
-        bytes32 mutatedNoteCommitment
-    ) internal {
+    function testAtomicDepositRejectsForgedRealCount() public {
+        _setupBridgeSystem();
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 10, _recordedLeaf());
+        vm.prank(owner);
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
+        _apply(w);
+    }
+
+    function testAtomicDepositOpeningDigestAndRootAdvance() public {
         (Bridge bridge,) = _setupBridgeSystem();
-
         vm.prank(owner);
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildDepositBatchSlotDataSingle(
-            mutatedShieldAddress,
-            bytes32(uint256(uint160(mutatedToken))),
-            mutatedL2TokenContractId,
-            mutatedAmount,
-            mutatedChainIndex,
-            mutatedNoteCommitment
-        );
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        uint256[8] memory proof;
-
+        Window memory w = _depositWindow(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _recordedLeaf());
+        BridgeOpening.DepositAggregateOpening memory deposit = BridgeOpening.readDepositAggregate(w.deposits, BridgeOpening.readConfig(networkConfig));
+        vm.expectCall(address(depositVerifier), abi.encodeCall(MockGnarkVerifier.verifyProof, (w.depositProof, BridgeOpening.proofInputs(deposit.depositOpeningDigest))));
         vm.prank(owner);
-        vm.expectRevert(Bridge.DepositBatchCommitMismatch.selector);
-        bridge.batchAppend(proof, publicInputs, slotData);
-    }
-
-    function testBatchAppendUsesSingleKeccakPublicInputsHash() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-        uint256[8] memory proof;
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        provider.setAddress(provider.ERC20_GATEWAY_ID(), owner);
-        vm.stopPrank();
-
-        MockERC20 mockToken = new MockERC20("Mock", "MOCK");
-        vm.etch(address(0x1234), address(mockToken).code);
-        _configureFlowToken(bridge, address(0x1234));
-
-        vm.startPrank(owner);
-        bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
-        uint256[DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS] memory slotData = _buildRecordedDepositSlotDataSingle();
-        uint256[] memory publicInputs =
-            _buildDepositBatchPublicInputs(EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1, _computeDepositBatchSlotDataCommit(slotData));
-        DepositBatchHashVerifier verifier = new DepositBatchHashVerifier(
-            _computeDepositBatchPublicInputsHash(publicInputs)
-        );
-        bridge.setDepositBatchVerifier(address(verifier));
-        bridge.batchAppend(proof, publicInputs, slotData);
-        vm.stopPrank();
-
+        _apply(w);
         assertEq(bridge.depositRoot(), bytes32(uint256(456)));
         assertEq(bridge.provedDepositCount(), 1);
+        assertEq(manager.depositSubtreeRoot(), bridge.depositRoot());
+        assertEq(manager.depositCount(), 1);
+    }
+
+    function testWithdrawalFailureRollsBackEarlierDepositApplication() public {
+        (Bridge bridge,) = _setupBridgeSystem();
+        vm.prank(owner);
+        bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 1, bytes32(uint256(2)), bytes32(uint256(3)));
+        BridgeOpening.WithdrawalLeaf[] memory leaves = new BridgeOpening.WithdrawalLeaf[](2);
+        leaves[0] = BridgeOpening.WithdrawalLeaf(0, 0, user, address(0x1234), 1, bytes32(uint256(1)));
+        leaves[1] = BridgeOpening.WithdrawalLeaf(0, 0, user, address(0x9999), 1, bytes32(uint256(2)));
+        Window memory w = _window(1, bytes32(uint256(1)), BridgeOpening.DepositTransition(0, EMPTY_DEPOSIT_ROOT, bytes32(uint256(456)), 0, 1), _recordedLeaf(), leaves);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.TokenNotConfigured.selector, address(0x9999)));
+        _apply(w);
+        assertEq(bridge.depositRoot(), EMPTY_DEPOSIT_ROOT);
+        assertEq(bridge.provedDepositCount(), 0);
+        assertEq(bridge.pendingDepositCount(), 1);
+        assertEq(manager.lastFinalizedCheckpointId(), 0);
+        assertFalse(bridge.claimedNullifiers(bytes32(uint256(1))));
     }
     function testBatchClaimWithdrawalTotalOverflowLeavesTotalMaxAndNoNullifierOrPending() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
         uint256 amount = 1;
         bytes32 nonce = bytes32(uint256(0xAB));
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
 
         address[] memory configuredTokens = new address[](1);
         configuredTokens[0] = address(token);
@@ -1587,21 +761,14 @@ contract BridgeTest is Test {
         bridge.initializeWithdrawalTotals(configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this));
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
 
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+        Window memory w = _withdrawalWindow(user, address(token), amount, nonce);
         vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-
-        uint256[8] memory proof;
-        vm.prank(user);
         vm.expectRevert(
             abi.encodeWithSelector(
                 Bridge.TotalWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
             )
         );
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        _apply(w);
 
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
         assertFalse(bridge.claimedNullifiers(nonce));
@@ -1610,48 +777,13 @@ contract BridgeTest is Test {
     }
 
     function testForceClaimWithdrawalTransferRevertKeepsPendingTotalAndNullifier() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,) = _setupBridgeSystem();
         RevertingTransferToken token = new RevertingTransferToken();
         _configureFlowToken(bridge, address(token));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xCC));
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
-
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
-        uint256[8] memory proof;
-        vm.prank(user);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        _register(user, address(token), amount, nonce);
 
         address[] memory configuredTokens = new address[](1);
         configuredTokens[0] = address(token);

@@ -5,11 +5,14 @@ import "forge-std/Test.sol";
 import {BridgeOpening} from "../../src/BridgeOpening.sol";
 
 contract BridgeOpeningHarness {
-    function readA(bytes calldata config, bytes calldata opening) external pure returns (bytes32) {
-        return BridgeOpening.readA(opening, BridgeOpening.readConfig(config)).statementA;
+    function readDepositAggregate(bytes calldata config, bytes calldata opening) external pure returns (bytes32) {
+        return BridgeOpening.readDepositAggregate(opening, BridgeOpening.readConfig(config)).depositOpeningDigest;
     }
-    function readB(bytes calldata config, bytes calldata opening) external pure returns (bytes32) {
-        return BridgeOpening.readB(opening, BridgeOpening.readConfig(config)).statementB;
+    function readWithdrawalAggregate(bytes calldata config, bytes calldata opening) external pure returns (bytes32) {
+        return BridgeOpening.readWithdrawalAggregate(opening, BridgeOpening.readConfig(config)).openingDigest;
+    }
+    function readRewardAggregate(bytes calldata config, bytes calldata opening) external pure returns (bytes32) {
+        return BridgeOpening.readRewardAggregate(opening, BridgeOpening.readConfig(config)).openingDigest;
     }
     function readInclusionAggregateHeader(bytes calldata headerBytes) external pure returns (BridgeOpening.InclusionAggregateHeader memory) {
         return BridgeOpening.readInclusionAggregateHeader(headerBytes);
@@ -29,11 +32,11 @@ contract BridgeOpeningHarness {
     function withdrawalLeafCommit(bytes calldata body) external pure returns (bytes32) {
         return BridgeOpening.withdrawalLeafCommit(body);
     }
-    function readCumulativeRewardLeaf(bytes calldata body) external pure returns (BridgeOpening.CumulativeRewardLeaf memory) {
-        return BridgeOpening.readCumulativeRewardLeaf(body);
+    function readSourceCheckpointRewardLeaf(bytes calldata body) external pure returns (BridgeOpening.SourceCheckpointRewardLeaf memory) {
+        return BridgeOpening.readSourceCheckpointRewardLeaf(body);
     }
-    function cumulativeRewardLeafCommit(bytes calldata body) external pure returns (bytes32) {
-        return BridgeOpening.cumulativeRewardLeafCommit(body);
+    function sourceCheckpointRewardLeafCommit(bytes calldata body) external pure returns (bytes32) {
+        return BridgeOpening.sourceCheckpointRewardLeafCommit(body);
     }
 }
 
@@ -50,7 +53,7 @@ contract BridgeOpeningTest is Test {
             abi.encode(uint256(1), address(13), address(14), uint256(1), uint256(18), uint256(0), uint256(100), uint256(1024), uint256(1024), uint256(1024))
         );
     }
-    function openingA() private pure returns (bytes memory) {
+    function depositOpening() private pure returns (bytes memory) {
         bytes32 configHash = keccak256(bytes.concat(domain("Config"), configBytes()));
         bytes memory end = abi.encode(uint256(0), uint256(1), uint256(2), uint256(3), uint256(4));
         bytes memory starts = abi.encode(uint256(1), uint256(1), uint256(0), uint256(1), uint256(2), uint256(3), uint256(4));
@@ -58,77 +61,135 @@ contract BridgeOpeningTest is Test {
         bytes32 windowId = keccak256(bytes.concat(domain("Window"), configHash, end, starts, deposits));
         return bytes.concat(abi.encode(configHash, windowId), end, starts, deposits, abi.encode(uint256(0)));
     }
-    function openingB(bytes memory withdrawals, bytes memory rewards) private pure returns (bytes memory) {
-        bytes memory ends = abi.encode(uint256(1), uint256(1), uint256(5), uint256(6), uint256(7), uint256(8), uint256(0), uint256(9), uint256(10), uint256(11), uint256(12));
-        return bytes.concat(openingA(), ends, withdrawals, rewards);
+    function openingAggregate(bytes memory records) private pure returns (bytes memory) {
+        bytes memory a = depositOpening();
+        bytes memory header = new bytes(224);
+        for (uint256 i; i < 224; ++i) header[i] = a[i];
+        return bytes.concat(header, records);
+    }
+    function withdrawalOpening(bytes memory records) private pure returns (bytes memory) {
+        return openingAggregate(bytes.concat(abi.encode(uint256(1), uint256(9), uint256(10), uint256(11), uint256(12)), records));
     }
     function replaceWord(bytes memory body, uint256 index, uint256 value) private pure returns (bytes memory) {
         assembly ("memory-safe") { mstore(add(add(body, 32), mul(index, 32)), value) }
         return body;
     }
-    function testEmptyFamiliesUseDistinctPositionBoundDomains() public view {
-        bytes memory a = openingA();
+    function testEmptyFamiliesUseDistinctDomains() public view {
+        bytes memory a = depositOpening();
         bytes memory projection = new bytes(a.length - 32);
         for (uint256 i; i < projection.length; ++i) projection[i] = a[i];
         bytes32 emptyDeposit = keccak256(abi.encode(domain("Empty"), uint256(1), uint256(0)));
-        bytes32 expectedA = keccak256(bytes.concat(domain("A"), projection, abi.encode(uint256(0), uint256(0), emptyDeposit)));
-        assertEq(harness.readA(configBytes(), a), expectedA);
-        bytes memory b = openingB(abi.encode(uint256(0)), abi.encode(uint256(0)));
-        bytes memory ends = new bytes(11 * 32);
-        for (uint256 i; i < ends.length; ++i) ends[i] = b[a.length + i];
-        bytes32 expectedB = keccak256(bytes.concat(domain("B"), expectedA, ends,
-            abi.encode(uint256(0), uint256(0), keccak256(abi.encode(domain("Empty"), uint256(2), uint256(0)))),
-            abi.encode(uint256(0), uint256(0), keccak256(abi.encode(domain("Empty"), uint256(3), uint256(0))))));
-        assertEq(harness.readB(configBytes(), b), expectedB);
+        bytes32 expectedDepositOpeningDigest = keccak256(bytes.concat(domain("A"), projection, abi.encode(uint256(0), uint256(0), emptyDeposit)));
+        assertEq(harness.readDepositAggregate(configBytes(), a), expectedDepositOpeningDigest);
+        bytes memory emptyOpening = openingAggregate(abi.encode(uint256(0)));
+        bytes32 expectedW = keccak256(abi.encodePacked(domain("WithdrawalBatch"), withdrawalOpening(abi.encode(uint256(0)))));
+        bytes32 expectedR = keccak256(abi.encodePacked(domain("RewardBatch"), emptyOpening));
+        assertEq(harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(abi.encode(uint256(0)))), expectedW);
+        assertEq(harness.readRewardAggregate(configBytes(), openingAggregate(abi.encode(uint256(0)))), expectedR);
     }
     function testRejectsTrailingOpeningWord() public {
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readA(configBytes(), bytes.concat(openingA(), abi.encode(uint256(0))));
+        harness.readDepositAggregate(configBytes(), bytes.concat(depositOpening(), abi.encode(uint256(0))));
     }
     function testRejectsTruncatedFullOpening() public {
-        bytes memory a = openingA();
+        bytes memory a = depositOpening();
         assembly ("memory-safe") { mstore(a, sub(mload(a), 32)) }
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readA(configBytes(), a);
+        harness.readDepositAggregate(configBytes(), a);
     }
     function testRejectsNoncanonicalFelt() public {
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readA(configBytes(), replaceWord(openingA(), 3, 18446744069414584321));
+        harness.readDepositAggregate(configBytes(), replaceWord(depositOpening(), 3, 18446744069414584321));
     }
     function testRejectsDifferentBridgeIdentity() public {
         vm.expectRevert(BridgeOpening.InvalidConfig.selector);
-        harness.readA(replaceWord(configBytes(), 2, 524289), openingA());
+        harness.readDepositAggregate(replaceWord(configBytes(), 2, 524289), depositOpening());
     }
     function testRejectsOmittedConfiguredChain() public {
         vm.expectRevert(BridgeOpening.InvalidCount.selector);
-        harness.readA(configBytes(), replaceWord(openingA(), 7, 0));
+        harness.readDepositAggregate(configBytes(), replaceWord(depositOpening(), 7, 0));
     }
     function testRejectsAddressHighBits() public {
         bytes memory withdrawal = abi.encode(uint256(1), uint256(1), uint256(7), (uint256(1) << 160) | 15, uint256(0), uint256(1), bytes32(uint256(4)));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readB(configBytes(), openingB(withdrawal, abi.encode(uint256(0))));
+        harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(withdrawal));
     }
     function testRejectsDuplicateNonceWithDifferentRecipient() public {
         bytes memory withdrawals = bytes.concat(abi.encode(uint256(2)),
             abi.encode(uint256(1), uint256(7), address(15), address(0), uint256(1), bytes32(uint256(4))),
             abi.encode(uint256(1), uint256(8), address(16), address(0), uint256(1), bytes32(uint256(4))));
         vm.expectRevert(BridgeOpening.InvalidOrdering.selector);
-        harness.readB(configBytes(), openingB(withdrawals, abi.encode(uint256(0))));
+        harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(withdrawals));
     }
     function testRejectsAmountAtFieldModulus() public {
         bytes memory withdrawal = abi.encode(uint256(1), uint256(1), uint256(7), address(15), address(0), uint256(18446744069414584321), bytes32(uint256(4)));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readB(configBytes(), openingB(withdrawal, abi.encode(uint256(0))));
+        harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(withdrawal));
     }
     function testRejectsRewardOutsideGutaSubtree() public {
         bytes memory rewards = abi.encode(uint256(1), uint256(0), uint256(7), uint256(2), uint256(1), uint256(4), address(15));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readB(configBytes(), openingB(abi.encode(uint256(0)), rewards));
+        harness.readRewardAggregate(configBytes(), openingAggregate(rewards));
     }
     function testRejectsRewardNullifierRelabeling() public {
         bytes memory rewards = abi.encode(uint256(1), uint256(0), uint256(7), uint256(2), uint256(0), uint256(4), address(15));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readB(configBytes(), openingB(abi.encode(uint256(0)), rewards));
+        harness.readRewardAggregate(configBytes(), openingAggregate(rewards));
+    }
+    function testRejectsAggregateTrailingWord() public {
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
+        harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(abi.encode(uint256(0), uint256(0))));
+    }
+    function testRejectsAggregateCapacityOverflow() public {
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
+        harness.readWithdrawalAggregate(configBytes(), withdrawalOpening(abi.encode(uint256(1025))));
+    }
+    function testRejectsAggregateNoncanonicalRoot() public {
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readRewardAggregate(configBytes(), replaceWord(openingAggregate(abi.encode(uint256(0))), 3, 18446744069414584321));
+    }
+    function testRejectsAggregateWrongConfiguration() public {
+        vm.expectRevert(BridgeOpening.InvalidConfig.selector);
+        harness.readRewardAggregate(configBytes(), replaceWord(openingAggregate(abi.encode(uint256(0))), 0, 99));
+    }
+    function testFullCapacityWithdrawalAggregate() public view {
+        bytes memory records = new bytes(32 * (1 + 1024 * 6));
+        replaceWord(records, 0, 1024);
+        for (uint256 i; i < 1024; ++i) {
+            uint256 word = 1 + i * 6;
+            replaceWord(records, word, 1);
+            replaceWord(records, word + 1, 7);
+            replaceWord(records, word + 2, uint256(uint160(address(15))));
+            replaceWord(records, word + 3, 0);
+            replaceWord(records, word + 4, 1);
+            replaceWord(records, word + 5, i);
+        }
+        bytes memory body = withdrawalOpening(records);
+        BridgeOpening.WithdrawalAggregateOpening memory decoded = BridgeOpening.readWithdrawalAggregate(body, BridgeOpening.readConfig(configBytes()));
+        assertEq(decoded.withdrawals[1023].nonce, bytes32(uint256(1023)));
+        assertEq(harness.readWithdrawalAggregate(configBytes(), body), keccak256(abi.encodePacked(domain("WithdrawalBatch"), body)));
+    }
+    function testRewardStatementBindsCompleteCanonicalOpening() public view {
+        bytes memory body = openingAggregate(abi.encode(uint256(1), uint256(0), uint256(7), uint256(2), uint256(0), uint256(3), address(15)));
+        assertEq(harness.readRewardAggregate(configBytes(), body), keccak256(abi.encodePacked(domain("RewardBatch"), body)));
+        bytes32 previous = harness.readRewardAggregate(configBytes(), body);
+        body = replaceWord(body, 13, uint256(uint160(address(16))));
+        assertNotEq(harness.readRewardAggregate(configBytes(), body), previous);
+    }
+    function testRejectsWithdrawalWrongChainCount() public {
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
+        harness.readWithdrawalAggregate(configBytes(), replaceWord(withdrawalOpening(abi.encode(uint256(0))), 7, 0));
+    }
+    function testRejectsWithdrawalNoncanonicalEndpoint() public {
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readWithdrawalAggregate(configBytes(), replaceWord(withdrawalOpening(abi.encode(uint256(0))), 8, 18446744069414584321));
+    }
+    function testWithdrawalStatementBindsEndpointVector() public view {
+        bytes memory body = withdrawalOpening(abi.encode(uint256(0)));
+        bytes32 previous = harness.readWithdrawalAggregate(configBytes(), body);
+        body = replaceWord(body, 8, 10);
+        assertNotEq(harness.readWithdrawalAggregate(configBytes(), body), previous);
+        assertEq(harness.readWithdrawalAggregate(configBytes(), body), keccak256(abi.encodePacked(domain("WithdrawalBatch"), body)));
     }
     uint256 private constant CLAIM_TREE_MAX_CAPACITY = 131072;
     bytes32 private constant MARKER = bytes32(uint256(12));
@@ -234,8 +295,8 @@ contract BridgeOpeningTest is Test {
         assertEq(header.firstOrdinal, 1024);
         assertEq(header.count, 1024);
         assertEq(header.withdrawalRoots.length, 0);
-        assertEq(header.oldNullifierRoot, bytes32((uint256(1) << 192) | (uint256(2) << 128) | (uint256(3) << 64) | 4));
-        assertEq(header.newNullifierRoot, bytes32((uint256(8) << 192) | (uint256(7) << 128) | (uint256(6) << 64) | 5));
+        assertEq(header.oldLedgerStateRoot, bytes32((uint256(1) << 192) | (uint256(2) << 128) | (uint256(3) << 64) | 4));
+        assertEq(header.newLedgerStateRoot, bytes32((uint256(8) << 192) | (uint256(7) << 128) | (uint256(6) << 64) | 5));
         assertEq(header.openingDigest, bytes32(uint256(6)));
         assertEq(header.claimTreeRoot, bytes32(0));
         assertEq(harness.inclusionHeaderDigest(body), keccak256(abi.encodePacked(domain("AggregateHeader"), body)));
@@ -288,7 +349,7 @@ contract BridgeOpeningTest is Test {
         assertEq(full.length, 193 + 32 * 256);
         assertEq(harness.readInclusionAggregateHeader(one).withdrawalRoots.length, 1);
         assertEq(harness.readInclusionAggregateHeader(full).withdrawalRoots.length, 256);
-        assertEq(harness.readInclusionAggregateHeader(one).oldNullifierRoot, bytes32(0));
+        assertEq(harness.readInclusionAggregateHeader(one).oldLedgerStateRoot, bytes32(0));
         assertEq(harness.readInclusionAggregateHeader(full).openingDigest, bytes32(0));
         assertEq(harness.readInclusionAggregateHeader(full).claimTreeRoot, bytes32(0));
     }
@@ -305,7 +366,7 @@ contract BridgeOpeningTest is Test {
         vm.expectRevert(BridgeOpening.InvalidCount.selector);
         harness.readInclusionAggregateHeader(withdrawalHeaderBytes(1024, 0, repeatedRoot(257)));
     }
-    function testEmptyRewardRetainsEqualNullifierRootsAndZeroDigests() public view {
+    function testEmptyRewardRetainsEqualLedgerStateRootsAndZeroDigests() public view {
         bytes memory body = canonicalRewardHeader(1024, 0, 0);
         assertEq(body.length, 257);
         BridgeOpening.InclusionAggregateHeader memory header = harness.readInclusionAggregateHeader(body);
@@ -313,11 +374,11 @@ contract BridgeOpeningTest is Test {
         assertEq(header.segmentCount, 0);
         assertEq(header.openingDigest, bytes32(0));
         assertEq(header.claimTreeRoot, bytes32(0));
-        assertEq(header.oldNullifierRoot, header.newNullifierRoot);
+        assertEq(header.oldLedgerStateRoot, header.newLedgerStateRoot);
         assertEq(uint8(body[body.length - 1]), 0);
         assertEq(uint8(body[body.length - 64]), 0);
     }
-    function testEmptyRewardRejectsDistinctNullifierRoots() public {
+    function testEmptyRewardRejectsDistinctLedgerStateRoots() public {
         vm.expectRevert(BridgeOpening.InvalidCursor.selector);
         harness.readInclusionAggregateHeader(rewardHeaderBytes(1024, 0, 0, bytes32(0), bytes32(0), hash4(1, 2, 3, 4), hash4(8, 7, 6, 5)));
     }
@@ -444,121 +505,98 @@ contract BridgeOpeningTest is Test {
             bytes32(type(uint256).max)
         );
     }
-    function cumulativeRewardLeafBytes() private pure returns (bytes memory) {
+    function sourceCheckpointRewardLeafBytes() private pure returns (bytes memory) {
         return abi.encode(
             bytes32(type(uint256).max),
+            uint256(type(uint64).max),
             uint256(type(uint32).max),
             (uint256(0x01020304) << 224) | 1500,
             address(0),
             uint256(1)
         );
     }
-    function testWithdrawalLeafReadsWordsAndRecordCommit() public view {
-        bytes memory body = withdrawalLeafBytes();
+    function testSourceCheckpointRewardLeafReadsFullAmountAndLeafCommit() public view {
+        bytes memory body = sourceCheckpointRewardLeafBytes();
         assertEq(body.length, 192);
-        BridgeOpening.WithdrawalLeaf memory leaf = harness.readWithdrawalLeaf(body);
-        assertEq(leaf.chainIndex, 255);
-        assertEq(leaf.senderUserId, type(uint32).max);
-        assertEq(leaf.recipient, address(0x1111111111111111111111111111111111111111));
-        assertEq(leaf.token, address(0));
-        assertEq(leaf.amount, 18446744069414584320);
-        assertEq(leaf.nonce, bytes32(type(uint256).max));
-        assertEq(harness.withdrawalLeafCommit(body), keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(2)), body)));
+        BridgeOpening.SourceCheckpointRewardLeaf memory leaf = harness.readSourceCheckpointRewardLeaf(body);
+        assertEq(leaf.economicDomain, bytes32(type(uint256).max));
+        assertEq(leaf.sourceCheckpointId, type(uint64).max);
+        assertEq(leaf.userId, type(uint32).max);
+        assertEq(leaf.amount, (uint256(0x01020304) << 224) | 1500);
+        assertEq(leaf.recipient, address(0));
+        assertTrue(leaf.initialized);
+        bytes32 commit = harness.sourceCheckpointRewardLeafCommit(body);
+        assertEq(commit, keccak256(abi.encodePacked(keccak256("PsyBridge/SourceCheckpointReward/1/Leaf"), body)));
+        assertNotEq(commit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), body)));
+        assertNotEq(commit, keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(3)), body)));
+        assertNotEq(commit, keccak256(abi.encodePacked(domain("RewardBatch"), body)));
     }
-    function testWithdrawalLeafNonceChangesCommit() public view {
-        bytes memory body = withdrawalLeafBytes();
-        bytes32 previous = harness.withdrawalLeafCommit(body);
-        bytes memory zeroNonce = replaceWord(bytes.concat(body), 5, 0);
-        assertEq(harness.readWithdrawalLeaf(zeroNonce).nonce, bytes32(0));
-        bytes32 changed = harness.withdrawalLeafCommit(zeroNonce);
-        assertNotEq(changed, previous);
-        assertEq(changed, keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(2)), zeroNonce)));
+    function testSourceCheckpointRewardLeafAllowsZeroAmountAndUninitialized() public view {
+        bytes memory body = sourceCheckpointRewardLeafBytes();
+        bytes32 previous = harness.sourceCheckpointRewardLeafCommit(body);
+        bytes memory zeroAmount = replaceWord(bytes.concat(body), 3, 0);
+        BridgeOpening.SourceCheckpointRewardLeaf memory cleared = harness.readSourceCheckpointRewardLeaf(zeroAmount);
+        assertEq(cleared.amount, 0);
+        assertEq(cleared.sourceCheckpointId, type(uint64).max);
+        assertEq(cleared.userId, type(uint32).max);
+        assertTrue(cleared.initialized);
+        assertEq(cleared.recipient, address(0));
+        bytes32 clearedCommit = harness.sourceCheckpointRewardLeafCommit(zeroAmount);
+        assertNotEq(clearedCommit, previous);
+        assertEq(clearedCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/SourceCheckpointReward/1/Leaf"), zeroAmount)));
+        bytes memory dormant = replaceWord(bytes.concat(body), 5, 0);
+        BridgeOpening.SourceCheckpointRewardLeaf memory uninitialized = harness.readSourceCheckpointRewardLeaf(dormant);
+        assertFalse(uninitialized.initialized);
+        assertEq(uninitialized.recipient, address(0));
+        assertEq(uninitialized.amount, (uint256(0x01020304) << 224) | 1500);
+        assertEq(uninitialized.sourceCheckpointId, type(uint64).max);
+        bytes32 dormantCommit = harness.sourceCheckpointRewardLeafCommit(dormant);
+        assertNotEq(dormantCommit, previous);
+        assertEq(dormantCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/SourceCheckpointReward/1/Leaf"), dormant)));
+        bytes memory openDomain = replaceWord(bytes.concat(body), 0, 0);
+        assertEq(harness.readSourceCheckpointRewardLeaf(openDomain).economicDomain, bytes32(0));
+        bytes memory bound = replaceWord(bytes.concat(body), 4, uint256(uint160(address(0x1111111111111111111111111111111111111111))));
+        BridgeOpening.SourceCheckpointRewardLeaf memory paid = harness.readSourceCheckpointRewardLeaf(bound);
+        assertEq(paid.recipient, address(0x1111111111111111111111111111111111111111));
+        assertTrue(paid.initialized);
+        assertEq(paid.amount, (uint256(0x01020304) << 224) | 1500);
+        assertNotEq(harness.sourceCheckpointRewardLeafCommit(bound), previous);
+        bytes memory source = replaceWord(bytes.concat(body), 1, 1199);
+        BridgeOpening.SourceCheckpointRewardLeaf memory sourced = harness.readSourceCheckpointRewardLeaf(source);
+        assertEq(sourced.sourceCheckpointId, 1199);
+        assertEq(sourced.userId, type(uint32).max);
+        assertEq(sourced.amount, (uint256(0x01020304) << 224) | 1500);
+        assertNotEq(harness.sourceCheckpointRewardLeafCommit(source), previous);
+        bytes memory maxAmount = replaceWord(bytes.concat(body), 3, type(uint256).max);
+        assertEq(harness.readSourceCheckpointRewardLeaf(maxAmount).amount, type(uint256).max);
+        assertEq(harness.readSourceCheckpointRewardLeaf(maxAmount).sourceCheckpointId, type(uint64).max);
+        assertEq(harness.sourceCheckpointRewardLeafCommit(maxAmount), keccak256(abi.encodePacked(keccak256("PsyBridge/SourceCheckpointReward/1/Leaf"), maxAmount)));
+        assertNotEq(harness.sourceCheckpointRewardLeafCommit(maxAmount), previous);
     }
-    function testWithdrawalLeafRejectsLengthPaddingAndAmount() public {
-        bytes memory body = withdrawalLeafBytes();
+    function testSourceCheckpointRewardLeafRejectsLengthPaddingBooleanAndRecipient() public {
+        bytes memory body = sourceCheckpointRewardLeafBytes();
+        bytes memory legacy = new bytes(160);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        harness.readSourceCheckpointRewardLeaf(legacy);
         bytes memory short = new bytes(191);
         for (uint256 i; i < short.length; ++i) short[i] = body[i];
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readWithdrawalLeaf(short);
+        harness.readSourceCheckpointRewardLeaf(short);
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.withdrawalLeafCommit(bytes.concat(body, bytes1(0)));
+        harness.sourceCheckpointRewardLeafCommit(bytes.concat(body, bytes1(0)));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 0, 256));
+        harness.readSourceCheckpointRewardLeaf(replaceWord(bytes.concat(body), 1, uint256(1) << 64));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 1, uint256(1) << 32));
+        harness.readSourceCheckpointRewardLeaf(replaceWord(bytes.concat(body), 2, uint256(1) << 32));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 2, (uint256(1) << 160) | uint256(uint160(address(0x1111111111111111111111111111111111111111)))));
+        harness.readSourceCheckpointRewardLeaf(replaceWord(bytes.concat(body), 4, uint256(1) << 160));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readWithdrawalLeaf(replaceWord(bytes.concat(body), 3, uint256(1) << 160));
+        harness.readSourceCheckpointRewardLeaf(replaceWord(bytes.concat(body), 5, 2));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 4, 0));
+        harness.sourceCheckpointRewardLeafCommit(replaceWord(bytes.concat(body), 5, uint256(1) << 64));
+        bytes memory recipient = replaceWord(bytes.concat(body), 4, uint256(uint160(address(15))));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 4, 18446744069414584321));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.withdrawalLeafCommit(replaceWord(bytes.concat(body), 2, 0));
+        harness.sourceCheckpointRewardLeafCommit(replaceWord(recipient, 5, 0));
     }
-    function testCumulativeRewardLeafReadsUint256AndRecordCommit() public view {
-        bytes memory body = cumulativeRewardLeafBytes();
-        assertEq(body.length, 160);
-        BridgeOpening.CumulativeRewardLeaf memory leaf = harness.readCumulativeRewardLeaf(body);
-        assertEq(leaf.economicDomain, bytes32(type(uint256).max));
-        assertEq(leaf.userId, type(uint32).max);
-        assertEq(leaf.totalAmount, (uint256(0x01020304) << 224) | 1500);
-        assertEq(leaf.recipient, address(0));
-        assertTrue(leaf.initialized);
-        bytes32 commit = harness.cumulativeRewardLeafCommit(body);
-        assertEq(commit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), body)));
-        assertNotEq(commit, keccak256(abi.encodePacked(domain("Record"), bytes32(uint256(3)), body)));
-    }
-    function testCumulativeRewardLeafAllowsZeroTotalAndUninitialized() public view {
-        bytes memory body = cumulativeRewardLeafBytes();
-        bytes32 previous = harness.cumulativeRewardLeafCommit(body);
-        bytes memory zeroTotal = replaceWord(bytes.concat(body), 2, 0);
-        BridgeOpening.CumulativeRewardLeaf memory cleared = harness.readCumulativeRewardLeaf(zeroTotal);
-        assertEq(cleared.totalAmount, 0);
-        assertTrue(cleared.initialized);
-        assertEq(cleared.recipient, address(0));
-        bytes32 clearedCommit = harness.cumulativeRewardLeafCommit(zeroTotal);
-        assertNotEq(clearedCommit, previous);
-        assertEq(clearedCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), zeroTotal)));
-        bytes memory dormant = replaceWord(bytes.concat(body), 4, 0);
-        BridgeOpening.CumulativeRewardLeaf memory uninitialized = harness.readCumulativeRewardLeaf(dormant);
-        assertFalse(uninitialized.initialized);
-        assertEq(uninitialized.recipient, address(0));
-        assertEq(uninitialized.totalAmount, (uint256(0x01020304) << 224) | 1500);
-        bytes32 dormantCommit = harness.cumulativeRewardLeafCommit(dormant);
-        assertNotEq(dormantCommit, previous);
-        assertEq(dormantCommit, keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), dormant)));
-        bytes memory openDomain = replaceWord(bytes.concat(body), 0, 0);
-        assertEq(harness.readCumulativeRewardLeaf(openDomain).economicDomain, bytes32(0));
-        bytes memory bound = replaceWord(bytes.concat(body), 3, uint256(uint160(address(15))));
-        BridgeOpening.CumulativeRewardLeaf memory paid = harness.readCumulativeRewardLeaf(bound);
-        assertEq(paid.recipient, address(15));
-        assertTrue(paid.initialized);
-        assertNotEq(harness.cumulativeRewardLeafCommit(bound), previous);
-        bytes memory maxTotal = replaceWord(bytes.concat(body), 2, type(uint256).max);
-        assertEq(harness.readCumulativeRewardLeaf(maxTotal).totalAmount, type(uint256).max);
-        assertEq(harness.cumulativeRewardLeafCommit(maxTotal), keccak256(abi.encodePacked(keccak256("PsyBridge/CumulativeReward/1/Record"), maxTotal)));
-        assertNotEq(harness.cumulativeRewardLeafCommit(maxTotal), previous);
-    }
-    function testCumulativeRewardLeafRejectsLengthPaddingBooleanAndRecipient() public {
-        bytes memory body = cumulativeRewardLeafBytes();
-        bytes memory short = new bytes(159);
-        for (uint256 i; i < short.length; ++i) short[i] = body[i];
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readCumulativeRewardLeaf(short);
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.cumulativeRewardLeafCommit(bytes.concat(body, bytes1(0)));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 1, uint256(1) << 32));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 3, uint256(1) << 160));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.readCumulativeRewardLeaf(replaceWord(bytes.concat(body), 4, 2));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.cumulativeRewardLeafCommit(replaceWord(bytes.concat(body), 4, uint256(1) << 64));
-        bytes memory recipient = replaceWord(bytes.concat(body), 3, uint256(uint160(address(15))));
-        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
-        harness.cumulativeRewardLeafCommit(replaceWord(recipient, 4, 0));
-    }
+
 }

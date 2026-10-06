@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { deployCoreSystem } from "./helpers/deploySystem";
 import { deployProxy } from "./helpers/deployProxy";
-import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
+import { buildBridgeWindow } from "./helpers/withdrawalClaim";
 
 describe("Permission Matrix", function () {
   it("enforces provider/acl/router/state-manager permissions and dynamic ACL binding", async function () {
@@ -37,33 +37,11 @@ describe("Permission Matrix", function () {
     await expect(router.connect(outsider).setTokenMapping(token, tokenId)).to.be.revertedWithCustomError(router, "OnlyRouterAdmin");
     await expect(router.connect(routerAdmin).setTokenMapping(token, tokenId)).to.not.be.reverted;
 
-    // 4) Proposer role gate on finalize
-    await expect(
-      sm.connect(outsider).finalize(
-        "0x",
-        ethers.constants.HashZero,
-        [ethers.constants.HashZero, ethers.constants.HashZero],
-        ethers.constants.HashZero,
-        0,
-        1,
-        new Array(9).fill(ethers.constants.HashZero),
-        new Array(9).fill(ethers.constants.HashZero)
-      )
-    ).to.be.revertedWithCustomError(sm, "OnlyProposer");
-
-    // Authorized proposer reaches business logic and succeeds under the gnark-only mock verifier.
-    await expect(
-      sm.connect(proposer).finalize(
-        DUMMY_GNARK_PROOF,
-        ethers.constants.HashZero,
-        [ethers.constants.HashZero, ethers.constants.HashZero],
-        ethers.constants.HashZero,
-        0,
-        1,
-        new Array(9).fill(ethers.constants.HashZero),
-        new Array(9).fill(ethers.constants.HashZero)
-      )
-    ).to.not.be.reverted;
+    const window = await buildBridgeWindow(sm, bridge);
+    await expect(sm.connect(outsider).applyBridgeWindow(...window))
+      .to.be.revertedWithCustomError(sm, "OnlyProposer");
+    await sm.connect(proposer).applyBridgeWindow(...window);
+    expect(await sm.lastFinalizedCheckpointId()).to.equal(1);
 
     // 6) Dynamic ACL binding via provider: swap ACL manager and permissions change immediately
     const newAcl = await deployProxy("PsyACLManager", [

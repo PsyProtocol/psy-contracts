@@ -15,17 +15,18 @@ import {
   waitForContractDeployment,
   wireCoreAddresses,
 } from "./helpers/deploySystem";
+import { buildNetworkConfig } from "./helpers/withdrawalClaim";
 
 const ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
 const maybeDescribe = process.env.RUN_FORK_UPGRADE_TESTS === "1" ? describe : describe.skip;
 const HASH_ZERO = (ethers as any).ZeroHash ?? ethers.constants.HashZero;
 
-async function deployTransparent(contractName: string, owner: string, initArgs: unknown[]): Promise<{ proxy: Contract; proxyAdmin: Contract }> {
+async function deployTransparent(contractName: string, owner: string, initArgs: unknown[] | null): Promise<{ proxy: Contract; proxyAdmin: Contract }> {
   const implementationFactory = await ethers.getContractFactory(contractName);
   const implementation = await implementationFactory.deploy();
   await waitForContractDeployment(implementation);
   const implementationAddress = await getContractAddress(implementation);
-  const initData = implementationFactory.interface.encodeFunctionData("initialize", initArgs);
+  const initData = initArgs === null ? "0x" : implementationFactory.interface.encodeFunctionData("initialize", initArgs);
   const proxyFactory = await ethers.getContractFactory("TestTransparentUpgradeableProxy");
   const proxyContract = await proxyFactory.deploy(implementationAddress, owner, initData);
   await waitForContractDeployment(proxyContract);
@@ -66,15 +67,18 @@ async function deployForkSystem(owner: string, proposer: string) {
   const providerAddress = await getContractAddress(provider);
   const verifierAddress = await getContractAddress(verifier);
   const depositBatchVerifierAddress = await getContractAddress(depositBatchVerifier);
-  const state = await deployTransparent("StateManager", owner, [owner, providerAddress, 0]);
+  const state = await deployTransparent("StateManager", owner, null);
   const router = await deployTransparent("Router", owner, [owner, providerAddress]);
-  const bridge = await deployTransparent("Bridge", owner, [owner, providerAddress, depositBatchVerifierAddress, verifierAddress]);
+  const bridge = await deployTransparent("Bridge", owner, null);
   const erc20Gateway = await deployTransparent("ERC20Gateway", owner, [owner, providerAddress]);
   const wethFactory = await ethers.getContractFactory("WETH9");
   const weth = await wethFactory.deploy();
   await waitForContractDeployment(weth);
   const ethGateway = await deployTransparent("ETHGateway", owner, [owner, providerAddress, await getContractAddress(weth)]);
   await wireCoreAddresses({ provider, acl, bridge: bridge.proxy, stateManager: state.proxy, router: router.proxy, erc20Gateway: erc20Gateway.proxy, ethGateway: ethGateway.proxy, verifier });
+  const config = buildNetworkConfig((await ethers.provider.getNetwork()).chainId, bridge.proxy.address, state.proxy.address, owner, owner);
+  await bridge.proxy.initialize(owner, providerAddress, config, 0);
+  await state.proxy.initialize(owner, providerAddress, 0, config, verifierAddress, depositBatchVerifierAddress, verifierAddress, verifierAddress);
   return { acl, state, bridge };
 }
 

@@ -1,68 +1,64 @@
 import { ethers } from "hardhat";
+import type { BigNumberish, Contract } from "ethers";
 
-const WITHDRAWAL_BATCH_SLOT_WORDS = 34;
-const WITHDRAWAL_BATCH_SLOT_COUNT = 32;
+export const ORCHESTRATION_PROOF = [1n, 0n, 0n, 0n, 0n, 0n, 0n, 0n];
+export const ZERO_PROOF = new Array<bigint>(8).fill(0n);
+export const word = (value: BigNumberish): string => ethers.utils.hexZeroPad(ethers.BigNumber.from(value).toHexString(), 32);
+const words = (values: BigNumberish[]): string => ethers.utils.hexConcat(values.map(word));
+const domain = (label: string): string => ethers.utils.id(`PsyBridge/TwoArtifact/1/${label}`);
+const rootWords = (root: string): bigint[] => [192n, 128n, 64n, 0n].map(shift => (BigInt(root) >> shift) & ((1n << 64n) - 1n));
 
-function bytes32ToU32x8(value: string): bigint[] {
-  const bytes = ethers.utils.arrayify(ethers.utils.hexZeroPad(value, 32));
-  const words: bigint[] = [];
-  for (let index = 0; index < 8; index++) {
-    const offset = index * 4;
-    const word =
-      (BigInt(bytes[offset]) << 24n) |
-      (BigInt(bytes[offset + 1]) << 16n) |
-      (BigInt(bytes[offset + 2]) << 8n) |
-      BigInt(bytes[offset + 3]);
-    words.push(word);
-  }
-  return words;
+export function buildNetworkConfig(chainId: number, bridge: string, stateManager: string, rewardPayer: string, rewardToken: string): string {
+  return words([1, 0, 524288, 7, 1, 0, chainId, bridge, stateManager, 0, 0, 0, 0, 0,
+    0, rewardPayer, rewardToken, 1, 18, 0, 100, 1024, 1024, 1024]);
 }
 
-function batchSlotDataCommit(slotData: bigint[]): string {
-  const bytes: number[] = [];
-  for (const word of slotData) {
-    const normalized = Number(word & 0xffff_ffffn);
-    bytes.push(
-      (normalized >>> 24) & 0xff,
-      (normalized >>> 16) & 0xff,
-      (normalized >>> 8) & 0xff,
-      normalized & 0xff,
-    );
-  }
-  return ethers.utils.keccak256(Uint8Array.from(bytes));
-}
-
-export function buildWithdrawalBatchClaimSingle(params: {
-  withdrawalRoot: string;
+export type Withdrawal = {
   recipient: string;
   token: string;
   amount: bigint;
   nonce: bigint;
-  destinationChainIndex: number;
+  destinationChainIndex?: number;
   senderUserId?: number;
-  bridgeUserId?: number;
-}): { publicInputs: bigint[]; slotData: bigint[] } {
-  const publicInputs = new Array<bigint>(18).fill(0n);
-  const slotData = new Array<bigint>(
-    WITHDRAWAL_BATCH_SLOT_WORDS * WITHDRAWAL_BATCH_SLOT_COUNT,
-  ).fill(0n);
-  const setWords = (target: bigint[], offset: number, words: bigint[]) => {
-    for (let index = 0; index < words.length; index++) {
-      target[offset + index] = words[index];
-    }
-  };
+};
 
-  setWords(publicInputs, 0, bytes32ToU32x8(params.withdrawalRoot));
-  publicInputs[8] = 1n;
-  publicInputs[9] = BigInt(params.bridgeUserId ?? 524288);
+export type BridgeWindow = [bigint[], bigint[], bigint[], string, bigint[], string, bigint[], string];
 
-  slotData[0] = BigInt(params.senderUserId ?? 0);
-  setWords(slotData, 1, bytes32ToU32x8(ethers.utils.hexZeroPad(params.recipient, 32)));
-  setWords(slotData, 9, bytes32ToU32x8(ethers.utils.hexZeroPad(params.token, 32)));
-  setWords(slotData, 17, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${params.amount.toString(16)}`, 32)));
-  setWords(slotData, 25, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${params.nonce.toString(16)}`, 32)));
-  slotData[33] = BigInt(params.destinationChainIndex);
+// Nonzero mock proofs exercise orchestration only, never cryptographic acceptance.
+export async function buildBridgeWindow(stateManager: Contract, bridge: Contract, withdrawals: Withdrawal[] = [], endCheckpointId?: bigint): Promise<BridgeWindow> {
+  const startId = BigInt((await stateManager.lastFinalizedCheckpointId()).toString());
+  const startRoot = await stateManager.lastVerifiedCheckpointRoot();
+  const endId = endCheckpointId ?? startId + 1n;
+  const endRoot = endId === startId ? startRoot : word(endId);
+  const configHash = await stateManager.configHash();
+  const chainIndex = await stateManager.l1ChainIndex();
+  const depositRoot = await bridge.depositRoot();
+  const depositCount = await bridge.provedDepositCount();
+  const withdrawalRoot = ethers.constants.HashZero;
+  const end = words([endId, ...rootWords(endRoot)]);
+  const starts = words([1, chainIndex, startId, ...rootWords(startRoot)]);
+  const deposits = words([1, chainIndex, ...rootWords(depositRoot), ...rootWords(depositRoot), depositCount, depositCount]);
+  const windowId = ethers.utils.keccak256(ethers.utils.hexConcat([domain("Window"), configHash, end, starts, deposits]));
+  const header = ethers.utils.hexConcat([configHash, windowId, end]);
+  const depositOpening = ethers.utils.hexConcat([header, starts, deposits, word(0)]);
+  const withdrawalOpening = ethers.utils.hexConcat([header, word(1), words(rootWords(withdrawalRoot)), word(withdrawals.length), ...withdrawals.map(leaf => words([
+    leaf.destinationChainIndex ?? chainIndex, leaf.senderUserId ?? 0, leaf.recipient, leaf.token, leaf.amount, leaf.nonce,
+  ]))]);
+  const rewardOpening = ethers.utils.hexConcat([header, word(0)]);
+  const replay = endId === startId;
+  const proofStartRoot = replay ? ethers.constants.HashZero : startRoot;
+  const proofStartId = replay ? 0n : startId;
+  const publicInputs = [
+    ...rootWords(proofStartRoot), ...new Array<bigint>(16).fill(0n), ...rootWords(endRoot), endId, endId - proofStartId,
+    ...rootWords(depositRoot), BigInt(depositCount.toString()), ...rootWords(withdrawalRoot),
+  ];
+  return [ORCHESTRATION_PROOF, publicInputs,
+    ORCHESTRATION_PROOF, depositOpening, withdrawals.length ? ORCHESTRATION_PROOF : ZERO_PROOF,
+    withdrawalOpening, ZERO_PROOF, rewardOpening];
+}
 
-  setWords(publicInputs, 10, bytes32ToU32x8(batchSlotDataCommit(slotData)));
-  return { publicInputs, slotData };
+export async function registerWithdrawal(params: Withdrawal & { bridge: Contract; stateManager: Contract }) {
+  const { bridge, stateManager, ...withdrawal } = params;
+  await stateManager.applyBridgeWindow(...await buildBridgeWindow(stateManager, bridge, [withdrawal]));
+  return word(withdrawal.nonce);
 }

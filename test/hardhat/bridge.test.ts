@@ -1,241 +1,58 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
-import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
+import { buildBridgeWindow, registerWithdrawal, word } from "./helpers/withdrawalClaim";
 
-function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
-  const proof = new Array(9).fill(ethers.constants.HashZero);
-  proof[0] = leaf;
-  let cur = leaf;
-  for (let i = 0; i < 8; i++) {
-    const sib = ethers.utils.keccak256(ethers.utils.solidityPack(["string", "uint8"], ["sib", i]));
-    proof[i + 1] = sib;
-    const bit = (index >> i) & 1;
-    cur = bit === 0
-      ? ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [cur, sib]))
-      : ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [sib, cur]));
-  }
-  return { proof, root: cur };
-}
-
-describe("Bridge", function () {
+describe("Bridge atomic withdrawal orchestration (mock verifier, not cryptographic acceptance)", function () {
   it("disables direct recordDeposit entrypoint", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge } = await deployCoreSystem(owner.address);
+    await expect(bridge.connect(user).recordDeposit(owner.address, 250n, word(123), word(3001)))
+      .to.be.revertedWithCustomError(bridge, "DirectDepositDisabled");
+  });
 
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
+  it("registers a pending withdrawal before a separate permissionless claim", async function () {
+    const [owner, user, keeper] = await ethers.getSigners();
+    const { bridge, stateManager } = await deployCoreSystem(owner.address);
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Mock", "MOCK");
     await configureFlowToken(bridge, token.address);
-
-    await token.mint(user.address, 1000n);
-    await token.connect(user).approve(bridge.address, 250n);
-    await expect(
-      bridge.connect(user).recordDeposit(token.address, 250n, ethers.utils.hexZeroPad("0x7b", 32), ethers.utils.hexZeroPad("0xbb9", 32))
-    ).to.be.revertedWithCustomError(bridge, "DirectDepositDisabled");
+    await token.mint(bridge.address, 777);
+    const nonce = await registerWithdrawal({ bridge, stateManager, recipient: user.address, token: token.address, amount: 777n, nonce: 42n });
+    expect(await token.balanceOf(user.address)).to.equal(0);
+    expect(await bridge.claimedNullifiers(nonce)).to.equal(true);
+    expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(777);
+    await bridge.connect(keeper).claimPendingWithdrawal(nonce);
+    expect(await token.balanceOf(user.address)).to.equal(777);
+    expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(0);
   });
 
-  it("claims withdrawal with Groth16 proof inputs and marks nullifier", async function () {
+  it("rejects duplicate nullifiers and rolls the checkpoint back", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
-
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
-    await configureFlowToken(bridge, token.address);
-
-    const amount = 777n;
-    const nonce = 42n;
-    await token.mint(bridge.address, amount);
-
-    const depositLeaf = await sm.withdrawalSubtreeRoot();
-    const deposit = mkTopProof(depositLeaf, 0);
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
-    const roots = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-
-    await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs, slotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawal.proof[0],
-      recipient: user.address,
-      token: token.address,
-      amount,
-      nonce,
-      destinationChainIndex: 0,
-    });
-
-    const before = await token.balanceOf(user.address);
-    await expect(
-      bridge.batchClaimWithdrawal(proof, publicInputs, slotData)
-    ).to.emit(bridge, "WithdrawalPendingCreated");
-
-    expect(await token.balanceOf(user.address)).to.equal(before);
-
-    const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
-    expect(await bridge.claimedNullifiers(nullifier)).to.equal(true);
-    expect((await bridge.pendingWithdrawals(nullifier)).amount).to.equal(amount);
-    await bridge.claimPendingWithdrawal(nullifier);
-    expect(await token.balanceOf(user.address)).to.equal(before + amount);
+    const { bridge, stateManager } = await deployCoreSystem(owner.address);
+    await configureFlowToken(bridge, owner.address);
+    const withdrawal = { bridge, stateManager, recipient: user.address, token: owner.address, amount: 333n, nonce: 77n };
+    await registerWithdrawal(withdrawal);
+    await expect(registerWithdrawal(withdrawal)).to.be.revertedWithCustomError(bridge, "NullifierAlreadyClaimed");
+    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(1);
+    expect(await bridge.totalWithdrawalAmount(owner.address)).to.equal(333);
   });
 
-  it("rejects withdrawal claim with wrong bridge user id in public inputs", async function () {
+  it("rejects a destination absent from the configured chain set", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
-
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
-    await configureFlowToken(bridge, token.address);
-
-    const amount = 777n;
-    const nonce = 42n;
-    await token.mint(bridge.address, amount);
-
-    const depositLeaf = await sm.withdrawalSubtreeRoot();
-    const deposit = mkTopProof(depositLeaf, 0);
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
-    const roots = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-
-    await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs, slotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawal.proof[0],
-      recipient: user.address,
-      token: token.address,
-      amount,
-      nonce,
-      destinationChainIndex: 0,
-      bridgeUserId: 1,
-    });
-
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
-      bridge,
-      "InvalidPublicInputs"
-    );
+    const { bridge, stateManager } = await deployCoreSystem(owner.address);
+    const args = await buildBridgeWindow(stateManager, bridge, [{ recipient: user.address, token: owner.address, amount: 444n, nonce: 78n, destinationChainIndex: 1 }]);
+    await expect(stateManager.applyBridgeWindow(...args)).to.be.reverted;
+    expect(await bridge.claimedNullifiers(word(78))).to.equal(false);
+    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(0);
   });
 
-  it("rejects duplicate withdrawal claim with same nullifier", async function () {
+  it("rejects a withdrawal opening bound to another checkpoint", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
-
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
-    await configureFlowToken(bridge, token.address);
-
-    const amount = 333n;
-    const nonce = 77n;
-    await token.mint(bridge.address, amount);
-
-    const depositLeaf = await sm.withdrawalSubtreeRoot();
-    const deposit = mkTopProof(depositLeaf, 0);
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
-    const roots = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-
-    await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs, slotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawal.proof[0],
-      recipient: user.address,
-      token: token.address,
-      amount,
-      nonce,
-      destinationChainIndex: 0,
-    });
-
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.emit(bridge, "WithdrawalPendingCreated");
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
-      bridge,
-      "NullifierAlreadyClaimed"
-    );
-  });
-
-  it("rejects withdrawal claim with wrong destination chain", async function () {
-    const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
-
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
-
-    const amount = 444n;
-    const nonce = 78n;
-    await token.mint(bridge.address, amount);
-
-    const depositLeaf = await sm.withdrawalSubtreeRoot();
-    const deposit = mkTopProof(depositLeaf, 0);
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
-    const roots = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-
-    await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs, slotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawal.proof[0],
-      recipient: user.address,
-      token: token.address,
-      amount,
-      nonce,
-      destinationChainIndex: 1,
-    });
-
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
-      bridge,
-      "WrongDestinationChain"
-    );
-  });
-
-  it("rejects withdrawal claim with wrong withdrawal root in public inputs", async function () {
-    const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
-
-    const TokenFactory = await ethers.getContractFactory("MockERC20");
-    const token = await TokenFactory.deploy("Mock", "MOCK");
-    await token.deployed();
-
-    const amount = 555n;
-    const nonce = 79n;
-    await token.mint(bridge.address, amount);
-
-    const depositLeaf = await sm.withdrawalSubtreeRoot();
-    const deposit = mkTopProof(depositLeaf, 0);
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0x1234", 32), 0);
-    const roots = [
-      ethers.utils.hexZeroPad("0x01", 32),
-      ethers.utils.hexZeroPad("0x02", 32),
-    ];
-
-    await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-
-    const proof = new Array(8).fill(0n);
-    const { publicInputs, slotData } = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: ethers.utils.hexZeroPad("0xdead", 32),
-      recipient: user.address,
-      token: token.address,
-      amount,
-      nonce,
-      destinationChainIndex: 0,
-    });
-
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
-      bridge,
-      "InvalidWithdrawalProof"
-    );
+    const { bridge, stateManager } = await deployCoreSystem(owner.address);
+    const args = await buildBridgeWindow(stateManager, bridge, [{ recipient: user.address, token: owner.address, amount: 555n, nonce: 79n }]);
+    const opening = args[5] as string;
+    args[5] = ethers.utils.hexConcat([ethers.utils.hexDataSlice(opening, 0, 64), word(2), ethers.utils.hexDataSlice(opening, 96)]);
+    await expect(stateManager.applyBridgeWindow(...args)).to.be.revertedWithCustomError(stateManager, "InvalidCheckpointContinuity");
+    expect(await bridge.claimedNullifiers(word(79))).to.equal(false);
   });
 });

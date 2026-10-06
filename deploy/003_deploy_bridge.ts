@@ -1,18 +1,25 @@
 import type { DeployFunction } from "hardhat-deploy/types";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
-import { loadDeployConfig } from "./deploy-config";
+import { loadDeployConfig, requireAtomicDeployConfig } from "./deploy-config";
 import { deploy } from "../helpers/deploy-helper";
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, getNamedAccounts, network } = hre;
-  const { get, log } = deployments;
+  const { get, read, execute, log } = deployments;
   const { deployer } = await getNamedAccounts();
-  const cfg = await loadDeployConfig(hre);
+  const cfg = requireAtomicDeployConfig(await loadDeployConfig(hre));
+  const txFrom = cfg.admin || deployer;
 
   log("Running 003_deploy_bridge on " + network.name);
   const provider = await get("PsyAddressesProvider");
-  const withdrawalClaimVerifier = await get("WithdrawalClaimVerifier");
-  const depositBatchVerifier = await get("DepositBatchVerifier");
+  const stateManager = await get("StateManager");
+
+  // Bridge binds the StateManager address from the provider during initialize.
+  const stateManagerId = (await read("PsyAddressesProvider", "STATE_MANAGER_ID")) as string;
+  const currentStateManager = (await read("PsyAddressesProvider", "getAddress", stateManagerId)) as string;
+  if (currentStateManager.toLowerCase() !== stateManager.address.toLowerCase()) {
+    await execute("PsyAddressesProvider", { from: txFrom, log: true }, "setAddress", stateManagerId, stateManager.address);
+  }
 
   await deploy(hre, "Bridge", {
     from: deployer,
@@ -23,12 +30,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
       execute: {
         init: {
           methodName: "initialize",
-          args: [
-            cfg.admin,
-            provider.address,
-            depositBatchVerifier.address,
-            withdrawalClaimVerifier.address,
-          ],
+          args: [cfg.admin, provider.address, cfg.networkConfig, cfg.l1ChainIndex],
         },
       },
     },
@@ -37,4 +39,4 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 export default func;
 func.tags = ["bridge"];
-func.dependencies = ["access", "verifier"];
+func.dependencies = ["access", "state_manager"];

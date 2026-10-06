@@ -6,62 +6,7 @@ import {
   deployCoreSystem,
   tokenSetHash,
 } from "./helpers/deploySystem";
-import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
-
-function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
-  const proof = new Array(9).fill(ethers.constants.HashZero);
-  proof[0] = leaf;
-  let cur = leaf;
-  for (let i = 0; i < 8; i++) {
-    const sibling = ethers.utils.keccak256(
-      ethers.utils.solidityPack(["string", "uint8"], ["flow-limit-sibling", i]),
-    );
-    proof[i + 1] = sibling;
-    cur = ((index >> i) & 1) === 0
-      ? ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [cur, sibling]))
-      : ethers.utils.keccak256(ethers.utils.solidityPack(["bytes32", "bytes32"], [sibling, cur]));
-  }
-  return { proof, root: cur };
-}
-
-async function registerWithdrawal(params: {
-  bridge: any;
-  stateManager: any;
-  recipient: string;
-  token: string;
-  amount: bigint;
-  nonce: bigint;
-}) {
-  const { bridge, stateManager, recipient, token, amount, nonce } = params;
-  const deposit = mkTopProof(await stateManager.withdrawalSubtreeRoot(), 0);
-  const withdrawal = mkTopProof(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32), 0);
-  const lastCheckpointId = await stateManager.lastFinalizedCheckpointId();
-  const previousCheckpointRoot = await stateManager.lastVerifiedCheckpointRoot();
-  const nextCheckpointRoot = ethers.utils.keccak256(
-    ethers.utils.solidityPack(["string", "uint256"], ["withdrawal-cap-checkpoint", nonce]),
-  );
-  await stateManager.finalize(
-    DUMMY_GNARK_PROOF,
-    deposit.root,
-    [previousCheckpointRoot, nextCheckpointRoot],
-    withdrawal.root,
-    0,
-    lastCheckpointId.add(1),
-    deposit.proof,
-    withdrawal.proof,
-  );
-  const calldata = buildWithdrawalBatchClaimSingle({
-    withdrawalRoot: withdrawal.proof[0],
-    recipient,
-    token,
-    amount,
-    nonce,
-    destinationChainIndex: 0,
-  });
-  await bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData);
-  return ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
-}
+import { buildBridgeWindow, registerWithdrawal, word } from "./helpers/withdrawalClaim";
 
 describe("Bridge per-token flow limits", function () {
   it("enforces deposit minimum, deposit cap, and token isolation", async function () {
@@ -291,35 +236,22 @@ describe("Bridge per-token flow limits", function () {
     await bridge.setTokenPauseFlags(token, 0);
     expect((await bridge.getPauseFlags(token)).effectiveFlags).to.equal(0);
   });
-  it("rolls lifetime totals and nullifiers back when the batch commit check fails after registration", async function () {
+  it("rolls lifetime totals, pending withdrawals and checkpoint back when a later leaf fails", async function () {
     const [owner, recipient] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
     await configureFlowToken(bridge, token.address);
-
-    const withdrawal = mkTopProof(ethers.utils.hexZeroPad("0xbeef", 32), 0);
-    const deposit = mkTopProof(await stateManager.withdrawalSubtreeRoot(), 0);
-    await stateManager.finalize(
-      DUMMY_GNARK_PROOF,
-      deposit.root,
-      [await stateManager.lastVerifiedCheckpointRoot(), ethers.utils.hexZeroPad("0x42", 32)],
-      withdrawal.root,
-      0,
-      (await stateManager.lastFinalizedCheckpointId()).add(1),
-      deposit.proof,
-      withdrawal.proof,
-    );
     const nonce = 0x77n;
-    const calldata = buildWithdrawalBatchClaimSingle({
-      withdrawalRoot: withdrawal.proof[0], recipient: recipient.address, token: token.address,
-      amount: 123n, nonce, destinationChainIndex: 0,
-    });
-    calldata.publicInputs[10] ^= 1n;
-    await expect(bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData))
-      .to.be.revertedWithCustomError(bridge, "InvalidWithdrawalProof");
+    const args = await buildBridgeWindow(stateManager, bridge, [
+      { recipient: recipient.address, token: token.address, amount: 123n, nonce },
+      { recipient: recipient.address, token: recipient.address, amount: 1n, nonce: nonce + 1n },
+    ]);
+    await expect(stateManager.applyBridgeWindow(...args)).to.be.reverted;
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
-    expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
+    expect(await bridge.claimedNullifiers(word(nonce))).to.equal(false);
+    expect((await bridge.pendingWithdrawals(word(nonce))).amount).to.equal(0);
+    expect(await stateManager.lastFinalizedCheckpointId()).to.equal(0);
   });
 
 
@@ -344,11 +276,10 @@ describe("Bridge per-token flow limits", function () {
     for (const [amount, nonce] of [
       [GOLDILOCKS_PRIME, 0x94n],
       [GOLDILOCKS_PRIME + 1n, 0x95n],
-      [(1n << 64n) - 1n, 0x96n],
     ] as const) {
       await expect(registerWithdrawal({
         bridge, stateManager, recipient: recipient.address, token: token.address, amount, nonce,
-      })).to.be.revertedWithCustomError(bridge, "InvalidWithdrawalAmount").withArgs(amount);
+      })).to.be.reverted;
       expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
       expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
     }

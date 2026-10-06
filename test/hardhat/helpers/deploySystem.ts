@@ -1,7 +1,19 @@
 import fs from "fs";
 import path from "path";
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
 import { deployProxy } from "./deployProxy";
+import { buildNetworkConfig } from "./withdrawalClaim";
+
+// Deploy-script tests require the reviewed atomic deploy prerequisites (network config bytes,
+// precommitted bridge address, and the four setup-exported verifier addresses). They stay
+// skipped until the matching setup cohorts are exported and recorded in config/<network>.json.
+export function atomicDeployPrerequisitesMissing(): boolean {
+  const file = path.join(__dirname, "../../../config", `${network.name}.json`);
+  if (!fs.existsSync(file)) return true;
+  const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+  return ["networkConfig", "bridgeAddress", "finalizeVerifier", "depositVerifier", "withdrawalVerifier", "rewardVerifier"]
+    .some((key) => !cfg[key]);
+}
 
 export async function waitForContractDeployment(contract: any) {
   if (typeof contract.waitForDeployment === "function") {
@@ -137,14 +149,9 @@ export async function deployCoreSystem(owner: string, proposer?: string) {
   const providerAddress = await getContractAddress(provider);
   const verifierAddress = await getContractAddress(verifier);
   const batchVerifierAddress = await getContractAddress(batchVerifier);
-  const stateManager = await deployProxy("StateManager", [owner, providerAddress, 0]);
+  const stateManager = await deployProxy("StateManager", null);
   const router = await deployProxy("Router", [owner, providerAddress]);
-  const bridge = await deployProxy("Bridge", [
-    owner,
-    providerAddress,
-    batchVerifierAddress,
-    verifierAddress,
-  ]);
+  const bridge = await deployProxy("Bridge", null);
   const erc20Gateway = await deployProxy("ERC20Gateway", [owner, providerAddress]);
 
   const WethFactory = await ethers.getContractFactory("WETH9");
@@ -154,6 +161,11 @@ export async function deployCoreSystem(owner: string, proposer?: string) {
   const ethGateway = await deployProxy("ETHGateway", [owner, providerAddress, wethAddress]);
 
   await wireCoreAddresses({ provider, acl, bridge, stateManager, router, erc20Gateway, ethGateway, verifier });
+  const networkConfig = buildNetworkConfig((await ethers.provider.getNetwork()).chainId,
+    await getContractAddress(bridge), await getContractAddress(stateManager), owner, owner);
+  await bridge.initialize(owner, providerAddress, networkConfig, 0);
+  await stateManager.initialize(owner, providerAddress, 0, networkConfig,
+    verifierAddress, batchVerifierAddress, verifierAddress, verifierAddress);
   await acl.grantRole(await acl.GUARDIAN_ROLE(), owner);
 
   return {

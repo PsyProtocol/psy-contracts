@@ -4,8 +4,9 @@ pragma solidity ^0.8.24;
 library BridgeOpening {
     uint256 internal constant GOLDILOCKS_PRIME = 18446744069414584321;
     bytes32 internal constant CONFIG = keccak256("PsyBridge/TwoArtifact/1/Config");
-    bytes32 internal constant A = keccak256("PsyBridge/TwoArtifact/1/A");
-    bytes32 internal constant B = keccak256("PsyBridge/TwoArtifact/1/B");
+    bytes32 internal constant DEPOSIT_AGGREGATE = keccak256("PsyBridge/TwoArtifact/1/A");
+    bytes32 internal constant WITHDRAWAL = keccak256("PsyBridge/TwoArtifact/1/WithdrawalBatch");
+    bytes32 internal constant REWARD = keccak256("PsyBridge/TwoArtifact/1/RewardBatch");
     bytes32 internal constant WINDOW = keccak256("PsyBridge/TwoArtifact/1/Window");
     bytes32 internal constant BATCH = keccak256("PsyBridge/TwoArtifact/1/Batch");
     bytes32 internal constant LEAF = keccak256("PsyBridge/TwoArtifact/1/Leaf");
@@ -13,7 +14,7 @@ library BridgeOpening {
     bytes32 internal constant NODE = keccak256("PsyBridge/TwoArtifact/1/Node");
     bytes32 internal constant AGGREGATE_HEADER = keccak256("PsyBridge/TwoArtifact/1/AggregateHeader");
     bytes32 internal constant RECORD = keccak256("PsyBridge/TwoArtifact/1/Record");
-    bytes32 internal constant CUMULATIVE_RECORD = keccak256("PsyBridge/CumulativeReward/1/Record");
+    bytes32 internal constant SOURCE_CHECKPOINT_REWARD_LEAF = keccak256("PsyBridge/SourceCheckpointReward/1/Leaf");
     uint256 internal constant CLAIM_TREE_MAX_CAPACITY = 131072;
     uint8 internal constant WITHDRAWAL_PUBLICATION_FAMILY = 2;
     uint8 internal constant REWARD_PUBLICATION_FAMILY = 3;
@@ -40,13 +41,13 @@ library BridgeOpening {
     struct DepositLeaf { uint8 chainIndex; uint32 absoluteIndex; bytes32 shieldAddress; address token; bytes32 l2TokenContractId; uint256 amount; bytes32 noteCommitment; }
     struct WithdrawalLeaf { uint8 chainIndex; uint32 senderUserId; address recipient; address token; uint256 amount; bytes32 nonce; }
     struct RewardLeaf { uint64 claimCheckpointId; uint32 userId; uint8 height; uint32 pathIndex; uint32 nullifierIndex; address recipient; }
-    struct CumulativeRewardLeaf { bytes32 economicDomain; uint32 userId; uint256 totalAmount; address recipient; bool initialized; }
-    struct ChainEnd { uint8 chainIndex; bytes32 depositRoot; uint32 depositCount; bytes32 withdrawalRoot; }
-    struct AOpening {
+    struct SourceCheckpointRewardLeaf { bytes32 economicDomain; uint64 sourceCheckpointId; uint32 userId; uint256 amount; address recipient; bool initialized; }
+    struct DepositAggregateOpening {
         bytes32 configHash; bytes32 windowId; uint64 endCheckpointId; bytes32 endCheckpointRoot;
-        ChainStart[] starts; DepositTransition[] deposits; DepositLeaf[] depositLeaves; bytes32 statementA;
+        ChainStart[] starts; DepositTransition[] deposits; DepositLeaf[] depositLeaves; bytes32 depositOpeningDigest;
     }
-    struct BOpening { AOpening a; ChainEnd[] ends; WithdrawalLeaf[] withdrawals; RewardLeaf[] rewards; bytes32 statementB; }
+    struct WithdrawalAggregateOpening { DepositAggregateOpening context; bytes32[] withdrawalRoots; WithdrawalLeaf[] withdrawals; bytes32 openingDigest; }
+    struct RewardAggregateOpening { DepositAggregateOpening context; RewardLeaf[] rewards; bytes32 openingDigest; }
     struct InclusionAggregateHeader {
         uint8 family;
         bytes32 configHash;
@@ -60,8 +61,8 @@ library BridgeOpening {
         uint32 firstOrdinal;
         uint32 count;
         bytes32[] withdrawalRoots;
-        bytes32 oldNullifierRoot;
-        bytes32 newNullifierRoot;
+        bytes32 oldLedgerStateRoot;
+        bytes32 newLedgerStateRoot;
         bytes32 openingDigest;
         bytes32 claimTreeRoot;
     }
@@ -172,12 +173,12 @@ library BridgeOpening {
         chain = config.chains[chainOrdinal(config, index)];
         if (chain.chainId != block.chainid || chain.bridge != bridge || chain.stateManager != stateManager) revert InvalidConfig();
     }
-    function readA(bytes memory body, NetworkConfig memory config) internal pure returns (AOpening memory opening) {
+    function readDepositAggregate(bytes memory body, NetworkConfig memory config) internal pure returns (DepositAggregateOpening memory opening) {
         Cursor memory c;
-        opening = readAFields(body, c, config);
+        opening = readDepositAggregateFields(body, c, config);
         if (c.offset != body.length) revert InvalidEncoding();
     }
-    function readAFields(bytes memory body, Cursor memory c, NetworkConfig memory config) private pure returns (AOpening memory a) {
+    function readDepositAggregateFields(bytes memory body, Cursor memory c, NetworkConfig memory config) private pure returns (DepositAggregateOpening memory a) {
         a.configHash = bytes32(readWord(body, c));
         a.windowId = bytes32(readWord(body, c));
         if (a.configHash != config.configHash) revert InvalidConfig();
@@ -237,30 +238,25 @@ library BridgeOpening {
             a.depositLeaves[i] = leaf;
             ++consumed;
         }
-        bytes32 root = batchRoot(body, recordsStart, count, 7, 1, a);
-        a.statementA = keccak256(bytes.concat(A, slice(body, 0, projectionEnd), abi.encode(count, (count + 31) / 32, root)));
+        bytes32 root = aggregateRoot(body, recordsStart, count, 7, 1, a);
+        a.depositOpeningDigest = keccak256(bytes.concat(DEPOSIT_AGGREGATE, slice(body, 0, projectionEnd), abi.encode(count, (count + 31) / 32, root)));
     }
-    function readB(bytes memory body, NetworkConfig memory config) internal pure returns (BOpening memory b) {
+    function readAggregateContext(bytes memory body, Cursor memory c, NetworkConfig memory config) private pure returns (DepositAggregateOpening memory a) {
+        a.configHash = bytes32(readWord(body, c));
+        a.windowId = bytes32(readWord(body, c));
+        if (a.configHash != config.configHash) revert InvalidConfig();
+        a.endCheckpointId = uint64(readUint(body, c, 64));
+        a.endCheckpointRoot = readRoot(body, c);
+    }
+    function readWithdrawalAggregate(bytes memory body, NetworkConfig memory config) internal pure returns (WithdrawalAggregateOpening memory b) {
         Cursor memory c;
-        b.a = readAFields(body, c, config);
-        uint256 endsStart = c.offset;
-        uint256 n = readWord(body, c);
-        if (n != config.chains.length) revert InvalidCount();
-        b.ends = new ChainEnd[](n);
-        for (uint256 i; i < n; ++i) {
-            ChainEnd memory end;
-            end.chainIndex = uint8(readUint(body, c, 8));
-            end.depositRoot = readRoot(body, c);
-            end.depositCount = uint32(readUint(body, c, 32));
-            end.withdrawalRoot = readRoot(body, c);
-            if (end.chainIndex != config.chains[i].chainIndex) revert InvalidOrdering();
-            if (end.depositRoot != b.a.deposits[i].newRoot || end.depositCount != b.a.deposits[i].newCount) revert InvalidDepositState();
-            b.ends[i] = end;
-        }
-        bytes memory ends = slice(body, endsStart, c.offset);
-        uint256 count = readWord(body, c);
-        if (count > config.maxWithdrawals) revert InvalidCount();
-        uint256 recordsStart = c.offset;
+        b.context = readAggregateContext(body, c, config);
+        uint256 chains = readUint(body, c, 16);
+        if (chains == 0 || chains > 256 || chains != config.chains.length) revert InvalidCount();
+        b.withdrawalRoots = new bytes32[](chains);
+        for (uint256 i; i < chains; ++i) b.withdrawalRoots[i] = readRoot(body, c);
+        uint256 count = readUint(body, c, 32);
+        if (count > config.maxWithdrawals || body.length != 288 + chains * 128 + count * 192) revert InvalidCount();
         b.withdrawals = new WithdrawalLeaf[](count);
         uint256 chain;
         for (uint256 i; i < count; ++i) {
@@ -271,8 +267,8 @@ library BridgeOpening {
             leaf.token = readAddress(body, c);
             leaf.amount = readWord(body, c);
             leaf.nonce = bytes32(readWord(body, c));
-            while (chain < n && config.chains[chain].chainIndex < leaf.chainIndex) ++chain;
-            if (chain == n || config.chains[chain].chainIndex != leaf.chainIndex) revert InvalidOrdering();
+            while (chain < config.chains.length && config.chains[chain].chainIndex < leaf.chainIndex) ++chain;
+            if (chain == config.chains.length || config.chains[chain].chainIndex != leaf.chainIndex) revert InvalidOrdering();
             if (leaf.recipient == address(0) || leaf.amount == 0 || leaf.amount >= GOLDILOCKS_PRIME) revert InvalidEncoding();
             if (i != 0) {
                 WithdrawalLeaf memory previous = b.withdrawals[i - 1];
@@ -280,11 +276,13 @@ library BridgeOpening {
             }
             b.withdrawals[i] = leaf;
         }
-        bytes32 withdrawalRoot = batchRoot(body, recordsStart, count, 6, 2, b.a);
-        bytes memory withdrawalProjection = abi.encode(count, (count + 31) / 32, withdrawalRoot);
-        count = readWord(body, c);
-        if (count > config.maxRewards) revert InvalidCount();
-        recordsStart = c.offset;
+        b.openingDigest = keccak256(abi.encodePacked(WITHDRAWAL, body));
+    }
+    function readRewardAggregate(bytes memory body, NetworkConfig memory config) internal pure returns (RewardAggregateOpening memory b) {
+        Cursor memory c;
+        b.context = readAggregateContext(body, c, config);
+        uint256 count = readUint(body, c, 32);
+        if (count > config.maxRewards || body.length != 256 + count * 192) revert InvalidCount();
         b.rewards = new RewardLeaf[](count);
         for (uint256 i; i < count; ++i) {
             RewardLeaf memory leaf;
@@ -296,7 +294,7 @@ library BridgeOpening {
             leaf.recipient = readAddress(body, c);
             if (leaf.recipient == address(0) || leaf.height < 2 || leaf.height > 21) revert InvalidEncoding();
             if (leaf.pathIndex >= uint256(1) << (leaf.height - 2) || leaf.nullifierIndex != (uint256(1) << leaf.height) - 1 + leaf.pathIndex) revert InvalidEncoding();
-            if (leaf.claimCheckpointId < config.rewardCutover || leaf.claimCheckpointId >= config.rewardEndExclusive || leaf.claimCheckpointId > b.a.endCheckpointId) revert InvalidCursor();
+            if (leaf.claimCheckpointId < config.rewardCutover || leaf.claimCheckpointId >= config.rewardEndExclusive || leaf.claimCheckpointId > b.context.endCheckpointId) revert InvalidCursor();
             if (i != 0) {
                 RewardLeaf memory previous = b.rewards[i - 1];
                 if (previous.claimCheckpointId > leaf.claimCheckpointId || (previous.claimCheckpointId == leaf.claimCheckpointId && previous.nullifierIndex >= leaf.nullifierIndex)) revert InvalidOrdering();
@@ -304,10 +302,9 @@ library BridgeOpening {
             b.rewards[i] = leaf;
         }
         if (c.offset != body.length) revert InvalidEncoding();
-        bytes32 rewardRoot = batchRoot(body, recordsStart, count, 6, 3, b.a);
-        b.statementB = keccak256(bytes.concat(B, b.a.statementA, ends, withdrawalProjection, abi.encode(count, (count + 31) / 32, rewardRoot)));
+        b.openingDigest = keccak256(abi.encodePacked(REWARD, body));
     }
-    function batchRoot(bytes memory body, uint256 start, uint256 count, uint256 recordWords, uint256 family, AOpening memory a) private pure returns (bytes32) {
+    function aggregateRoot(bytes memory body, uint256 start, uint256 count, uint256 recordWords, uint256 family, DepositAggregateOpening memory a) private pure returns (bytes32) {
         uint256 chunks = (count + 31) / 32;
         uint256 width = 1;
         while (width < chunks) width <<= 1;
@@ -368,9 +365,9 @@ library BridgeOpening {
                 offset += 32;
             }
         } else if (header.family == REWARD_PUBLICATION_FAMILY) {
-            header.oldNullifierRoot = readCanonicalHash4(body, offset);
+            header.oldLedgerStateRoot = readCanonicalHash4(body, offset);
             offset += 32;
-            header.newNullifierRoot = readCanonicalHash4(body, offset);
+            header.newLedgerStateRoot = readCanonicalHash4(body, offset);
             offset += 32;
         } else {
             revert InvalidConfig();
@@ -428,8 +425,8 @@ library BridgeOpening {
             if (header.count == 0 || header.count != expected) revert InvalidCount();
         }
         if (header.family == WITHDRAWAL_PUBLICATION_FAMILY) {
-            if (header.withdrawalRoots.length == 0 || header.withdrawalRoots.length > 256 || header.oldNullifierRoot != bytes32(0) || header.newNullifierRoot != bytes32(0)) revert InvalidCount();
-        } else if (header.totalCount == 0 && header.oldNullifierRoot != header.newNullifierRoot) {
+            if (header.withdrawalRoots.length == 0 || header.withdrawalRoots.length > 256 || header.oldLedgerStateRoot != bytes32(0) || header.newLedgerStateRoot != bytes32(0)) revert InvalidCount();
+        } else if (header.totalCount == 0 && header.oldLedgerStateRoot != header.newLedgerStateRoot) {
             revert InvalidCursor();
         }
     }
@@ -456,21 +453,22 @@ library BridgeOpening {
         readWithdrawalLeaf(body);
         return keccak256(abi.encodePacked(RECORD, bytes32(uint256(2)), body));
     }
-    function readCumulativeRewardLeaf(bytes memory body) internal pure returns (CumulativeRewardLeaf memory leaf) {
-        if (body.length != 160) revert InvalidEncoding();
+    function readSourceCheckpointRewardLeaf(bytes memory body) internal pure returns (SourceCheckpointRewardLeaf memory leaf) {
+        if (body.length != 192) revert InvalidEncoding();
         Cursor memory cursor;
         leaf.economicDomain = bytes32(readWord(body, cursor));
+        leaf.sourceCheckpointId = uint64(readUint(body, cursor, 64));
         leaf.userId = uint32(readUint(body, cursor, 32));
-        leaf.totalAmount = readWord(body, cursor);
+        leaf.amount = readWord(body, cursor);
         leaf.recipient = readAddress(body, cursor);
         uint256 flag = readUint(body, cursor, 64);
         if (flag > 1) revert InvalidEncoding();
         leaf.initialized = flag == 1;
-        if (cursor.offset != 160) revert InvalidEncoding();
+        if (cursor.offset != 192) revert InvalidEncoding();
         if (!leaf.initialized && leaf.recipient != address(0)) revert InvalidEncoding();
     }
-    function cumulativeRewardLeafCommit(bytes memory body) internal pure returns (bytes32) {
-        readCumulativeRewardLeaf(body);
-        return keccak256(abi.encodePacked(CUMULATIVE_RECORD, body));
+    function sourceCheckpointRewardLeafCommit(bytes memory body) internal pure returns (bytes32) {
+        readSourceCheckpointRewardLeaf(body);
+        return keccak256(abi.encodePacked(SOURCE_CHECKPOINT_REWARD_LEAF, body));
     }
 }

@@ -1,10 +1,16 @@
 import { expect } from "chai";
 import { deployments, ethers, getNamedAccounts } from "hardhat";
-import { ensureHardhatDeploymentChainId, getContractAddress, hexZeroPad } from "./helpers/deploySystem";
-const HASH_ZERO = (ethers as any).ZeroHash ?? ethers.constants.HashZero;
+import {
+  atomicDeployPrerequisitesMissing,
+  ensureHardhatDeploymentChainId,
+  getContractAddress,
+  hexZeroPad,
+} from "./helpers/deploySystem";
+import { buildBridgeWindow, ZERO_PROOF } from "./helpers/withdrawalClaim";
 
 describe("Deployed Permission Configuration", function () {
   it("matches expected permissions after running deploy scripts", async function () {
+    if (atomicDeployPrerequisitesMissing()) this.skip();
     await ensureHardhatDeploymentChainId();
     await deployments.fixture(["transfer_ownership"]);
 
@@ -19,17 +25,12 @@ describe("Deployed Permission Configuration", function () {
     const router = await ethers.getContractAt("Router", (await deployments.get("Router")).address);
     const erc20Gateway = await ethers.getContractAt("ERC20Gateway", (await deployments.get("ERC20Gateway")).address);
     const ethGateway = await ethers.getContractAt("ETHGateway", (await deployments.get("ETHGateway")).address);
-    const verifier = await ethers.getContractAt(
-      "src/GnarkGroth16Verifier.sol:Verifier",
-      (await deployments.get("ZKVerifier")).address
-    );
     const aclAddress = await getContractAddress(acl);
     const bridgeAddress = await getContractAddress(bridge);
     const stateManagerAddress = await getContractAddress(sm);
     const routerAddress = await getContractAddress(router);
     const erc20GatewayAddress = await getContractAddress(erc20Gateway);
     const ethGatewayAddress = await getContractAddress(ethGateway);
-    const verifierAddress = await getContractAddress(verifier);
 
     // 1) Provider wiring after deployment
     expect(await provider["getAddress(bytes32)"](await provider.ACL_MANAGER_ID())).to.equal(aclAddress);
@@ -38,7 +39,6 @@ describe("Deployed Permission Configuration", function () {
     expect(await provider["getAddress(bytes32)"](await provider.ROUTER_ID())).to.equal(routerAddress);
     expect(await provider["getAddress(bytes32)"](await provider.ERC20_GATEWAY_ID())).to.equal(erc20GatewayAddress);
     expect(await provider["getAddress(bytes32)"](await provider.ETH_GATEWAY_ID())).to.equal(ethGatewayAddress);
-    expect(await provider["getAddress(bytes32)"](await provider.ZK_VERIFIER_ID())).to.equal(verifierAddress);
 
     // 2) ACL roles assigned by deployment config
     expect(await acl.hasRole(await acl.BRIDGE_ADMIN_ROLE(), admin.address)).to.equal(true);
@@ -58,31 +58,13 @@ describe("Deployed Permission Configuration", function () {
       router.connect(admin).setTokenMapping(ethers.Wallet.createRandom().address, hexZeroPad("0x02", 32))
     ).to.not.be.reverted;
 
-    // 5) Proposer gate on finalize works
-    await expect(
-      sm.connect(outsider).finalize(
-        "0x",
-        HASH_ZERO,
-        [HASH_ZERO, HASH_ZERO],
-        HASH_ZERO,
-        0,
-        1,
-        new Array(9).fill(HASH_ZERO),
-        new Array(9).fill(HASH_ZERO)
-      )
-    ).to.be.revertedWithCustomError(sm, "OnlyProposer");
-
-    await expect(
-      sm.connect(proposer).finalize(
-        "0x",
-        HASH_ZERO,
-        [HASH_ZERO, HASH_ZERO],
-        HASH_ZERO,
-        0,
-        1,
-        new Array(9).fill(HASH_ZERO),
-        new Array(9).fill(HASH_ZERO)
-      )
-    ).to.be.revertedWithCustomError(sm, "InvalidProof");
+    // 4) Proposer gate on the atomic window, and a zero-proof window stays invalid
+    const window = await buildBridgeWindow(sm, bridge);
+    window[0] = ZERO_PROOF;
+    window[2] = ZERO_PROOF;
+    window[4] = ZERO_PROOF;
+    window[6] = ZERO_PROOF;
+    await expect(sm.connect(outsider).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "OnlyProposer");
+    await expect(sm.connect(proposer).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
   });
 });

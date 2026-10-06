@@ -7,7 +7,6 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {BridgeOpening} from "./BridgeOpening.sol";
-import {IAggregateVerifier} from "./IAggregateVerifier.sol";
 
 interface IPsyAddressesProviderView {
     function ACL_MANAGER_ID() external view returns (bytes32);
@@ -112,11 +111,11 @@ contract Bridge is Initializable, OwnableUpgradeable {
     mapping(address => TokenFlowConfig) private _tokenFlowConfigs;
     bytes private _aggregateConfig;
     bytes32 public configHash;
-    address public aggregateVerifier;
+    address private _reservedAggregateVerifier;
     address public aggregateStateManager;
     uint8 public l1ChainIndex;
 
-    event DepositAggregateApplied(bytes32 indexed statementA, uint32 endCount, bytes32 endRoot);
+    event DepositAggregateApplied(bytes32 indexed depositOpeningDigest, uint32 endCount, bytes32 endRoot);
     error OnlyStateManager();
 
     event DepositRecorded(
@@ -209,25 +208,24 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
     function initialize(
         address owner_, address addressesProvider_, bytes calldata networkConfig,
-        uint8 chainIndex, address verifier
+        uint8 chainIndex
     ) external initializer {
         __Ownable_init(owner_);
         if (addressesProvider_ == address(0)) revert ZeroAddress();
         addressesProvider = addressesProvider_;
-        _initializeAggregation(networkConfig, chainIndex, verifier);
+        _initializeAggregation(networkConfig, chainIndex);
         depositRoot = EMPTY_DEPOSIT_ROOT;
     }
 
 
-    function _initializeAggregation(bytes calldata networkConfig, uint8 chainIndex, address verifier) internal {
-        if (configHash != bytes32(0) || verifier.code.length == 0) revert InvalidPublicInputs();
+    function _initializeAggregation(bytes calldata networkConfig, uint8 chainIndex) internal {
+        if (configHash != bytes32(0)) revert InvalidPublicInputs();
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(networkConfig);
         IPsyAddressesProviderView provider = IPsyAddressesProviderView(addressesProvider);
         address manager = provider.getAddress(provider.STATE_MANAGER_ID());
         BridgeOpening.localChain(config, chainIndex, address(this), manager);
         _aggregateConfig = networkConfig;
         configHash = config.configHash;
-        aggregateVerifier = verifier;
         aggregateStateManager = manager;
         l1ChainIndex = chainIndex;
     }
@@ -567,12 +565,11 @@ contract Bridge is Initializable, OwnableUpgradeable {
         return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
     }
 
-    function applyDepositAggregate(uint256[8] calldata proof, bytes calldata completeOpening) external {
-        if (configHash == bytes32(0) || aggregateVerifier.code.length == 0) revert VerifierNotSet();
+    function applyDepositAggregate(bytes calldata completeOpening) external {
+        if (configHash == bytes32(0) || msg.sender != aggregateStateManager) revert OnlyStateManager();
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(_aggregateConfig);
         BridgeOpening.localChain(config, l1ChainIndex, address(this), aggregateStateManager);
-        BridgeOpening.AOpening memory a = BridgeOpening.readA(completeOpening, config);
-        IAggregateVerifier(aggregateVerifier).verifyProof(proof, BridgeOpening.proofInputs(a.statementA));
+        BridgeOpening.DepositAggregateOpening memory a = BridgeOpening.readDepositAggregate(completeOpening, config);
         BridgeOpening.DepositTransition memory transition = a.deposits[BridgeOpening.chainOrdinal(config, l1ChainIndex)];
         if (transition.newCount > pendingDepositCount) revert InvalidBatchRange();
         for (uint256 i; i < a.depositLeaves.length; ++i) {
@@ -582,13 +579,13 @@ contract Bridge is Initializable, OwnableUpgradeable {
             if (custodyHash != depositLeafHashes[leaf.absoluteIndex]) revert DepositBatchCommitMismatch();
         }
         if (depositRoot == transition.newRoot && provedDepositCount == transition.newCount) {
-            emit DepositAggregateApplied(a.statementA, transition.newCount, transition.newRoot);
+            emit DepositAggregateApplied(a.depositOpeningDigest, transition.newCount, transition.newRoot);
             return;
         }
         if (depositRoot != transition.oldRoot || provedDepositCount != transition.oldCount) revert DepositRootMismatch();
         depositRoot = transition.newRoot;
         provedDepositCount = transition.newCount;
-        emit DepositAggregateApplied(a.statementA, transition.newCount, transition.newRoot);
+        emit DepositAggregateApplied(a.depositOpeningDigest, transition.newCount, transition.newRoot);
     }
 
     function registerAggregateWithdrawals(BridgeOpening.WithdrawalLeaf[] calldata withdrawals) external {
