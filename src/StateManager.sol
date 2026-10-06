@@ -61,6 +61,8 @@ contract StateManager is OwnableUpgradeable {
     }
 
     event SettlementAggregateApplied(bytes32 indexed openingDigest, bytes32 indexed windowId, uint64 indexed endCheckpointId, bytes32 endCheckpointRoot, bytes32 batchRoot);
+    event WithdrawalAggregateApplied(bytes32 indexed openingDigest, uint64 endCheckpointId, bytes32 endCheckpointRoot);
+    event RewardAggregateApplied(bytes32 indexed openingDigest, uint64 endCheckpointId, bytes32 endCheckpointRoot);
     error UnauthorizedInitializer();
     error AggregateReentrancy();
 
@@ -223,7 +225,11 @@ contract StateManager is OwnableUpgradeable {
         bool advance = a.endCheckpointId > lastFinalizedCheckpointId;
         if (!advance && a.endCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
         for (uint256 i; i < config.chains.length; ++i) {
-            if (settlement.finalizations[i].startCheckpointRoot != a.starts[i].startCheckpointRoot) revert InvalidCheckpointContinuity();
+            if (advance) {
+                if (settlement.finalizations[i].startCheckpointRoot != a.starts[i].startCheckpointRoot) revert InvalidCheckpointContinuity();
+            } else if (settlement.finalizations[i].checkpointCount == 0) {
+                revert InvalidCheckpointContinuity();
+            }
             if (settlement.endpoints[i].depositRoot != a.deposits[i].newRoot || settlement.endpoints[i].depositCount != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
         }
         if (advance && uint256(settlement.finalizations[ordinal].checkpointCount) != uint256(a.endCheckpointId) - lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
@@ -248,6 +254,8 @@ contract StateManager is OwnableUpgradeable {
         if (depositCount != a.deposits[ordinal].newCount) depositCount = a.deposits[ordinal].newCount;
         appliedWindowByEndCheckpointId[a.endCheckpointId] = AppliedWindow({windowId: settlement.windowId, isApplied: true});
         _applyingAggregate = false;
+        emit WithdrawalAggregateApplied(BridgeOpening.withdrawalFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
+        if (l1ChainIndex == config.ethereumIndex) emit RewardAggregateApplied(BridgeOpening.rewardFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
         emit SettlementAggregateApplied(settlement.openingDigest, settlement.windowId, a.endCheckpointId, a.endCheckpointRoot, settlement.batchRoot);
     }
 

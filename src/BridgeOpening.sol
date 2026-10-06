@@ -13,6 +13,7 @@ library BridgeOpening {
     bytes32 internal constant EMPTY = keccak256("PsyBridge/TwoArtifact/1/Empty");
     bytes32 internal constant NODE = keccak256("PsyBridge/TwoArtifact/1/Node");
     bytes32 internal constant AGGREGATE_HEADER = keccak256("PsyBridge/TwoArtifact/1/AggregateHeader");
+    bytes32 internal constant SOURCE_CHECKPOINT_REWARD_OPENING = keccak256("PsyBridge/SourceCheckpointReward/1/Opening");
     bytes32 internal constant RECORD = keccak256("PsyBridge/TwoArtifact/1/Record");
     bytes32 internal constant SOURCE_CHECKPOINT_REWARD_LEAF = keccak256("PsyBridge/SourceCheckpointReward/1/Leaf");
     uint256 internal constant CLAIM_TREE_MAX_CAPACITY = 131072;
@@ -441,7 +442,7 @@ library BridgeOpening {
         uint32 segments = total == 0 ? 0 : uint32((uint256(total) + capacity - 1) / capacity);
         if (header.segmentCount != segments) revert InvalidCount();
         if (total == 0) {
-            if (header.segmentIndex != 0 || header.firstOrdinal != 0 || header.count != 0 || header.openingDigest != bytes32(0) || header.claimTreeRoot != bytes32(0)) revert InvalidCount();
+            if (header.segmentIndex != 0 || header.firstOrdinal != 0 || header.count != 0 || header.openingDigest != emptyOpeningDigest(header) || header.claimTreeRoot != emptyClaimTreeRoot(capacity)) revert InvalidCount();
         } else {
             if (header.segmentIndex >= segments) revert InvalidCount();
             uint256 first = uint256(header.segmentIndex) * capacity;
@@ -668,9 +669,28 @@ library BridgeOpening {
         }
     }
 
+    function withdrawalFamilyDigest(SettlementOpening memory opening) internal pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), bytes32(opening.endpoints.length));
+        for (uint256 i; i < opening.endpoints.length; ++i) body = bytes.concat(body, _hash4Words(opening.endpoints[i].withdrawalRoot));
+        body = bytes.concat(body, bytes32(opening.withdrawals.length));
+        for (uint256 i; i < opening.withdrawals.length; ++i) {
+            WithdrawalLeaf memory leaf = opening.withdrawals[i];
+            body = bytes.concat(body, bytes32(uint256(leaf.chainIndex)), bytes32(uint256(leaf.senderUserId)), bytes32(uint256(uint160(leaf.recipient))), bytes32(uint256(uint160(leaf.token))), bytes32(leaf.amount), leaf.nonce);
+        }
+        return keccak256(bytes.concat(WITHDRAWAL, body));
+    }
+
+    function rewardFamilyDigest(SettlementOpening memory opening) internal pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), bytes32(opening.rewards.length));
+        for (uint256 i; i < opening.rewards.length; ++i) {
+            SourceCheckpointRewardLeaf memory leaf = opening.rewards[i];
+            body = bytes.concat(body, leaf.economicDomain, bytes32(uint256(leaf.sourceCheckpointId)), bytes32(uint256(leaf.userId)), bytes32(leaf.amount), bytes32(uint256(uint160(leaf.recipient))), bytes32(leaf.initialized ? uint256(1) : uint256(0)));
+        }
+        return keccak256(bytes.concat(SOURCE_CHECKPOINT_REWARD_OPENING, body));
+    }
+
     function withdrawalPublicationHeader(SettlementOpening memory opening) internal pure returns (bytes memory header) {
         uint256 count = opening.withdrawals.length;
-        bytes32 claimRoot = count == 0 ? bytes32(0) : withdrawalClaimRoot(opening.withdrawals);
         bytes memory roots;
         for (uint256 i; i < opening.endpoints.length; ++i) roots = bytes.concat(roots, opening.endpoints[i].withdrawalRoot);
         header = bytes.concat(
@@ -679,10 +699,31 @@ library BridgeOpening {
             opening.windowId,
             abi.encodePacked(opening.endCheckpointId, opening.endCheckpointRoot, uint32(1024), uint32(count), uint32(count == 0 ? 0 : 1), uint32(0), uint32(0), uint32(count)),
             roots,
-            count == 0 ? bytes32(0) : opening.openingDigest,
-            claimRoot
+            withdrawalFamilyDigest(opening),
+            withdrawalClaimRoot(opening.withdrawals)
         );
         readInclusionAggregateHeader(header);
+    }
+
+    function emptyOpeningDigest(InclusionAggregateHeader memory header) private pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(header.configHash, header.windowId, bytes32(uint256(header.endCheckpointId)), _hash4Words(header.endCheckpointRoot));
+        if (header.family == WITHDRAWAL_PUBLICATION_FAMILY) {
+            body = bytes.concat(body, bytes32(header.withdrawalRoots.length));
+            for (uint256 i; i < header.withdrawalRoots.length; ++i) body = bytes.concat(body, _hash4Words(header.withdrawalRoots[i]));
+            return keccak256(bytes.concat(WITHDRAWAL, body, bytes32(uint256(0))));
+        }
+        return keccak256(bytes.concat(SOURCE_CHECKPOINT_REWARD_OPENING, body, bytes32(uint256(0))));
+    }
+
+    function emptyClaimTreeRoot(uint32 capacity) private pure returns (bytes32) {
+        uint256 width = capacity;
+        bytes32[] memory layer = new bytes32[](width);
+        for (uint256 ordinal; ordinal < width; ++ordinal) layer[ordinal] = keccak256(abi.encodePacked(EMPTY, bytes32(uint256(12)), bytes32(uint256(0)), bytes32(ordinal)));
+        for (uint256 level = 1; width > 1; ++level) {
+            width /= 2;
+            for (uint256 i; i < width; ++i) layer[i] = keccak256(abi.encodePacked(NODE, bytes32(uint256(12)), bytes32(level), layer[2 * i], layer[2 * i + 1]));
+        }
+        return layer[0];
     }
 
     function withdrawalClaimRoot(WithdrawalLeaf[] memory leaves) internal pure returns (bytes32) {

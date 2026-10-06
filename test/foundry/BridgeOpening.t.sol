@@ -226,17 +226,39 @@ contract BridgeOpeningTest is Test {
     function canonicalRewardHeader(uint32 capacity, uint32 total, uint32 index) private pure returns (bytes memory) {
         bytes memory same = hash4(1, 2, 3, 4);
         bytes memory next = total == 0 ? same : hash4(8, 7, 6, 5);
-        bytes32 opening = total == 0 ? bytes32(0) : bytes32(uint256(6));
-        return rewardHeaderBytes(capacity, total, index, opening, bytes32(0), same, next);
+        bytes32 opening = total == 0 ? emptyRewardOpening() : bytes32(uint256(6));
+        bytes32 root = total == 0 ? emptyClaimRoot(capacity) : bytes32(0);
+        return rewardHeaderBytes(capacity, total, index, opening, root, same, next);
     }
     function withdrawalHeaderBytes(uint32 capacity, uint32 total, bytes memory roots) private pure returns (bytes memory) {
         uint32 count = segmentCountOf(total, capacity, 0);
-        bytes32 opening = total == 0 ? bytes32(0) : bytes32(uint256(6));
+        bytes32 opening = total == 0 ? emptyWithdrawalOpening(roots) : bytes32(uint256(6));
+        bytes32 root = total == 0 ? emptyClaimRoot(capacity) : bytes32(0);
         return bytes.concat(
             bytes1(uint8(2)), bytes32(uint256(4)), bytes32(uint256(5)), be64(1200), hash4(5, 6, 7, 8),
             be32(capacity), be32(total), be32(segmentCount(total, capacity)), be32(0), be32(0), be32(count),
-            roots, opening, bytes32(0)
+            roots, opening, root
         );
+    }
+    function emptyRewardOpening() private pure returns (bytes32) {
+        return keccak256(abi.encodePacked(keccak256("PsyBridge/SourceCheckpointReward/1/Opening"), bytes32(uint256(4)), bytes32(uint256(5)), word(1200), hash4Words(hash4(5, 6, 7, 8)), word(0)));
+    }
+    function emptyWithdrawalOpening(bytes memory roots) private pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(bytes32(uint256(4)), bytes32(uint256(5)), word(1200), hash4Words(hash4(5, 6, 7, 8)), word(roots.length / 32));
+        for (uint256 i; i < roots.length; i += 32) {
+            bytes memory one = new bytes(32);
+            for (uint256 j; j < 32; ++j) one[j] = roots[i + j];
+            body = bytes.concat(body, hash4Words(one));
+        }
+        return keccak256(abi.encodePacked(domain("WithdrawalBatch"), body, word(0)));
+    }
+    function emptyClaimRoot(uint256 capacity) private pure returns (bytes32) {
+        return buildClaimTree(new bytes32[](0), capacity)[0];
+    }
+    function hash4Words(bytes memory packed) private pure returns (bytes memory) {
+        bytes32 root;
+        assembly ("memory-safe") { root := mload(add(packed, 32)) }
+        return abi.encode(uint64(uint256(root) >> 192), uint64(uint256(root) >> 128), uint64(uint256(root) >> 64), uint64(uint256(root)));
     }
     function repeatedRoot(uint256 chains) private pure returns (bytes memory roots) {
         bytes memory one = hash4(1, 2, 3, 4);
@@ -350,8 +372,8 @@ contract BridgeOpeningTest is Test {
         assertEq(harness.readInclusionAggregateHeader(one).withdrawalRoots.length, 1);
         assertEq(harness.readInclusionAggregateHeader(full).withdrawalRoots.length, 256);
         assertEq(harness.readInclusionAggregateHeader(one).oldLedgerStateRoot, bytes32(0));
-        assertEq(harness.readInclusionAggregateHeader(full).openingDigest, bytes32(0));
-        assertEq(harness.readInclusionAggregateHeader(full).claimTreeRoot, bytes32(0));
+        assertEq(harness.readInclusionAggregateHeader(full).openingDigest, emptyWithdrawalOpening(repeatedRoot(256)));
+        assertEq(harness.readInclusionAggregateHeader(full).claimTreeRoot, emptyClaimRoot(1024));
     }
     function testWithdrawalHeaderRejectsMissingAndNonmultipleRootWidth() public {
         bytes memory one = withdrawalHeaderBytes(1024, 0, repeatedRoot(1));
@@ -372,15 +394,13 @@ contract BridgeOpeningTest is Test {
         BridgeOpening.InclusionAggregateHeader memory header = harness.readInclusionAggregateHeader(body);
         assertEq(header.count, 0);
         assertEq(header.segmentCount, 0);
-        assertEq(header.openingDigest, bytes32(0));
-        assertEq(header.claimTreeRoot, bytes32(0));
+        assertEq(header.openingDigest, emptyRewardOpening());
+        assertEq(header.claimTreeRoot, emptyClaimRoot(1024));
         assertEq(header.oldLedgerStateRoot, header.newLedgerStateRoot);
-        assertEq(uint8(body[body.length - 1]), 0);
-        assertEq(uint8(body[body.length - 64]), 0);
     }
     function testEmptyRewardRejectsDistinctLedgerStateRoots() public {
         vm.expectRevert(BridgeOpening.InvalidCursor.selector);
-        harness.readInclusionAggregateHeader(rewardHeaderBytes(1024, 0, 0, bytes32(0), bytes32(0), hash4(1, 2, 3, 4), hash4(8, 7, 6, 5)));
+        harness.readInclusionAggregateHeader(rewardHeaderBytes(1024, 0, 0, emptyRewardOpening(), emptyClaimRoot(1024), hash4(1, 2, 3, 4), hash4(8, 7, 6, 5)));
     }
     function testHeaderRejectsUnregisteredCapacityAndSegmentFields() public {
         vm.expectRevert(BridgeOpening.InvalidCount.selector);
