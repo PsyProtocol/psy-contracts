@@ -62,8 +62,6 @@ describe("Deployed Permission Configuration", function () {
     const window = await buildBridgeWindow(sm, bridge);
     window[0] = ZERO_PROOF;
     window[2] = ZERO_PROOF;
-    window[4] = ZERO_PROOF;
-    window[6] = ZERO_PROOF;
     await expect(sm.connect(outsider).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "OnlyProposer");
     await expect(sm.connect(proposer).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
   });

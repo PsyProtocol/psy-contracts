@@ -588,16 +588,40 @@ contract Bridge is Initializable, OwnableUpgradeable {
         emit DepositAggregateApplied(a.depositOpeningDigest, transition.newCount, transition.newRoot);
     }
 
-    function registerAggregateWithdrawals(BridgeOpening.WithdrawalLeaf[] calldata withdrawals) external {
+    mapping(bytes32 => bytes) private publishedClaimHeader;
+    bool private withdrawalClaimEntered;
+
+    event InclusionAggregateRootPublished(bytes32 indexed headerDigest, uint8 indexed family, bytes32 indexed windowId, uint32 segmentIndex, bytes32 claimTreeRoot, uint32 count, uint64 endCheckpointId);
+
+    function publishClaimHeader(bytes calldata headerBytes) external {
         if (configHash == bytes32(0) || msg.sender != aggregateStateManager) revert OnlyStateManager();
-        for (uint256 i; i < withdrawals.length; ++i) {
-            BridgeOpening.WithdrawalLeaf calldata leaf = withdrawals[i];
-            if (leaf.chainIndex != l1ChainIndex) continue;
-            if (leaf.recipient == address(0)) revert ZeroAddress();
-            if (claimedNullifiers[leaf.nonce]) revert NullifierAlreadyClaimed();
-            _registerPendingWithdrawal(leaf.nonce, leaf.token, leaf.recipient, leaf.amount);
-            claimedNullifiers[leaf.nonce] = true;
+        bytes32 digest = BridgeOpening.inclusionHeaderDigest(headerBytes);
+        bytes memory stored = publishedClaimHeader[digest];
+        if (stored.length != 0) {
+            if (keccak256(stored) != keccak256(headerBytes)) revert InvalidWithdrawalProof();
+            return;
         }
+        BridgeOpening.InclusionAggregateHeader memory header = BridgeOpening.readInclusionAggregateHeader(headerBytes);
+        if (header.configHash != configHash || header.family != BridgeOpening.WITHDRAWAL_PUBLICATION_FAMILY) revert InvalidWithdrawalProof();
+        publishedClaimHeader[digest] = headerBytes;
+        emit InclusionAggregateRootPublished(digest, header.family, header.windowId, header.segmentIndex, header.claimTreeRoot, header.count, header.endCheckpointId);
+    }
+
+    function claimAggregateWithdrawal(bytes32 headerDigest, uint32 ordinal, bytes calldata leafBytes, bytes32[] calldata siblings) external {
+        if (withdrawalClaimEntered) revert InvalidWithdrawalProof();
+        bytes memory headerBytes = publishedClaimHeader[headerDigest];
+        if (headerBytes.length == 0) revert InvalidWithdrawalProof();
+        BridgeOpening.InclusionAggregateHeader memory header = BridgeOpening.readInclusionAggregateHeader(headerBytes);
+        if (ordinal < header.firstOrdinal) revert InvalidWithdrawalProof();
+        uint32 localOrdinal = ordinal - header.firstOrdinal;
+        BridgeOpening.WithdrawalLeaf memory leaf = BridgeOpening.readWithdrawalLeaf(leafBytes);
+        if (leaf.chainIndex != l1ChainIndex) revert WrongDestinationChain();
+        BridgeOpening.verifyClaimPath(header, localOrdinal, BridgeOpening.withdrawalLeafCommit(leafBytes), siblings);
+        if (claimedNullifiers[leaf.nonce]) revert NullifierAlreadyClaimed();
+        withdrawalClaimEntered = true;
+        _registerPendingWithdrawal(leaf.nonce, leaf.token, leaf.recipient, leaf.amount);
+        claimedNullifiers[leaf.nonce] = true;
+        withdrawalClaimEntered = false;
     }
 
     function claimPendingWithdrawal(bytes32 nonce) external {

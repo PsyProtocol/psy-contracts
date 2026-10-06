@@ -88,14 +88,6 @@ contract BridgeAggregateAdmissionTest is Test {
         bytes32 windowId = keccak256(bytes.concat(domain("Window"), hash, end, starts, deposits));
         return bytes.concat(abi.encode(hash, windowId), end, starts, deposits, abi.encode(uint256(0)));
     }
-    function aggregate(bytes memory a, bytes memory records) private pure returns (bytes memory) {
-        bytes memory header = new bytes(224);
-        for (uint256 i; i < 224; ++i) header[i] = a[i];
-        return bytes.concat(header, records);
-    }
-    function withdrawalAggregate(bytes memory a, bytes memory records) private pure returns (bytes memory) {
-        return aggregate(a, bytes.concat(abi.encode(uint256(1)), rootWords(EMPTY_ROOT), records));
-    }
     function finalizeInputs() private pure returns (uint256[] memory pi) {
         pi = new uint256[](35);
         pi[23] = 1; pi[24] = 1; pi[25] = 1;
@@ -108,88 +100,89 @@ contract BridgeAggregateAdmissionTest is Test {
     function withdrawal() private pure returns (bytes memory) {
         return abi.encode(uint256(1), uint256(1), uint256(7), address(15), address(0), uint256(1), bytes32(uint256(4)));
     }
-    function reward() private pure returns (bytes memory) {
-        return abi.encode(uint256(1), uint256(0), uint256(7), uint256(2), uint256(0), uint256(3), address(15));
+    function settlementFrom(bytes memory deposit, bytes memory withdrawalRecords) private view returns (bytes memory) {
+        bytes memory header = new bytes(224);
+        for (uint256 i; i < 224; ++i) header[i] = deposit[i];
+        return bytes.concat(header, abi.encode(uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0)), abi.encode(uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0)), abi.encode(uint256(1)), rootWords(currentRoot), abi.encode(uint256(1)), abi.encode(uint256(1)), rootWords(EMPTY_ROOT), abi.encode(uint256(0)), rootWords(EMPTY_ROOT), withdrawalRecords, rootWords(bytes32(0)), rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0)));
     }
-    function applyWindow(bytes memory withdrawals, bytes memory rewards, bool hasW, bool hasR) private {
-        uint256[8] memory zero;
+    function settlementFromInputs(bytes memory deposit, uint256[] memory pi) private view returns (bytes memory) {
+        bytes memory header = new bytes(224);
+        for (uint256 i; i < 224; ++i) header[i] = deposit[i];
+        return bytes.concat(header, abi.encode(pi[4], pi[5], pi[6], pi[7], pi[8], pi[9], pi[10], pi[11]), abi.encode(pi[12], pi[13], pi[14], pi[15], pi[16], pi[17], pi[18], pi[19]), abi.encode(uint256(1)), rootWords(currentRoot), abi.encode(pi[25]), abi.encode(uint256(1)), abi.encode(pi[26], pi[27], pi[28], pi[29], pi[30]), abi.encode(pi[31], pi[32], pi[33], pi[34]), abi.encode(uint256(0)), rootWords(bytes32(0)), rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0)));
+    }
+    function applyWindow(bytes memory withdrawals, uint256[8] memory settlementProof) private {
         bytes memory a = depositOpening(1, bytes32(uint256(1)));
-        manager.applyBridgeWindow(proof(), finalizeInputs(), proof(), a, hasW ? proof() : zero, withdrawalAggregate(a, withdrawals), hasR ? proof() : zero, aggregate(a, rewards));
+        manager.applyBridgeWindow(proof(), a, settlementProof, settlementFrom(a, withdrawals));
         currentId = 1;
         currentRoot = bytes32(uint256(1));
     }
-    function applyEmpty(uint256[] memory pi, uint256[8] memory finalizeProof) private {
-        uint256[8] memory zero;
-        bytes memory a = depositOpening(uint64(pi[24]), bytes32((pi[20] << 192) | (pi[21] << 128) | (pi[22] << 64) | pi[23]));
-        manager.applyBridgeWindow(finalizeProof, pi, proof(), a, zero, withdrawalAggregate(a, abi.encode(uint256(0))), zero, aggregate(a, abi.encode(uint256(0))));
+    function applyEmpty(uint256[] memory pi, uint256[8] memory settlementProof) private {
+        if (pi.length < 35) {
+            manager.applyBridgeWindow(proof(), depositOpening(1, bytes32(uint256(1))), settlementProof, hex"00");
+            return;
+        }
+        bytes32 endRoot = bytes32((pi[20] << 192) | (pi[21] << 128) | (pi[22] << 64) | pi[23]);
+        bytes memory a = depositOpening(uint64(pi[24]), endRoot);
+        manager.applyBridgeWindow(proof(), a, settlementProof, settlementFromInputs(a, pi));
     }
     function testDepositEffectRequiresManager() public {
         vm.expectRevert(Bridge.OnlyStateManager.selector);
         bridge.applyDepositAggregate(depositOpening(1, bytes32(uint256(1))));
     }
     function testReplayStillVerifiesDepositProof() public {
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
         depositVerifier.setReject(true);
         vm.expectRevert(AdmissionVerifier.RejectedProof.selector);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
         assertEq(manager.lastFinalizedCheckpointId(), 1);
     }
-    function testReplayAcceptsHistoricalStartAndSkipsEmptyFamilyVerifiers() public {
+    function testEmptyPayoutsIgnoreUnusedVerifierSlots() public {
         withdrawalVerifier.setReject(true);
         rewardVerifier.setReject(true);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
+        applyWindow(abi.encode(uint256(0)), proof());
         assertEq(manager.lastVerifiedCheckpointRoot(), bytes32(uint256(1)));
         assertEq(bridge.depositRoot(), EMPTY_ROOT);
     }
     function testReplayCannotOmitFinalizeVerification() public {
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
         finalizeVerifier.setReject(true);
         vm.expectRevert(AdmissionVerifier.RejectedProof.selector);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
     }
     function testWithdrawalVerifierReceivesFlatStatementHalves() public {
-        bytes memory opening = withdrawalAggregate(depositOpening(1, bytes32(uint256(1))), withdrawal());
-        withdrawalVerifier.setExpected(keccak256(abi.encodePacked(domain("WithdrawalBatch"), opening)));
-        applyWindow(withdrawal(), abi.encode(uint256(0)), true, false);
-        assertTrue(bridge.claimedNullifiers(bytes32(uint256(4))));
-    }
-    function testRewardVerifierReceivesFlatStatementBeforePayout() public {
-        bytes memory opening = aggregate(depositOpening(1, bytes32(uint256(1))), reward());
-        rewardVerifier.setExpected(keccak256(abi.encodePacked(domain("RewardBatch"), opening)));
-        vm.expectRevert(RejectAdmissionRewardPayer.RewardFailure.selector);
-        applyWindow(abi.encode(uint256(0)), reward(), false, true);
-    }
-    function testWithdrawalReplayReverts() public {
-        applyWindow(withdrawal(), abi.encode(uint256(0)), true, false);
-        assertTrue(bridge.claimedNullifiers(bytes32(uint256(4))));
-        vm.expectRevert(Bridge.NullifierAlreadyClaimed.selector);
-        applyWindow(withdrawal(), abi.encode(uint256(0)), true, false);
-    }
-    function testRewardFailureRollsBackWithdrawalAndAdvance() public {
-        vm.expectRevert(RejectAdmissionRewardPayer.RewardFailure.selector);
-        applyWindow(withdrawal(), reward(), true, true);
+        bytes memory a = depositOpening(1, bytes32(uint256(1)));
+        bytes memory settlement = settlementFrom(a, withdrawal());
+        BridgeOpening.NetworkConfig memory cfg = BridgeOpening.readConfig(config);
+        finalizeVerifier.setExpected(BridgeOpening.readSettlementOpening(settlement, cfg, BridgeOpening.readDepositAggregate(a, cfg).depositOpeningDigest).openingDigest);
+        applyWindow(withdrawal(), proof());
         assertFalse(bridge.claimedNullifiers(bytes32(uint256(4))));
-        assertEq(manager.lastFinalizedCheckpointId(), 0);
-        assertEq(manager.depositSubtreeRoot(), bytes32(0));
-        (, , uint256 amount,) = bridge.pendingWithdrawals(bytes32(uint256(4)));
-        assertEq(amount, 0);
+    }
+    function testPublicationDoesNotPayRewards() public {
+        applyWindow(withdrawal(), proof());
+        assertFalse(bridge.claimedNullifiers(bytes32(uint256(4))));
+        assertEq(manager.lastFinalizedCheckpointId(), 1);
+    }
+    function testWithdrawalReplayDoesNotConsumeNonce() public {
+        applyWindow(withdrawal(), proof());
+        applyWindow(withdrawal(), proof());
+        assertFalse(bridge.claimedNullifiers(bytes32(uint256(4))));
     }
     function testLaterProofFailureHasNoEffects() public {
-        rewardVerifier.setReject(true);
+        finalizeVerifier.setReject(true);
         vm.expectRevert(AdmissionVerifier.RejectedProof.selector);
-        applyWindow(withdrawal(), reward(), true, true);
+        applyWindow(withdrawal(), proof());
         assertFalse(bridge.claimedNullifiers(bytes32(uint256(4))));
     }
     function testFinalizeHashesLegacy144BytesAndEndpoint72Bytes() public {
         uint256[] memory pi = finalizeInputs();
         for (uint256 i = 4; i < 20; ++i) pi[i] = i + 1;
         pi[20] = 1; pi[21] = 2; pi[22] = 3; pi[23] = 4;
-        bytes memory encoded = abi.encodePacked(uint64(0), uint64(0), uint64(0), uint64(0));
-        for (uint256 i = 4; i < 20; i += 2) encoded = bytes.concat(encoded, abi.encodePacked(uint32(pi[i + 1]), uint32(pi[i])));
-        encoded = bytes.concat(encoded, abi.encodePacked(uint64(1), uint64(2), uint64(3), uint64(4), uint64(1), uint64(1)));
-        for (uint256 i = 26; i < 35; ++i) encoded = bytes.concat(encoded, abi.encodePacked(uint64(pi[i])));
-        finalizeVerifier.setExpected(keccak256(encoded));
+        bytes32 endRoot = bytes32((pi[20] << 192) | (pi[21] << 128) | (pi[22] << 64) | pi[23]);
+        bytes memory a = depositOpening(uint64(pi[24]), endRoot);
+        bytes memory settlement = settlementFromInputs(a, pi);
+        BridgeOpening.NetworkConfig memory cfg = BridgeOpening.readConfig(config);
+        finalizeVerifier.setExpected(BridgeOpening.readSettlementOpening(settlement, cfg, BridgeOpening.readDepositAggregate(a, cfg).depositOpeningDigest).openingDigest);
         applyEmpty(pi, proof());
         assertEq(manager.lastFinalizedCheckpointId(), 1);
         assertEq(manager.depositSubtreeRoot(), EMPTY_ROOT);
@@ -198,7 +191,7 @@ contract BridgeAggregateAdmissionTest is Test {
     function testBootstrapIdentityFailsClosed() public {
         uint256[] memory pi = new uint256[](35);
         uint256[8] memory zero;
-        vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
+        vm.expectRevert(BridgeOpening.InvalidCount.selector);
         applyEmpty(pi, zero);
     }
     function testPositiveFinalizeRejectsZeroProof() public {
@@ -206,26 +199,22 @@ contract BridgeAggregateAdmissionTest is Test {
         vm.expectRevert(StateManager.InvalidProof.selector);
         applyEmpty(finalizeInputs(), zero);
     }
-    function testRejectsNonzeroEmptyFamilyProof() public {
-        vm.expectRevert(StateManager.InvalidProof.selector);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), true, false);
-    }
     function testRejectsOmittedNonemptyProof() public {
+        uint256[8] memory zero;
         vm.expectRevert(StateManager.InvalidProof.selector);
-        applyWindow(withdrawal(), abi.encode(uint256(0)), false, false);
+        applyWindow(withdrawal(), zero);
     }
     function testRejectsMismatchedWindow() public {
         bytes memory a = depositOpening(1, bytes32(uint256(1)));
-        bytes memory w = withdrawalAggregate(a, abi.encode(uint256(0)));
-        assembly ("memory-safe") { mstore(add(w, 64), 99) }
-        uint256[8] memory zero;
+        bytes memory settlement = settlementFrom(a, abi.encode(uint256(0)));
+        assembly ("memory-safe") { mstore(add(settlement, 64), 99) }
         vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
-        manager.applyBridgeWindow(proof(), finalizeInputs(), proof(), a, zero, w, zero, aggregate(a, abi.encode(uint256(0))));
+        manager.applyBridgeWindow(proof(), a, proof(), settlement);
     }
     function testProviderProposerAclStillRequired() public {
         vm.prank(address(99));
         vm.expectRevert(StateManager.OnlyProposer.selector);
-        applyWindow(abi.encode(uint256(0)), abi.encode(uint256(0)), false, false);
+        applyWindow(abi.encode(uint256(0)), proof());
     }
     function testFinalizeFailureLeavesCursorUnchanged() public {
         finalizeVerifier.setReject(true);
@@ -242,13 +231,13 @@ contract BridgeAggregateAdmissionTest is Test {
     function testRejectsFinalizeSlotOverflow() public {
         uint256[] memory pi = finalizeInputs();
         pi[4] = uint256(1) << 32;
-        vm.expectRevert(StateManager.InvalidProof.selector);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         applyEmpty(pi, proof());
     }
     function testRejectsWrongFinalizeLength() public {
         uint256[] memory pi = new uint256[](26);
         pi[23] = 1; pi[24] = 1; pi[25] = 1;
-        vm.expectRevert(StateManager.InvalidProof.selector);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         applyEmpty(pi, proof());
     }
     function testRejectsDepositEndpointRootSubstitution() public {
@@ -265,14 +254,19 @@ contract BridgeAggregateAdmissionTest is Test {
     }
     function testEmptyWithdrawalStillBindsEndpointRoot() public {
         uint256[] memory pi = finalizeInputs();
+        bytes32 endRoot = bytes32((pi[20] << 192) | (pi[21] << 128) | (pi[22] << 64) | pi[23]);
+        bytes memory a = depositOpening(uint64(pi[24]), endRoot);
+        bytes memory settlement = settlementFromInputs(a, pi);
+        BridgeOpening.NetworkConfig memory cfg = BridgeOpening.readConfig(config);
+        finalizeVerifier.setExpected(BridgeOpening.readSettlementOpening(settlement, cfg, BridgeOpening.readDepositAggregate(a, cfg).depositOpeningDigest).openingDigest);
         pi[31] = 1;
-        vm.expectRevert(StateManager.InvalidWithdrawalMerkleProof.selector);
+        vm.expectRevert(AdmissionVerifier.RejectedProof.selector);
         applyEmpty(pi, proof());
     }
     function testRejectsNoncanonicalEndpointRoot() public {
         uint256[] memory pi = finalizeInputs();
         pi[31] = 18446744069414584321;
-        vm.expectRevert(StateManager.InvalidProof.selector);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         applyEmpty(pi, proof());
     }
     function testInitializationRejectsWrongVerifierChainList() public {
@@ -334,19 +328,23 @@ contract SparseEndpointAdmissionTest is Test {
         bytes32 windowId = keccak256(bytes.concat(keccak256("PsyBridge/TwoArtifact/1/Window"), hash, end, starts, deposits));
         bytes memory context = bytes.concat(abi.encode(hash, windowId), end);
         bytes memory deposit = bytes.concat(context, starts, deposits, abi.encode(uint256(0)));
-        bytes memory withdrawal = bytes.concat(context, abi.encode(uint256(2)), rootWords(EMPTY_ROOT), rootWords(bytes32(uint256(mutation == 3 ? 7 : 6))), abi.encode(uint256(0)));
-        uint256[] memory pi = new uint256[](44);
-        pi[23] = 1; pi[24] = 1; pi[25] = 1;
-        for (uint256 i; i < 4; ++i) {
-            pi[26 + i] = uint64(uint256(EMPTY_ROOT) >> (192 - i * 64));
-            pi[31 + i] = pi[26 + i];
-        }
-        pi[38] = 5;
-        pi[43] = 6;
+        bytes32 settlementForeignRoot = bytes32(uint256(5));
+        bytes memory settlement = bytes.concat(
+            context,
+            abi.encode(uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0)),
+            abi.encode(uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0), uint256(0)),
+            abi.encode(uint256(2)),
+            rootWords(bytes32(start)), abi.encode(uint256(1)),
+            rootWords(bytes32(start)), abi.encode(uint256(1)),
+            abi.encode(uint256(2)),
+            rootWords(EMPTY_ROOT), abi.encode(uint256(0)), rootWords(EMPTY_ROOT),
+            rootWords(settlementForeignRoot), abi.encode(uint256(0)), rootWords(bytes32(uint256(mutation == 3 ? 7 : 6))),
+            abi.encode(uint256(0)),
+            rootWords(bytes32(0)), rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0))
+        );
         uint256[8] memory proof;
         proof[0] = 1;
-        uint256[8] memory zero;
-        manager.applyBridgeWindow(proof, pi, proof, deposit, zero, withdrawal, zero, bytes.concat(context, abi.encode(uint256(0))));
+        manager.applyBridgeWindow(proof, deposit, proof, settlement);
     }
     function rejectNonlocalMutation(bool replay, uint256 mutation, bytes4 errorSelector) private {
         if (replay) applySparse(false, 0);
@@ -369,9 +367,15 @@ contract SparseEndpointAdmissionTest is Test {
         rejectNonlocalMutation(true, 2, StateManager.InvalidDepositMerkleProof.selector);
     }
     function testSparseNonlocalWithdrawalRootAdvance() public {
-        rejectNonlocalMutation(false, 3, StateManager.InvalidWithdrawalMerkleProof.selector);
+        applySparse(false, 3);
+        assertEq(manager.lastFinalizedCheckpointId(), 1);
+        assertEq(bridge.depositRoot(), EMPTY_ROOT);
     }
     function testSparseNonlocalWithdrawalRootReplay() public {
-        rejectNonlocalMutation(true, 3, StateManager.InvalidWithdrawalMerkleProof.selector);
+        applySparse(false, 0);
+        vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
+        applySparse(true, 3);
+        assertEq(manager.lastFinalizedCheckpointId(), 1);
+        assertEq(bridge.depositRoot(), EMPTY_ROOT);
     }
 }

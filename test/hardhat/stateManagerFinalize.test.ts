@@ -28,35 +28,43 @@ describe("StateManager.applyBridgeWindow orchestration (mock verifier only)", fu
     await batchVerifier.setShouldVerify(false);
     await expect(sm.applyBridgeWindow(...window)).to.be.revertedWith("invalid proof");
     await batchVerifier.setShouldVerify(true);
-    await expect(sm.applyBridgeWindow(...window)).to.not.emit(sm, "Finalized");
+    await expect(sm.applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidCheckpointContinuity");
     expect(await sm.lastFinalizedCheckpointId()).to.equal(1);
-    window[2] = ZERO_PROOF;
+    window[0] = ZERO_PROOF;
     await expect(sm.applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
   });
 
-  it("rejects bootstrap replay and omitted finalize evidence", async function () {
+  it("accepts bootstrap identity and rejects an omitted settlement proof", async function () {
     const [owner] = await ethers.getSigners();
     const { stateManager: sm, bridge } = await deployCoreSystem(owner.address);
     const bootstrap = await buildBridgeWindow(sm, bridge, [], 0n);
-    await expect(sm.applyBridgeWindow(...bootstrap)).to.be.reverted;
+    await expect(sm.applyBridgeWindow(...bootstrap)).to.not.emit(sm, "Finalized");
+    expect(await sm.lastFinalizedCheckpointId()).to.equal(0);
     const window = await buildBridgeWindow(sm, bridge);
-    window[0] = ZERO_PROOF;
+    window[2] = ZERO_PROOF;
     await expect(sm.applyBridgeWindow(...window)).to.be.reverted;
     expect(await sm.lastFinalizedCheckpointId()).to.equal(0);
   });
 
-  it("rejects endpoint substitution and incomplete finalize inputs before effects", async function () {
+  it("rejects endpoint substitution and a truncated settlement opening before effects", async function () {
     const [owner] = await ethers.getSigners();
     const { stateManager: sm, bridge } = await deployCoreSystem(owner.address);
-    for (const index of [26, 30, 31]) {
+    for (const index of [30, 34]) {
       const window = await buildBridgeWindow(sm, bridge);
-      window[1][index] ^= 1n;
+      const bytes = ethers.utils.arrayify(window[3]);
+      bytes[index * 32 + 31] ^= 1;
+      window[3] = ethers.utils.hexlify(bytes);
       await expect(sm.applyBridgeWindow(...window)).to.be.reverted;
       expect(await sm.lastFinalizedCheckpointId()).to.equal(0);
       expect(await bridge.provedDepositCount()).to.equal(0);
     }
+    const noncanonical = await buildBridgeWindow(sm, bridge);
+    const limb = ethers.utils.arrayify(noncanonical[3]);
+    limb[35 * 32] = 0xff;
+    noncanonical[3] = ethers.utils.hexlify(limb);
+    await expect(sm.applyBridgeWindow(...noncanonical)).to.be.reverted;
     const window = await buildBridgeWindow(sm, bridge);
-    window[1].pop();
+    window[3] = ethers.utils.hexDataSlice(window[3], 0, ethers.utils.arrayify(window[3]).length - 32);
     await expect(sm.applyBridgeWindow(...window)).to.be.reverted;
     expect(await sm.lastFinalizedCheckpointId()).to.equal(0);
   });

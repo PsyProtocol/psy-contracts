@@ -183,6 +183,7 @@ contract BridgeTest is AtomicBridgeFixture {
         Window memory w = _withdrawalWindow(recipient, token, amount, nonce);
         vm.prank(owner);
         _apply(w);
+        _claimWindow(w, 0);
     }
     function testClaimWithdrawalWithProof() public {
         (Bridge bridge,) = _setupBridgeSystem();
@@ -201,8 +202,8 @@ contract BridgeTest is AtomicBridgeFixture {
     function testClaimWithdrawalRejectsRecipientHighBits() public {
         (Bridge bridge,) = _setupBridgeSystem();
         Window memory w = _withdrawalWindow(user, address(0x1234), 1, bytes32(uint256(1)));
-        bytes memory opening = w.withdrawals;
-        assembly ("memory-safe") { mstore(add(opening, 512), shl(160, 1)) }
+        bytes memory opening = w.settlement;
+        assembly ("memory-safe") { mstore(add(opening, 1376), shl(160, 1)) }
         vm.prank(owner);
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         _apply(w);
@@ -270,16 +271,16 @@ contract BridgeTest is AtomicBridgeFixture {
         bridge.claimPendingWithdrawal(nonce);
     }
 
-    function testEmptyWithdrawalFamilyRequiresZeroProof() public {
+    function testEmptySettlementStillRequiresProof() public {
         (Bridge bridge,) = _setupBridgeSystem();
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        w.withdrawalProof[0] = 1;
+        w.settlementProof[0] = 0;
         vm.prank(owner);
         vm.expectRevert(StateManager.InvalidProof.selector);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 0);
         assertEq(bridge.provedDepositCount(), 0);
-        w.withdrawalProof[0] = 0;
+        w.settlementProof[0] = 1;
         vm.prank(owner);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 1);
@@ -293,8 +294,9 @@ contract BridgeTest is AtomicBridgeFixture {
         vm.prank(owner);
         bridge.setTokenPauseFlags(token, 2);
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalRegistrationPaused.selector, token));
         _apply(w);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalRegistrationPaused.selector, token));
+        _claimWindow(w, 0);
         assertFalse(bridge.claimedNullifiers(nonce));
         (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, 0);
@@ -763,12 +765,13 @@ contract BridgeTest is AtomicBridgeFixture {
 
         Window memory w = _withdrawalWindow(user, address(token), amount, nonce);
         vm.prank(owner);
+        _apply(w);
         vm.expectRevert(
             abi.encodeWithSelector(
                 Bridge.TotalWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
             )
         );
-        _apply(w);
+        _claimWindow(w, 0);
 
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
         assertFalse(bridge.claimedNullifiers(nonce));

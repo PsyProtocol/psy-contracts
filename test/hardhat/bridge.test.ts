@@ -50,8 +50,8 @@ describe("Bridge atomic withdrawal orchestration (mock verifier, not cryptograph
     const [owner, user] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address);
     const args = await buildBridgeWindow(stateManager, bridge, [{ recipient: user.address, token: owner.address, amount: 555n, nonce: 79n }]);
-    const opening = args[5] as string;
-    args[5] = ethers.utils.hexConcat([ethers.utils.hexDataSlice(opening, 0, 64), word(2), ethers.utils.hexDataSlice(opening, 96)]);
+    const opening = args[3] as string;
+    args[3] = ethers.utils.hexConcat([ethers.utils.hexDataSlice(opening, 0, 64), word(2), ethers.utils.hexDataSlice(opening, 96)]);
     await expect(stateManager.applyBridgeWindow(...args)).to.be.revertedWithCustomError(stateManager, "InvalidCheckpointContinuity");
     expect(await bridge.claimedNullifiers(word(79))).to.equal(false);
   });

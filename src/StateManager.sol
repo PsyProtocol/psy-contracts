@@ -5,7 +5,6 @@ import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/Own
 import {BridgeOpening} from "./BridgeOpening.sol";
 import {IAggregateVerifier, IFinalizeVerifier} from "./IAggregateVerifier.sol";
 import {IAggregateBridge} from "./IAggregateBridge.sol";
-import {IEthereumRewardPayer} from "./IEthereumRewardPayer.sol";
 
 interface IPsyAddressesProviderSM {
     function ACL_MANAGER_ID() external view returns (bytes32);
@@ -54,9 +53,14 @@ contract StateManager is OwnableUpgradeable {
     address public depositVerifier;
     address public withdrawalVerifier;
     address public rewardVerifier;
+    mapping(uint64 => AppliedWindow) private appliedWindowByEndCheckpointId;
 
-    event WithdrawalAggregateApplied(bytes32 indexed openingDigest, uint64 endCheckpointId, bytes32 endCheckpointRoot);
-    event RewardAggregateApplied(bytes32 indexed openingDigest, uint64 endCheckpointId, bytes32 endCheckpointRoot);
+    struct AppliedWindow {
+        bytes32 windowId;
+        bool isApplied;
+    }
+
+    event SettlementAggregateApplied(bytes32 indexed openingDigest, bytes32 indexed windowId, uint64 indexed endCheckpointId, bytes32 endCheckpointRoot, bytes32 batchRoot);
     error UnauthorizedInitializer();
     error AggregateReentrancy();
 
@@ -203,57 +207,48 @@ contract StateManager is OwnableUpgradeable {
     }
 
     function applyBridgeWindow(
-        uint256[8] calldata finalizeProof, uint256[] calldata checkpointPublicInputs,
         uint256[8] calldata depositProof, bytes calldata depositOpening,
-        uint256[8] calldata withdrawalProof, bytes calldata withdrawalOpening,
-        uint256[8] calldata rewardProof, bytes calldata rewardOpening
+        uint256[8] calldata settlementProof, bytes calldata settlementOpening
     ) external onlyProposer {
         if (_applyingAggregate) revert AggregateReentrancy();
         if (configHash == bytes32(0)) revert VerifierNotSet();
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(_aggregateConfig);
         BridgeOpening.localChain(config, l1ChainIndex, aggregateBridge, address(this));
         BridgeOpening.DepositAggregateOpening memory a = BridgeOpening.readDepositAggregate(depositOpening, config);
+        BridgeOpening.SettlementOpening memory settlement = BridgeOpening.readSettlementOpening(settlementOpening, config, a.depositOpeningDigest);
         uint256 ordinal = BridgeOpening.chainOrdinal(config, l1ChainIndex);
         if (a.starts[ordinal].startCheckpointId != lastFinalizedCheckpointId || a.starts[ordinal].startCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
-        bool advance = _verifyFinalize(finalizeProof, checkpointPublicInputs, a);
-        _verify(depositVerifier, depositProof, a.depositOpeningDigest);
-        BridgeOpening.WithdrawalAggregateOpening memory w = BridgeOpening.readWithdrawalAggregate(withdrawalOpening, config);
-        BridgeOpening.RewardAggregateOpening memory r = BridgeOpening.readRewardAggregate(rewardOpening, config);
-        _verifyContext(a, w.context);
-        _verifyContext(a, r.context);
+        if (settlement.configHash != a.configHash || settlement.windowId != a.windowId || settlement.endCheckpointId != a.endCheckpointId || settlement.endCheckpointRoot != a.endCheckpointRoot) revert InvalidCheckpointContinuity();
+        if (a.endCheckpointId < lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
+        bool advance = a.endCheckpointId > lastFinalizedCheckpointId;
+        if (!advance && a.endCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
         for (uint256 i; i < config.chains.length; ++i) {
-            uint256 base = 26 + 9 * i;
-            if (a.deposits[i].chainIndex != config.chains[i].chainIndex || _checkpointRoot(checkpointPublicInputs, base) != a.deposits[i].newRoot || checkpointPublicInputs[base + 4] > type(uint32).max || checkpointPublicInputs[base + 4] != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
-            if (_checkpointRoot(checkpointPublicInputs, base + 5) != w.withdrawalRoots[i]) revert InvalidWithdrawalMerkleProof();
+            if (settlement.finalizations[i].startCheckpointRoot != a.starts[i].startCheckpointRoot) revert InvalidCheckpointContinuity();
+            if (settlement.endpoints[i].depositRoot != a.deposits[i].newRoot || settlement.endpoints[i].depositCount != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
         }
-        _verifyAggregate(withdrawalVerifier, withdrawalProof, w.openingDigest, w.withdrawals.length);
-        _verifyAggregate(rewardVerifier, rewardProof, r.openingDigest, r.rewards.length);
+        if (advance && uint256(settlement.finalizations[ordinal].checkpointCount) != uint256(a.endCheckpointId) - lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
+        if (depositVerifier.code.length == 0 || finalizeVerifier.code.length == 0) revert VerifierNotSet();
+        if (_zeroProof(depositProof) || _zeroProof(settlementProof)) revert InvalidProof();
+        IAggregateVerifier(depositVerifier).verifyProof(depositProof, BridgeOpening.proofInputs(a.depositOpeningDigest));
+        IAggregateVerifier(finalizeVerifier).verifyProof(settlementProof, BridgeOpening.proofInputs(settlement.openingDigest));
+        if (appliedWindowByEndCheckpointId[a.endCheckpointId].isApplied) revert InvalidCheckpointContinuity();
         IAggregateBridge bridge = IAggregateBridge(aggregateBridge);
         if (bridge.configHash() != configHash) revert InvalidDepositMerkleProof();
         _applyingAggregate = true;
         bridge.applyDepositAggregate(depositOpening);
-        bridge.registerAggregateWithdrawals(w.withdrawals);
-        if (l1ChainIndex == config.ethereumIndex && r.rewards.length != 0) {
-            IEthereumRewardPayer payer = IEthereumRewardPayer(config.rewardPayer);
-            if (payer.configHash() != configHash || payer.stateManager() != address(this) || payer.ethereumChainId() != block.chainid) revert InvalidProvenChainIndex();
-            payer.payRewards(r.rewards);
-        }
+        bridge.publishClaimHeader(BridgeOpening.withdrawalPublicationHeader(settlement));
         if (advance) {
             lastFinalizedCheckpointId = a.endCheckpointId;
             lastVerifiedCheckpointRoot = a.endCheckpointRoot;
-            lastVerifiedDepositTreeRoot = _slotRoot(checkpointPublicInputs, 4);
-            lastVerifiedWithdrawalTreeRoot = _slotRoot(checkpointPublicInputs, 12);
+            lastVerifiedDepositTreeRoot = settlement.globalDepositRoot;
+            lastVerifiedWithdrawalTreeRoot = settlement.globalWithdrawalRoot;
             emit Finalized(a.endCheckpointId, a.endCheckpointRoot, lastVerifiedDepositTreeRoot, lastVerifiedWithdrawalTreeRoot);
         }
         if (depositSubtreeRoot != a.deposits[ordinal].newRoot) depositSubtreeRoot = a.deposits[ordinal].newRoot;
         if (depositCount != a.deposits[ordinal].newCount) depositCount = a.deposits[ordinal].newCount;
+        appliedWindowByEndCheckpointId[a.endCheckpointId] = AppliedWindow({windowId: settlement.windowId, isApplied: true});
         _applyingAggregate = false;
-        emit WithdrawalAggregateApplied(w.openingDigest, a.endCheckpointId, a.endCheckpointRoot);
-        if (l1ChainIndex == config.ethereumIndex) emit RewardAggregateApplied(r.openingDigest, a.endCheckpointId, a.endCheckpointRoot);
-    }
-
-    function _verifyContext(BridgeOpening.DepositAggregateOpening memory a, BridgeOpening.DepositAggregateOpening memory b) private pure {
-        if (a.configHash != b.configHash || a.windowId != b.windowId || a.endCheckpointId != b.endCheckpointId || a.endCheckpointRoot != b.endCheckpointRoot) revert InvalidCheckpointContinuity();
+        emit SettlementAggregateApplied(settlement.openingDigest, settlement.windowId, a.endCheckpointId, a.endCheckpointRoot, settlement.batchRoot);
     }
 
     function _zeroProof(uint256[8] calldata proof) private pure returns (bool) {
@@ -261,59 +256,4 @@ contract StateManager is OwnableUpgradeable {
         return true;
     }
 
-    function _verify(address verifier, uint256[8] calldata proof, bytes32 statement) private view {
-        if (verifier.code.length == 0) revert VerifierNotSet();
-        if (_zeroProof(proof)) revert InvalidProof();
-        IAggregateVerifier(verifier).verifyProof(proof, BridgeOpening.proofInputs(statement));
-    }
-
-    function _verifyAggregate(address verifier, uint256[8] calldata proof, bytes32 statement, uint256 count) private view {
-        if (count == 0) {
-            if (!_zeroProof(proof)) revert InvalidProof();
-        } else {
-            _verify(verifier, proof, statement);
-        }
-    }
-
-    function _checkpointRoot(uint256[] calldata inputs, uint256 start) private pure returns (bytes32 root) {
-        uint256 packed;
-        for (uint256 i; i < 4; ++i) {
-            if (inputs[start + i] >= 18446744069414584321) revert InvalidProof();
-            packed = (packed << 64) | inputs[start + i];
-        }
-        return bytes32(packed);
-    }
-
-    function _slotRoot(uint256[] calldata inputs, uint256 start) private pure returns (bytes32 root) {
-        uint256 packed;
-        for (uint256 i; i < 8; ++i) {
-            if (inputs[start + i] > type(uint32).max) revert InvalidProof();
-            packed = (packed << 32) | inputs[start + i];
-        }
-        return bytes32(packed);
-    }
-
-    function _verifyFinalize(uint256[8] calldata proof, uint256[] calldata inputs, BridgeOpening.DepositAggregateOpening memory a) private view returns (bool advance) {
-        if (inputs.length != 26 + 9 * a.deposits.length) revert InvalidProof();
-        if (inputs[24] > type(uint32).max || inputs[25] == 0 || inputs[25] > inputs[24] || inputs[24] != a.endCheckpointId || inputs[24] < lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
-        bytes32 startRoot = _checkpointRoot(inputs, 0);
-        if (_checkpointRoot(inputs, 20) != a.endCheckpointRoot) revert InvalidCheckpointContinuity();
-        advance = inputs[24] > lastFinalizedCheckpointId;
-        if (advance) {
-            if (startRoot != lastVerifiedCheckpointRoot || inputs[25] != inputs[24] - lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
-        } else if (a.endCheckpointRoot != lastVerifiedCheckpointRoot) {
-            revert InvalidCheckpointContinuity();
-        }
-        bytes memory encoded = new bytes(144 + 72 * a.deposits.length);
-        uint256 offset;
-        for (uint256 i; i < inputs.length; ++i) {
-            uint256 width = i >= 4 && i < 20 ? 4 : 8;
-            uint256 value = inputs[width == 4 ? (i ^ 1) : i];
-            if (width == 4 && value > type(uint32).max) revert InvalidProof();
-            if (width == 8 && value > type(uint64).max) revert InvalidProof();
-            for (uint256 j; j < width; ++j) encoded[offset + j] = bytes1(uint8(value >> (8 * (width - j - 1))));
-            offset += width;
-        }
-        _verify(finalizeVerifier, proof, keccak256(encoded));
-    }
 }

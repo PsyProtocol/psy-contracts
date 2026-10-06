@@ -22,7 +22,7 @@ export type Withdrawal = {
   senderUserId?: number;
 };
 
-export type BridgeWindow = [bigint[], bigint[], bigint[], string, bigint[], string, bigint[], string];
+export type BridgeWindow = [bigint[], string, bigint[], string];
 
 // Nonzero mock proofs exercise orchestration only, never cryptographic acceptance.
 export async function buildBridgeWindow(stateManager: Contract, bridge: Contract, withdrawals: Withdrawal[] = [], endCheckpointId?: bigint): Promise<BridgeWindow> {
@@ -34,31 +34,65 @@ export async function buildBridgeWindow(stateManager: Contract, bridge: Contract
   const chainIndex = await stateManager.l1ChainIndex();
   const depositRoot = await bridge.depositRoot();
   const depositCount = await bridge.provedDepositCount();
-  const withdrawalRoot = ethers.constants.HashZero;
   const end = words([endId, ...rootWords(endRoot)]);
   const starts = words([1, chainIndex, startId, ...rootWords(startRoot)]);
   const deposits = words([1, chainIndex, ...rootWords(depositRoot), ...rootWords(depositRoot), depositCount, depositCount]);
   const windowId = ethers.utils.keccak256(ethers.utils.hexConcat([domain("Window"), configHash, end, starts, deposits]));
   const header = ethers.utils.hexConcat([configHash, windowId, end]);
   const depositOpening = ethers.utils.hexConcat([header, starts, deposits, word(0)]);
-  const withdrawalOpening = ethers.utils.hexConcat([header, word(1), words(rootWords(withdrawalRoot)), word(withdrawals.length), ...withdrawals.map(leaf => words([
-    leaf.destinationChainIndex ?? chainIndex, leaf.senderUserId ?? 0, leaf.recipient, leaf.token, leaf.amount, leaf.nonce,
-  ]))]);
-  const rewardOpening = ethers.utils.hexConcat([header, word(0)]);
-  const replay = endId === startId;
-  const proofStartRoot = replay ? ethers.constants.HashZero : startRoot;
-  const proofStartId = replay ? 0n : startId;
-  const publicInputs = [
-    ...rootWords(proofStartRoot), ...new Array<bigint>(16).fill(0n), ...rootWords(endRoot), endId, endId - proofStartId,
-    ...rootWords(depositRoot), BigInt(depositCount.toString()), ...rootWords(withdrawalRoot),
-  ];
-  return [ORCHESTRATION_PROOF, publicInputs,
-    ORCHESTRATION_PROOF, depositOpening, withdrawals.length ? ORCHESTRATION_PROOF : ZERO_PROOF,
-    withdrawalOpening, ZERO_PROOF, rewardOpening];
+  const span = endId > startId ? endId - startId : 1n;
+  const zeroRoot = words(rootWords(ethers.constants.HashZero));
+  const settlementOpening = ethers.utils.hexConcat([
+    header, words(new Array<bigint>(8).fill(0n)), words(new Array<bigint>(8).fill(0n)), word(1),
+    words(rootWords(startRoot)), word(span), word(1), words(rootWords(depositRoot)), word(depositCount),
+    zeroRoot, word(withdrawals.length),
+    ...withdrawals.map(leaf => words([
+      leaf.destinationChainIndex ?? chainIndex, leaf.senderUserId ?? 0, leaf.recipient, leaf.token, leaf.amount, leaf.nonce,
+    ])),
+    zeroRoot, zeroRoot, word(0), word(0),
+  ]);
+  return [ORCHESTRATION_PROOF, depositOpening, ORCHESTRATION_PROOF, settlementOpening];
+}
+
+const LEAF = ethers.utils.id("PsyBridge/TwoArtifact/1/Leaf");
+const EMPTY = ethers.utils.id("PsyBridge/TwoArtifact/1/Empty");
+const NODE = ethers.utils.id("PsyBridge/TwoArtifact/1/Node");
+const RECORD = ethers.utils.id("PsyBridge/TwoArtifact/1/Record");
+const MARKER = word(12);
+
+function claimSiblings(leafBody: string, ordinal: number, count: number): string[] {
+  const commit = ethers.utils.keccak256(ethers.utils.hexConcat([RECORD, word(2), leafBody]));
+  let layer = Array.from({ length: 1024 }, (_, index) => ethers.utils.keccak256(ethers.utils.hexConcat(
+    index === ordinal
+      ? [LEAF, MARKER, word(count), word(index), commit]
+      : [EMPTY, MARKER, word(count), word(index)],
+  )));
+  const path: string[] = [];
+  let index = ordinal;
+  for (let level = 0; level < 10; level += 1) {
+    path.push(layer[index ^ 1]);
+    const parent = [];
+    for (let i = 0; i < layer.length / 2; i += 1) {
+      parent.push(ethers.utils.keccak256(ethers.utils.hexConcat([NODE, MARKER, word(level + 1), layer[2 * i], layer[2 * i + 1]])));
+    }
+    layer = parent;
+    index >>= 1;
+  }
+  return path;
 }
 
 export async function registerWithdrawal(params: Withdrawal & { bridge: Contract; stateManager: Contract }) {
   const { bridge, stateManager, ...withdrawal } = params;
-  await stateManager.applyBridgeWindow(...await buildBridgeWindow(stateManager, bridge, [withdrawal]));
+  const sent = await stateManager.applyBridgeWindow(...await buildBridgeWindow(stateManager, bridge, [withdrawal]));
+  const receipt = await sent.wait();
+  const parsed = receipt.logs.map((log: { topics: string[]; data: string }) => {
+    try { return bridge.interface.parseLog(log); } catch { return undefined; }
+  }).find((log: { name: string } | undefined) => log?.name === "InclusionAggregateRootPublished");
+  const chainIndex = await stateManager.l1ChainIndex();
+  const leaf = words([
+    withdrawal.destinationChainIndex ?? chainIndex, withdrawal.senderUserId ?? 0,
+    withdrawal.recipient, withdrawal.token, withdrawal.amount, withdrawal.nonce,
+  ]);
+  await bridge.claimAggregateWithdrawal(parsed.args.headerDigest, 0, leaf, claimSiblings(leaf, 0, 1));
   return word(withdrawal.nonce);
 }

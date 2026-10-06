@@ -18,6 +18,13 @@ library BridgeOpening {
     uint256 internal constant CLAIM_TREE_MAX_CAPACITY = 131072;
     uint8 internal constant WITHDRAWAL_PUBLICATION_FAMILY = 2;
     uint8 internal constant REWARD_PUBLICATION_FAMILY = 3;
+    bytes32 internal constant SETTLEMENT = keccak256("PsyBridge/TwoArtifact/2/B");
+    bytes32 internal constant SETTLEMENT_EMPTY = keccak256("PsyBridge/TwoArtifact/2/Empty");
+    bytes32 internal constant SETTLEMENT_BATCH = keccak256("PsyBridge/TwoArtifact/2/Batch");
+    bytes32 internal constant SETTLEMENT_LEAF = keccak256("PsyBridge/TwoArtifact/2/Leaf");
+    bytes32 internal constant SETTLEMENT_NODE = keccak256("PsyBridge/TwoArtifact/2/Node");
+    uint256 internal constant MAX_SOURCE_CHAINS = 8;
+    uint256 internal constant MAX_SETTLEMENT_LEAVES = 1024;
 
     struct ChainConfig { uint8 chainIndex; uint256 chainId; address bridge; address stateManager; uint64 bootstrapId; bytes32 bootstrapRoot; }
     struct NetworkConfig {
@@ -65,6 +72,25 @@ library BridgeOpening {
         bytes32 newLedgerStateRoot;
         bytes32 openingDigest;
         bytes32 claimTreeRoot;
+    }
+    struct FinalizationSlot { bytes32 startCheckpointRoot; uint32 checkpointCount; }
+    struct FinalizationEndpoint { bytes32 depositRoot; uint32 depositCount; bytes32 withdrawalRoot; }
+    struct SettlementOpening {
+        bytes32 configHash;
+        bytes32 windowId;
+        uint64 endCheckpointId;
+        bytes32 endCheckpointRoot;
+        bytes32 globalDepositRoot;
+        bytes32 globalWithdrawalRoot;
+        FinalizationSlot[] finalizations;
+        FinalizationEndpoint[] endpoints;
+        WithdrawalLeaf[] withdrawals;
+        bytes32 oldRewardLedgerRoot;
+        bytes32 newRewardLedgerRoot;
+        bytes32 economicDomain;
+        SourceCheckpointRewardLeaf[] rewards;
+        bytes32 batchRoot;
+        bytes32 openingDigest;
     }
     struct Cursor { uint256 offset; }
     error InvalidEncoding();
@@ -470,5 +496,208 @@ library BridgeOpening {
     function sourceCheckpointRewardLeafCommit(bytes memory body) internal pure returns (bytes32) {
         readSourceCheckpointRewardLeaf(body);
         return keccak256(abi.encodePacked(SOURCE_CHECKPOINT_REWARD_LEAF, body));
+    }
+
+    function readSettlementOpening(bytes memory body, NetworkConfig memory config, bytes32 depositOpeningDigest) internal pure returns (SettlementOpening memory opening) {
+        Cursor memory cursor;
+        opening.configHash = bytes32(readWord(body, cursor));
+        if (opening.configHash != config.configHash) revert InvalidConfig();
+        opening.windowId = bytes32(readWord(body, cursor));
+        opening.endCheckpointId = uint64(readUint(body, cursor, 64));
+        opening.endCheckpointRoot = readRoot(body, cursor);
+        opening.globalDepositRoot = _readU32x8(body, cursor);
+        opening.globalWithdrawalRoot = _readU32x8(body, cursor);
+        opening.finalizations = _readFinalizations(body, cursor, config.chains.length);
+        opening.endpoints = _readEndpoints(body, cursor, opening.finalizations.length);
+        opening.withdrawals = _readSettlementWithdrawals(body, cursor, config);
+        opening.oldRewardLedgerRoot = readRoot(body, cursor);
+        opening.newRewardLedgerRoot = readRoot(body, cursor);
+        opening.economicDomain = bytes32(readWord(body, cursor));
+        opening.rewards = _readSettlementRewards(body, cursor, config, opening.economicDomain, opening.oldRewardLedgerRoot, opening.newRewardLedgerRoot);
+        if (cursor.offset != body.length) revert InvalidEncoding();
+        opening.batchRoot = _batchRoot(opening);
+        opening.openingDigest = settlementOpeningDigest(opening, depositOpeningDigest);
+    }
+
+    function _readU32x8(bytes memory body, Cursor memory cursor) private pure returns (bytes32 packed) {
+        uint256 value;
+        for (uint256 i; i < 8; ++i) value = (value << 32) | readUint(body, cursor, 32);
+        return bytes32(value);
+    }
+
+    function _readFinalizations(bytes memory body, Cursor memory cursor, uint256 chainCount) private pure returns (FinalizationSlot[] memory slots) {
+        uint256 count = readWord(body, cursor);
+        if (count == 0 || count > MAX_SOURCE_CHAINS || count != chainCount) revert InvalidCount();
+        slots = new FinalizationSlot[](count);
+        for (uint256 i; i < count; ++i) {
+            slots[i].startCheckpointRoot = readRoot(body, cursor);
+            slots[i].checkpointCount = uint32(readUint(body, cursor, 32));
+            if (slots[i].checkpointCount == 0) revert InvalidCount();
+        }
+    }
+
+    function _readEndpoints(bytes memory body, Cursor memory cursor, uint256 chainCount) private pure returns (FinalizationEndpoint[] memory endpoints) {
+        if (readWord(body, cursor) != chainCount) revert InvalidCount();
+        endpoints = new FinalizationEndpoint[](chainCount);
+        for (uint256 i; i < chainCount; ++i) {
+            endpoints[i].depositRoot = readRoot(body, cursor);
+            endpoints[i].depositCount = uint32(readUint(body, cursor, 32));
+            endpoints[i].withdrawalRoot = readRoot(body, cursor);
+        }
+    }
+
+    function _readSettlementWithdrawals(bytes memory body, Cursor memory cursor, NetworkConfig memory config) private pure returns (WithdrawalLeaf[] memory leaves) {
+        uint256 count = readWord(body, cursor);
+        if (count > MAX_SETTLEMENT_LEAVES || count > config.maxWithdrawals) revert InvalidCount();
+        leaves = new WithdrawalLeaf[](count);
+        for (uint256 i; i < count; ++i) {
+            WithdrawalLeaf memory leaf;
+            leaf.chainIndex = uint8(readUint(body, cursor, 8));
+            leaf.senderUserId = uint32(readUint(body, cursor, 32));
+            leaf.recipient = readAddress(body, cursor);
+            leaf.token = readAddress(body, cursor);
+            leaf.amount = readWord(body, cursor);
+            leaf.nonce = bytes32(readWord(body, cursor));
+            if (leaf.recipient == address(0) || leaf.amount == 0 || leaf.amount >= GOLDILOCKS_PRIME) revert InvalidEncoding();
+            _knownChain(config, leaf.chainIndex);
+            if (i > 0) {
+                WithdrawalLeaf memory previous = leaves[i - 1];
+                if (previous.chainIndex > leaf.chainIndex || (previous.chainIndex == leaf.chainIndex && uint256(previous.nonce) >= uint256(leaf.nonce))) revert InvalidOrdering();
+            }
+            leaves[i] = leaf;
+        }
+    }
+
+    function _readSettlementRewards(bytes memory body, Cursor memory cursor, NetworkConfig memory config, bytes32 economicDomain, bytes32 oldRoot, bytes32 newRoot) private pure returns (SourceCheckpointRewardLeaf[] memory leaves) {
+        uint256 count = readWord(body, cursor);
+        if (count > MAX_SETTLEMENT_LEAVES || count > config.maxRewards) revert InvalidCount();
+        if (count == 0 && oldRoot != newRoot) revert InvalidEncoding();
+        leaves = new SourceCheckpointRewardLeaf[](count);
+        for (uint256 i; i < count; ++i) {
+            SourceCheckpointRewardLeaf memory leaf;
+            leaf.economicDomain = bytes32(readWord(body, cursor));
+            leaf.sourceCheckpointId = uint64(readUint(body, cursor, 64));
+            leaf.userId = uint32(readUint(body, cursor, 32));
+            leaf.amount = readWord(body, cursor);
+            leaf.recipient = readAddress(body, cursor);
+            uint256 flag = readUint(body, cursor, 64);
+            if (flag > 1) revert InvalidEncoding();
+            leaf.initialized = flag == 1;
+            if (!leaf.initialized || leaf.recipient == address(0) || leaf.amount == 0 || leaf.sourceCheckpointId > type(uint32).max || leaf.economicDomain != economicDomain) revert InvalidEncoding();
+            if (i > 0 && leaves[i - 1].userId >= leaf.userId) revert InvalidOrdering();
+            leaves[i] = leaf;
+        }
+    }
+
+    function _knownChain(NetworkConfig memory config, uint8 chainIndex) private pure {
+        for (uint256 i; i < config.chains.length; ++i) if (config.chains[i].chainIndex == chainIndex) return;
+        revert InvalidConfig();
+    }
+
+    function settlementOpeningDigest(SettlementOpening memory opening, bytes32 depositOpeningDigest) internal pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(SETTLEMENT, opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), depositOpeningDigest, _u32x8Words(opening.globalDepositRoot), _u32x8Words(opening.globalWithdrawalRoot), bytes32(opening.finalizations.length));
+        for (uint256 i; i < opening.finalizations.length; ++i) {
+            body = bytes.concat(body, _hash4Words(opening.finalizations[i].startCheckpointRoot), bytes32(uint256(opening.finalizations[i].checkpointCount)));
+        }
+        for (uint256 i; i < opening.endpoints.length; ++i) {
+            FinalizationEndpoint memory endpoint = opening.endpoints[i];
+            body = bytes.concat(body, _hash4Words(endpoint.depositRoot), bytes32(uint256(endpoint.depositCount)), _hash4Words(endpoint.withdrawalRoot));
+        }
+        body = bytes.concat(body, bytes32(opening.withdrawals.length), bytes32(opening.rewards.length), _hash4Words(opening.oldRewardLedgerRoot), _hash4Words(opening.newRewardLedgerRoot), opening.economicDomain, bytes32(_batchCount(opening.withdrawals.length, opening.rewards.length)), opening.batchRoot);
+        return keccak256(body);
+    }
+
+    function _hash4Words(bytes32 root) private pure returns (bytes memory) {
+        return abi.encode(uint64(uint256(root) >> 192), uint64(uint256(root) >> 128), uint64(uint256(root) >> 64), uint64(uint256(root)));
+    }
+
+    function _u32x8Words(bytes32 packed) private pure returns (bytes memory) {
+        uint256 value = uint256(packed);
+        uint256 mask = type(uint32).max;
+        return abi.encode((value >> 224) & mask, (value >> 192) & mask, (value >> 160) & mask, (value >> 128) & mask, (value >> 96) & mask, (value >> 64) & mask, (value >> 32) & mask, value & mask);
+    }
+
+    function _batchCount(uint256 withdrawals, uint256 rewards) private pure returns (uint256) {
+        return _chunks(withdrawals) + _chunks(rewards);
+    }
+
+    function _chunks(uint256 count) private pure returns (uint256) {
+        return count == 0 ? 0 : (count + 31) / 32;
+    }
+
+    function _batchRoot(SettlementOpening memory opening) private pure returns (bytes32) {
+        uint256 withdrawalChunks = _chunks(opening.withdrawals.length);
+        uint256 batchCount = withdrawalChunks + _chunks(opening.rewards.length);
+        uint256 width = 1;
+        while (width < batchCount) width <<= 1;
+        bytes32[] memory nodes = new bytes32[](width);
+        for (uint256 ordinal; ordinal < width; ++ordinal) {
+            nodes[ordinal] = ordinal >= batchCount
+                ? keccak256(abi.encodePacked(SETTLEMENT_EMPTY, bytes32(batchCount), bytes32(ordinal)))
+                : keccak256(abi.encodePacked(SETTLEMENT_LEAF, bytes32(batchCount), bytes32(ordinal), bytes32(_batchFamily(ordinal, withdrawalChunks)), _batchCommit(opening, ordinal, withdrawalChunks)));
+        }
+        for (uint256 level = 1; width > 1; ++level) {
+            width /= 2;
+            for (uint256 i; i < width; ++i) nodes[i] = keccak256(abi.encodePacked(SETTLEMENT_NODE, bytes32(level), nodes[2 * i], nodes[2 * i + 1]));
+        }
+        return nodes[0];
+    }
+
+    function _batchFamily(uint256 ordinal, uint256 withdrawalChunks) private pure returns (uint256) {
+        return ordinal < withdrawalChunks ? 2 : 3;
+    }
+
+    function _batchCommit(SettlementOpening memory opening, uint256 ordinal, uint256 withdrawalChunks) private pure returns (bytes32) {
+        bool isWithdrawal = ordinal < withdrawalChunks;
+        uint256 first = (isWithdrawal ? ordinal : ordinal - withdrawalChunks) * 32;
+        uint256 available = isWithdrawal ? opening.withdrawals.length : opening.rewards.length;
+        uint256 count = available - first;
+        if (count > 32) count = 32;
+        bytes memory records = isWithdrawal ? _withdrawalRecords(opening.withdrawals, first, count) : _rewardRecords(opening.rewards, first, count);
+        return keccak256(bytes.concat(abi.encodePacked(SETTLEMENT_BATCH, opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId))), _hash4Words(opening.endCheckpointRoot), abi.encode(isWithdrawal ? uint256(2) : uint256(3), ordinal, first, count), records));
+    }
+
+    function _withdrawalRecords(WithdrawalLeaf[] memory leaves, uint256 first, uint256 count) private pure returns (bytes memory records) {
+        for (uint256 i; i < count; ++i) records = bytes.concat(records, abi.encode(leaves[first + i]));
+    }
+
+    function _rewardRecords(SourceCheckpointRewardLeaf[] memory leaves, uint256 first, uint256 count) private pure returns (bytes memory records) {
+        for (uint256 i; i < count; ++i) {
+            SourceCheckpointRewardLeaf memory leaf = leaves[first + i];
+            records = bytes.concat(records, abi.encode(leaf.economicDomain, leaf.sourceCheckpointId, leaf.userId, leaf.amount, leaf.recipient, leaf.initialized ? uint256(1) : uint256(0)));
+        }
+    }
+
+    function withdrawalPublicationHeader(SettlementOpening memory opening) internal pure returns (bytes memory header) {
+        uint256 count = opening.withdrawals.length;
+        bytes32 claimRoot = count == 0 ? bytes32(0) : withdrawalClaimRoot(opening.withdrawals);
+        bytes memory roots;
+        for (uint256 i; i < opening.endpoints.length; ++i) roots = bytes.concat(roots, opening.endpoints[i].withdrawalRoot);
+        header = bytes.concat(
+            bytes1(WITHDRAWAL_PUBLICATION_FAMILY),
+            opening.configHash,
+            opening.windowId,
+            abi.encodePacked(opening.endCheckpointId, opening.endCheckpointRoot, uint32(1024), uint32(count), uint32(count == 0 ? 0 : 1), uint32(0), uint32(0), uint32(count)),
+            roots,
+            count == 0 ? bytes32(0) : opening.openingDigest,
+            claimRoot
+        );
+        readInclusionAggregateHeader(header);
+    }
+
+    function withdrawalClaimRoot(WithdrawalLeaf[] memory leaves) internal pure returns (bytes32) {
+        uint256 count = leaves.length;
+        uint256 width = 1024;
+        bytes32[] memory layer = new bytes32[](width);
+        for (uint256 ordinal; ordinal < width; ++ordinal) {
+            layer[ordinal] = ordinal < count
+                ? keccak256(abi.encodePacked(LEAF, bytes32(uint256(12)), bytes32(count), bytes32(ordinal), withdrawalLeafCommit(abi.encode(leaves[ordinal]))))
+                : keccak256(abi.encodePacked(EMPTY, bytes32(uint256(12)), bytes32(count), bytes32(ordinal)));
+        }
+        for (uint256 level = 1; width > 1; ++level) {
+            width /= 2;
+            for (uint256 i; i < width; ++i) layer[i] = keccak256(abi.encodePacked(NODE, bytes32(uint256(12)), bytes32(level), layer[2 * i], layer[2 * i + 1]));
+        }
+        return layer[0];
     }
 }

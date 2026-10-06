@@ -21,16 +21,10 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
     function testFinalizeHashBindsTerminalCheckpointIdAndCount() public {
         _deployAtomic(owner, proposer);
         Window memory w = _emptyWindow(37, bytes32(uint256(2)));
-        for (uint256 i = 4; i < 20; ++i) w.inputs[i] = i + 1;
-        bytes memory encoded = abi.encodePacked(uint64(0), uint64(0), uint64(0), uint64(0));
-        for (uint256 i = 4; i < 20; i += 2) {
-            encoded = bytes.concat(encoded, abi.encodePacked(uint32(w.inputs[i + 1]), uint32(w.inputs[i])));
-        }
-        encoded = bytes.concat(encoded, abi.encodePacked(uint64(0), uint64(0), uint64(0), uint64(2), uint64(37), uint64(37)));
-        assertEq(encoded.length, 144);
-        for (uint256 i = 26; i < 35; ++i) encoded = bytes.concat(encoded, abi.encodePacked(uint64(w.inputs[i])));
-        assertEq(encoded.length, 216);
-        vm.expectCall(address(finalizeVerifier), abi.encodeCall(finalizeVerifier.verifyProof, (w.finalizeProof, BridgeOpening.proofInputs(keccak256(encoded)))));
+        BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(networkConfig);
+        BridgeOpening.DepositAggregateOpening memory deposit = BridgeOpening.readDepositAggregate(w.deposits, config);
+        BridgeOpening.SettlementOpening memory settlement = BridgeOpening.readSettlementOpening(w.settlement, config, deposit.depositOpeningDigest);
+        vm.expectCall(address(finalizeVerifier), abi.encodeCall(finalizeVerifier.verifyProof, (w.settlementProof, BridgeOpening.proofInputs(settlement.openingDigest))));
         vm.prank(proposer);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 37);
@@ -42,18 +36,18 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         vm.prank(proposer);
         _apply(first);
         Window memory mismatched = _emptyWindow(20, bytes32(uint256(3)));
-        mismatched.inputs[0] = 9;
+        bytes memory settlement = mismatched.settlement;
+        assembly ("memory-safe") { mstore(add(settlement, 800), 9) }
         vm.prank(proposer);
         vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
         _apply(mismatched);
         assertEq(manager.lastFinalizedCheckpointId(), 10);
     }
 
-    function testCanonicalEmptyFamiliesUseZeroProofs() public {
+    function testEmptyPayoutsStillRequireSettlementProof() public {
         _deployAtomic(owner, proposer);
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        assertEq(w.withdrawalProof[0], 0);
-        assertEq(w.rewardProof[0], 0);
+        assertGt(w.settlementProof[0], 0);
         assertGt(w.depositProof[0], 0);
         vm.prank(proposer);
         _apply(w);
@@ -64,10 +58,10 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         _deployAtomic(owner, proposer);
         Window memory identity = _emptyWindow(0, bytes32(0));
         vm.prank(proposer);
-        vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
         _apply(identity);
+        assertEq(manager.lastFinalizedCheckpointId(), 0);
         Window memory positive = _emptyWindow(1, bytes32(uint256(1)));
-        positive.finalizeProof[0] = 0;
+        positive.settlementProof[0] = 0;
         vm.prank(proposer);
         vm.expectRevert(StateManager.InvalidProof.selector);
         _apply(positive);
@@ -80,8 +74,8 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         vm.prank(proposer);
         _apply(w);
         Window memory replay = _emptyWindow(10, bytes32(uint256(2)));
-        replay.inputs = w.inputs;
         vm.prank(proposer);
+        vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
         _apply(replay);
         assertEq(manager.lastFinalizedCheckpointId(), 10);
         assertEq(manager.lastVerifiedCheckpointRoot(), bytes32(uint256(2)));
@@ -90,10 +84,10 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
     function testRejectsMissingEndpointRow() public {
         _deployAtomic(owner, proposer);
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        uint256[] memory inputs = w.inputs;
-        assembly ("memory-safe") { mstore(inputs, 26) }
+        bytes memory settlement = w.settlement;
+        assembly ("memory-safe") { mstore(settlement, sub(mload(settlement), 32)) }
         vm.prank(proposer);
-        vm.expectRevert(StateManager.InvalidProof.selector);
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 0);
     }
