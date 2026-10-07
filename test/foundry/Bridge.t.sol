@@ -11,7 +11,7 @@ import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
 import {MockGnarkVerifier} from "../fixtures/contracts/MockGnarkVerifier.sol";
 import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
 import {BridgeOpening} from "../../src/BridgeOpening.sol";
-import {AtomicBridgeFixture} from "../fixtures/contracts/AtomicBridgeFixture.sol";
+import {AtomicBridgeFixture} from "./fixtures/AtomicBridgeFixture.sol";
 
 
 contract RevertingTransferToken is MockERC20 {

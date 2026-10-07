@@ -8,8 +8,8 @@ import {StateManager} from "../../../src/StateManager.sol";
 import {Router} from "../../../src/Router.sol";
 import {PsyAddressesProvider} from "../../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../../src/PsyACLManager.sol";
-import {MockGnarkVerifier} from "./MockGnarkVerifier.sol";
-import {TestERC1967Proxy} from "./TestERC1967Proxy.sol";
+import {MockGnarkVerifier} from "../../fixtures/contracts/MockGnarkVerifier.sol";
+import {TestERC1967Proxy} from "../../fixtures/contracts/TestERC1967Proxy.sol";
 
 // Mock proofs exercise orchestration only, never cryptographic acceptance.
 abstract contract AtomicBridgeFixture is Test {

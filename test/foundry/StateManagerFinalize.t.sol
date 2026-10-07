@@ -6,7 +6,7 @@ import {StateManager} from "../../src/StateManager.sol";
 import {BridgeOpening} from "../../src/BridgeOpening.sol";
 import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
-import {AtomicBridgeFixture} from "../fixtures/contracts/AtomicBridgeFixture.sol";
+import {AtomicBridgeFixture} from "./fixtures/AtomicBridgeFixture.sol";
 import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
 
 contract StateManagerFinalizeTest is AtomicBridgeFixture {

@@ -12,7 +12,7 @@ import {ETHGateway} from "../../src/ETHGateway.sol";
 import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
 import {MockWETH} from "../fixtures/contracts/MockWETH.sol";
 import {TestERC1967Proxy} from "../fixtures/contracts/TestERC1967Proxy.sol";
-import {AtomicBridgeFixture} from "../fixtures/contracts/AtomicBridgeFixture.sol";
+import {AtomicBridgeFixture} from "./fixtures/AtomicBridgeFixture.sol";
 
 contract RouterGatewayTest is AtomicBridgeFixture {
     address internal owner = address(0xA11CE);

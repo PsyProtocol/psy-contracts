@@ -4,7 +4,7 @@ pragma solidity ^0.8.24;
 import {Vm} from "forge-std/Vm.sol";
 import {BridgeOpening} from "../../src/BridgeOpening.sol";
 import {StateManager} from "../../src/StateManager.sol";
-import {AtomicBridgeFixture} from "../fixtures/contracts/AtomicBridgeFixture.sol";
+import {AtomicBridgeFixture} from "./fixtures/AtomicBridgeFixture.sol";
 
 contract StateManagerTest is AtomicBridgeFixture {
     address internal owner = address(0xA11CE);
