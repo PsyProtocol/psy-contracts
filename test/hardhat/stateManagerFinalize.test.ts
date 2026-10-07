@@ -34,7 +34,7 @@ describe("StateManager.applyBridgeWindow orchestration (mock verifier only)", fu
     await expect(sm.applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
   });
 
-  it("accepts bootstrap identity and rejects an omitted settlement proof", async function () {
+  it("accepts bootstrap identity and rejects an omitted window finalization proof", async function () {
     const [owner] = await ethers.getSigners();
     const { stateManager: sm, bridge } = await deployCoreSystem(owner.address);
     const bootstrap = await buildBridgeWindow(sm, bridge, [], 0n);
@@ -46,7 +46,7 @@ describe("StateManager.applyBridgeWindow orchestration (mock verifier only)", fu
     expect(await sm.lastFinalizedCheckpointId()).to.equal(0);
   });
 
-  it("rejects endpoint substitution and a truncated settlement opening before effects", async function () {
+  it("rejects endpoint substitution and a truncated window finalization opening before effects", async function () {
     const [owner] = await ethers.getSigners();
     const { stateManager: sm, bridge } = await deployCoreSystem(owner.address);
     for (const index of [30, 34]) {

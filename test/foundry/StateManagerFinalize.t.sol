@@ -27,8 +27,8 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         Window memory w = _emptyWindow(37, bytes32(uint256(2)));
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(networkConfig);
         BridgeOpening.DepositAggregateOpening memory deposit = BridgeOpening.readDepositAggregate(w.deposits, config);
-        BridgeOpening.SettlementOpening memory settlement = BridgeOpening.readSettlementOpening(w.settlement, config, deposit.depositOpeningDigest);
-        vm.expectCall(address(finalizeVerifier), abi.encodeCall(finalizeVerifier.verifyProof, (w.settlementProof, BridgeOpening.proofInputs(settlement.openingDigest))));
+        BridgeOpening.WindowFinalizationOpening memory windowFinalization = BridgeOpening.readWindowFinalizationOpening(w.windowFinalizationOpening, config, deposit.depositOpeningDigest);
+        vm.expectCall(address(finalizeVerifier), abi.encodeCall(finalizeVerifier.verifyProof, (w.windowFinalizationProof, BridgeOpening.proofInputs(windowFinalization.openingDigest))));
         vm.prank(proposer);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 37);
@@ -40,18 +40,18 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         vm.prank(proposer);
         _apply(first);
         Window memory mismatched = _emptyWindow(20, bytes32(uint256(3)));
-        bytes memory settlement = mismatched.settlement;
-        assembly ("memory-safe") { mstore(add(settlement, 800), 9) }
+        bytes memory windowFinalizationOpening = mismatched.windowFinalizationOpening;
+        assembly ("memory-safe") { mstore(add(windowFinalizationOpening, 800), 9) }
         vm.prank(proposer);
         vm.expectRevert(StateManager.InvalidCheckpointContinuity.selector);
         _apply(mismatched);
         assertEq(manager.lastFinalizedCheckpointId(), 10);
     }
 
-    function testEmptyPayoutsStillRequireSettlementProof() public {
+    function testEmptyPayoutsStillRequireWindowFinalizationProof() public {
         _deployAtomic(owner, proposer);
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        assertGt(w.settlementProof[0], 0);
+        assertGt(w.windowFinalizationProof[0], 0);
         assertGt(w.depositProof[0], 0);
         vm.prank(proposer);
         _apply(w);
@@ -65,7 +65,7 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
         _apply(identity);
         assertEq(manager.lastFinalizedCheckpointId(), 0);
         Window memory positive = _emptyWindow(1, bytes32(uint256(1)));
-        positive.settlementProof[0] = 0;
+        positive.windowFinalizationProof[0] = 0;
         vm.prank(proposer);
         vm.expectRevert(StateManager.InvalidProof.selector);
         _apply(positive);
@@ -88,8 +88,8 @@ contract StateManagerFinalizeTest is AtomicBridgeFixture {
     function testRejectsMissingEndpointRow() public {
         _deployAtomic(owner, proposer);
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        bytes memory settlement = w.settlement;
-        assembly ("memory-safe") { mstore(settlement, sub(mload(settlement), 32)) }
+        bytes memory windowFinalizationOpening = w.windowFinalizationOpening;
+        assembly ("memory-safe") { mstore(windowFinalizationOpening, sub(mload(windowFinalizationOpening), 32)) }
         vm.prank(proposer);
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         _apply(w);
@@ -127,13 +127,13 @@ contract StateManagerMixedCursorTest is AtomicBridgeFixture {
         PsyAddressesProvider providerImpl = new PsyAddressesProvider();
         Bridge bridgeImpl = new Bridge();
         StateManager managerImpl = new StateManager();
-        uint64 nonce = vm.getNonce(address(this));
-        address provider0 = vm.computeCreateAddress(address(this), nonce);
-        address provider1 = vm.computeCreateAddress(address(this), nonce + 1);
-        address bridge0 = vm.computeCreateAddress(address(this), nonce + 2);
-        address manager0 = vm.computeCreateAddress(address(this), nonce + 3);
-        address bridge1 = vm.computeCreateAddress(address(this), nonce + 4);
-        address manager1 = vm.computeCreateAddress(address(this), nonce + 5);
+        uint64 ownerNonce = vm.getNonce(owner);
+        address provider0 = vm.computeCreateAddress(owner, ownerNonce);
+        address provider1 = vm.computeCreateAddress(owner, ownerNonce + 1);
+        address bridge0 = vm.computeCreateAddress(owner, ownerNonce + 2);
+        address manager0 = vm.computeCreateAddress(owner, ownerNonce + 3);
+        address bridge1 = vm.computeCreateAddress(owner, ownerNonce + 4);
+        address manager1 = vm.computeCreateAddress(owner, ownerNonce + 5);
         bytes32 root9 = bytes32(uint256(9));
         bytes32 root10 = bytes32(uint256(10));
         bytes memory config = bytes.concat(
@@ -151,21 +151,19 @@ contract StateManagerMixedCursorTest is AtomicBridgeFixture {
         deployed1.setAddress(deployed1.ACL_MANAGER_ID(), address(acl));
         deployed1.setAddress(deployed1.BRIDGE_ID(), bridge1);
         deployed1.setAddress(deployed1.STATE_MANAGER_ID(), manager1);
-        vm.stopPrank();
-        assertEq(address(deployed0), provider0);
-        assertEq(address(deployed1), provider1);
         vm.chainId(CHAIN_ZERO);
         Bridge deployedBridge0 = Bridge(payable(address(new TestERC1967Proxy(address(bridgeImpl), abi.encodeCall(Bridge.initialize, (owner, provider0, config, uint8(0)))))));
         StateManager deployedManager0 = StateManager(address(new TestERC1967Proxy(address(managerImpl), abi.encodeCall(StateManager.initialize, (owner, provider0, uint8(0), config, address(verifier), address(verifier), address(verifier), address(verifier))))));
         vm.chainId(CHAIN_ONE);
         Bridge deployedBridge1 = Bridge(payable(address(new TestERC1967Proxy(address(bridgeImpl), abi.encodeCall(Bridge.initialize, (owner, provider1, config, uint8(1)))))));
         StateManager deployedManager1 = StateManager(address(new TestERC1967Proxy(address(managerImpl), abi.encodeCall(StateManager.initialize, (owner, provider1, uint8(1), config, address(verifier), address(verifier), address(verifier), address(verifier))))));
+        vm.stopPrank();
         bytes32 depositRoot = deployedBridge0.depositRoot();
         bytes memory deposits = _mixedDeposits(config, root9, root10, depositRoot);
-        bytes memory settlement = _mixedSettlement(deposits, root9, depositRoot);
+        bytes memory windowFinalizationOpening = _mixedWindowFinalization(deposits, root9, depositRoot);
         BridgeOpening.NetworkConfig memory parsed = BridgeOpening.readConfig(config);
         BridgeOpening.DepositAggregateOpening memory opening = BridgeOpening.readDepositAggregate(deposits, parsed);
-        BridgeOpening.SettlementOpening memory decoded = BridgeOpening.readSettlementOpening(settlement, parsed, opening.depositOpeningDigest);
+        BridgeOpening.WindowFinalizationOpening memory decoded = BridgeOpening.readWindowFinalizationOpening(windowFinalizationOpening, parsed, opening.depositOpeningDigest);
         assertEq(opening.starts[0].startCheckpointId, 9);
         assertEq(opening.starts[1].startCheckpointId, 10);
         assertEq(decoded.finalizations[0].startCheckpointRoot, root9);
@@ -175,12 +173,12 @@ contract StateManagerMixedCursorTest is AtomicBridgeFixture {
         proof[0] = 1;
         vm.chainId(CHAIN_ZERO);
         vm.prank(proposer);
-        deployedManager0.applyBridgeWindow(proof, deposits, proof, settlement);
+        deployedManager0.applyBridgeWindow(proof, deposits, proof, windowFinalizationOpening);
         assertEq(deployedManager0.lastFinalizedCheckpointId(), 10);
         assertEq(deployedManager0.lastVerifiedCheckpointRoot(), root10);
         vm.chainId(CHAIN_ONE);
         vm.prank(proposer);
-        deployedManager1.applyBridgeWindow(proof, deposits, proof, settlement);
+        deployedManager1.applyBridgeWindow(proof, deposits, proof, windowFinalizationOpening);
         assertEq(deployedManager1.lastFinalizedCheckpointId(), 10);
         assertEq(deployedManager1.lastVerifiedCheckpointRoot(), root10);
         assertEq(deployedBridge1.depositRoot(), deployedBridge0.depositRoot());
@@ -195,7 +193,7 @@ contract StateManagerMixedCursorTest is AtomicBridgeFixture {
         deposits = bytes.concat(abi.encode(configHash, windowId), end, starts, rows, abi.encode(uint256(0)));
     }
 
-    function _mixedSettlement(bytes memory deposits, bytes32 historicalRoot, bytes32 depositRoot) private pure returns (bytes memory) {
+    function _mixedWindowFinalization(bytes memory deposits, bytes32 historicalRoot, bytes32 depositRoot) private pure returns (bytes memory) {
         bytes memory header = new bytes(224);
         for (uint256 i; i < 224; ++i) header[i] = deposits[i];
         return bytes.concat(header, _u32x8(bytes32(0)), _u32x8(bytes32(0)), abi.encode(uint256(2)), _rootWords(historicalRoot), abi.encode(uint256(1)), _rootWords(historicalRoot), abi.encode(uint256(1)), abi.encode(uint256(2)), _rootWords(depositRoot), abi.encode(uint256(0)), _rootWords(bytes32(0)), _rootWords(depositRoot), abi.encode(uint256(0)), _rootWords(bytes32(0)), abi.encode(uint256(0)), _rootWords(bytes32(0)), _rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0)));

@@ -76,7 +76,7 @@ library BridgeOpening {
     }
     struct FinalizationSlot { bytes32 startCheckpointRoot; uint32 checkpointCount; }
     struct FinalizationEndpoint { bytes32 depositRoot; uint32 depositCount; bytes32 withdrawalRoot; }
-    struct SettlementOpening {
+    struct WindowFinalizationOpening {
         bytes32 configHash;
         bytes32 windowId;
         uint64 endCheckpointId;
@@ -499,7 +499,7 @@ library BridgeOpening {
         return keccak256(abi.encodePacked(SOURCE_CHECKPOINT_REWARD_LEAF, body));
     }
 
-    function readSettlementOpening(bytes memory body, NetworkConfig memory config, bytes32 depositOpeningDigest) internal pure returns (SettlementOpening memory opening) {
+    function readWindowFinalizationOpening(bytes memory body, NetworkConfig memory config, bytes32 depositOpeningDigest) internal pure returns (WindowFinalizationOpening memory opening) {
         Cursor memory cursor;
         opening.configHash = bytes32(readWord(body, cursor));
         if (opening.configHash != config.configHash) revert InvalidConfig();
@@ -510,14 +510,14 @@ library BridgeOpening {
         opening.globalWithdrawalRoot = _readU32x8(body, cursor);
         opening.finalizations = _readFinalizations(body, cursor, config.chains.length);
         opening.endpoints = _readEndpoints(body, cursor, opening.finalizations.length);
-        opening.withdrawals = _readSettlementWithdrawals(body, cursor, config);
+        opening.withdrawals = _readWindowFinalizationWithdrawals(body, cursor, config);
         opening.oldRewardLedgerRoot = readRoot(body, cursor);
         opening.newRewardLedgerRoot = readRoot(body, cursor);
         opening.economicDomain = bytes32(readWord(body, cursor));
-        opening.rewards = _readSettlementRewards(body, cursor, config, opening.economicDomain, opening.oldRewardLedgerRoot, opening.newRewardLedgerRoot);
+        opening.rewards = _readWindowFinalizationRewards(body, cursor, config, opening.economicDomain, opening.oldRewardLedgerRoot, opening.newRewardLedgerRoot);
         if (cursor.offset != body.length) revert InvalidEncoding();
         opening.batchRoot = _batchRoot(opening);
-        opening.openingDigest = settlementOpeningDigest(opening, depositOpeningDigest);
+        opening.openingDigest = windowFinalizationOpeningDigest(opening, depositOpeningDigest);
     }
 
     function _readU32x8(bytes memory body, Cursor memory cursor) private pure returns (bytes32 packed) {
@@ -547,7 +547,7 @@ library BridgeOpening {
         }
     }
 
-    function _readSettlementWithdrawals(bytes memory body, Cursor memory cursor, NetworkConfig memory config) private pure returns (WithdrawalLeaf[] memory leaves) {
+    function _readWindowFinalizationWithdrawals(bytes memory body, Cursor memory cursor, NetworkConfig memory config) private pure returns (WithdrawalLeaf[] memory leaves) {
         uint256 count = readWord(body, cursor);
         if (count > MAX_SETTLEMENT_LEAVES || count > config.maxWithdrawals) revert InvalidCount();
         leaves = new WithdrawalLeaf[](count);
@@ -569,7 +569,7 @@ library BridgeOpening {
         }
     }
 
-    function _readSettlementRewards(bytes memory body, Cursor memory cursor, NetworkConfig memory config, bytes32 economicDomain, bytes32 oldRoot, bytes32 newRoot) private pure returns (SourceCheckpointRewardLeaf[] memory leaves) {
+    function _readWindowFinalizationRewards(bytes memory body, Cursor memory cursor, NetworkConfig memory config, bytes32 economicDomain, bytes32 oldRoot, bytes32 newRoot) private pure returns (SourceCheckpointRewardLeaf[] memory leaves) {
         uint256 count = readWord(body, cursor);
         if (count > MAX_SETTLEMENT_LEAVES || count > config.maxRewards) revert InvalidCount();
         if (count == 0 && oldRoot != newRoot) revert InvalidEncoding();
@@ -595,8 +595,8 @@ library BridgeOpening {
         revert InvalidConfig();
     }
 
-    function settlementOpeningDigest(SettlementOpening memory opening, bytes32 depositOpeningDigest) internal pure returns (bytes32) {
-        bytes memory body = abi.encodePacked(SETTLEMENT, opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), depositOpeningDigest, _u32x8Words(opening.globalDepositRoot), _u32x8Words(opening.globalWithdrawalRoot), bytes32(opening.finalizations.length));
+    function windowFinalizationOpeningDigest(WindowFinalizationOpening memory opening, bytes32 depositOpeningDigest) internal pure returns (bytes32) {
+        bytes memory body = abi.encodePacked(SETTLEMENT, opening.configHash, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), depositOpeningDigest, _u32x8Words(opening.globalDepositRoot), _u32x8Words(opening.globalWithdrawalRoot), bytes32(opening.finalizations.length));
         for (uint256 i; i < opening.finalizations.length; ++i) {
             body = bytes.concat(body, _hash4Words(opening.finalizations[i].startCheckpointRoot), bytes32(uint256(opening.finalizations[i].checkpointCount)));
         }
@@ -626,7 +626,7 @@ library BridgeOpening {
         return count == 0 ? 0 : (count + 31) / 32;
     }
 
-    function _batchRoot(SettlementOpening memory opening) private pure returns (bytes32) {
+    function _batchRoot(WindowFinalizationOpening memory opening) private pure returns (bytes32) {
         uint256 withdrawalChunks = _chunks(opening.withdrawals.length);
         uint256 batchCount = withdrawalChunks + _chunks(opening.rewards.length);
         uint256 width = 1;
@@ -648,7 +648,7 @@ library BridgeOpening {
         return ordinal < withdrawalChunks ? 2 : 3;
     }
 
-    function _batchCommit(SettlementOpening memory opening, uint256 ordinal, uint256 withdrawalChunks) private pure returns (bytes32) {
+    function _batchCommit(WindowFinalizationOpening memory opening, uint256 ordinal, uint256 withdrawalChunks) private pure returns (bytes32) {
         bool isWithdrawal = ordinal < withdrawalChunks;
         uint256 first = (isWithdrawal ? ordinal : ordinal - withdrawalChunks) * 32;
         uint256 available = isWithdrawal ? opening.withdrawals.length : opening.rewards.length;
@@ -669,7 +669,7 @@ library BridgeOpening {
         }
     }
 
-    function withdrawalFamilyDigest(SettlementOpening memory opening) internal pure returns (bytes32) {
+    function withdrawalFamilyDigest(WindowFinalizationOpening memory opening) internal pure returns (bytes32) {
         bytes memory body = abi.encodePacked(opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), bytes32(opening.endpoints.length));
         for (uint256 i; i < opening.endpoints.length; ++i) body = bytes.concat(body, _hash4Words(opening.endpoints[i].withdrawalRoot));
         body = bytes.concat(body, bytes32(opening.withdrawals.length));
@@ -680,7 +680,7 @@ library BridgeOpening {
         return keccak256(bytes.concat(WITHDRAWAL, body));
     }
 
-    function rewardFamilyDigest(SettlementOpening memory opening) internal pure returns (bytes32) {
+    function rewardFamilyDigest(WindowFinalizationOpening memory opening) internal pure returns (bytes32) {
         bytes memory body = abi.encodePacked(opening.configHash, opening.windowId, bytes32(uint256(opening.endCheckpointId)), _hash4Words(opening.endCheckpointRoot), bytes32(opening.rewards.length));
         for (uint256 i; i < opening.rewards.length; ++i) {
             SourceCheckpointRewardLeaf memory leaf = opening.rewards[i];
@@ -689,7 +689,7 @@ library BridgeOpening {
         return keccak256(bytes.concat(SOURCE_CHECKPOINT_REWARD_OPENING, body));
     }
 
-    function withdrawalPublicationHeader(SettlementOpening memory opening) internal pure returns (bytes memory header) {
+    function withdrawalPublicationHeader(WindowFinalizationOpening memory opening) internal pure returns (bytes memory header) {
         uint256 count = opening.withdrawals.length;
         bytes memory roots;
         for (uint256 i; i < opening.endpoints.length; ++i) roots = bytes.concat(roots, opening.endpoints[i].withdrawalRoot);

@@ -27,8 +27,8 @@ abstract contract AtomicBridgeFixture is Test {
     struct Window {
         uint256[8] depositProof;
         bytes deposits;
-        uint256[8] settlementProof;
-        bytes settlement;
+        uint256[8] windowFinalizationProof;
+        bytes windowFinalizationOpening;
     }
 
     function _deployAtomic(address owner, address proposer) internal {
@@ -73,11 +73,11 @@ abstract contract AtomicBridgeFixture is Test {
         w.deposits = bytes.concat(context, starts, deposits, abi.encode(leaves.length));
         for (uint256 i; i < leaves.length; ++i) w.deposits = bytes.concat(w.deposits, abi.encode(leaves[i]));
         uint64 startId = manager.lastFinalizedCheckpointId();
-        w.settlement = bytes.concat(context, _u32x8(bytes32(0)), _u32x8(bytes32(0)), abi.encode(uint256(1)), _rootWords(manager.lastVerifiedCheckpointRoot()), abi.encode(endId > startId ? uint256(endId - startId) : uint256(1)), abi.encode(uint256(1)), _rootWords(transition.newRoot), abi.encode(uint256(transition.newCount)), _rootWords(bytes32(0)), abi.encode(withdrawals.length));
-        for (uint256 i; i < withdrawals.length; ++i) w.settlement = bytes.concat(w.settlement, abi.encode(withdrawals[i]));
-        w.settlement = bytes.concat(w.settlement, _rootWords(bytes32(0)), _rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0)));
+        w.windowFinalizationOpening = bytes.concat(context, _u32x8(bytes32(0)), _u32x8(bytes32(0)), abi.encode(uint256(1)), _rootWords(manager.lastVerifiedCheckpointRoot()), abi.encode(endId > startId ? uint256(endId - startId) : uint256(1)), abi.encode(uint256(1)), _rootWords(transition.newRoot), abi.encode(uint256(transition.newCount)), _rootWords(bytes32(0)), abi.encode(withdrawals.length));
+        for (uint256 i; i < withdrawals.length; ++i) w.windowFinalizationOpening = bytes.concat(w.windowFinalizationOpening, abi.encode(withdrawals[i]));
+        w.windowFinalizationOpening = bytes.concat(w.windowFinalizationOpening, _rootWords(bytes32(0)), _rootWords(bytes32(0)), abi.encode(bytes32(0), uint256(0)));
         w.depositProof[0] = 1;
-        w.settlementProof[0] = 1;
+        w.windowFinalizationProof[0] = 1;
     }
 
     function _u32x8(bytes32 packed) internal pure returns (bytes memory) {
@@ -97,15 +97,15 @@ abstract contract AtomicBridgeFixture is Test {
     }
 
     function _apply(Window memory w) internal {
-        manager.applyBridgeWindow(w.depositProof, w.deposits, w.settlementProof, w.settlement);
+        manager.applyBridgeWindow(w.depositProof, w.deposits, w.windowFinalizationProof, w.windowFinalizationOpening);
     }
 
     function _claimWindow(Window memory w, uint256 ordinal) internal {
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(networkConfig);
         BridgeOpening.DepositAggregateOpening memory deposit = BridgeOpening.readDepositAggregate(w.deposits, config);
-        BridgeOpening.SettlementOpening memory settlement = BridgeOpening.readSettlementOpening(w.settlement, config, deposit.depositOpeningDigest);
-        bytes memory header = BridgeOpening.withdrawalPublicationHeader(settlement);
-        atomicBridge.claimAggregateWithdrawal(BridgeOpening.inclusionHeaderDigest(header), uint32(ordinal), abi.encode(settlement.withdrawals[ordinal]), _claimSiblings(settlement.withdrawals, ordinal));
+        BridgeOpening.WindowFinalizationOpening memory windowFinalization = BridgeOpening.readWindowFinalizationOpening(w.windowFinalizationOpening, config, deposit.depositOpeningDigest);
+        bytes memory header = BridgeOpening.withdrawalPublicationHeader(windowFinalization);
+        atomicBridge.claimAggregateWithdrawal(BridgeOpening.inclusionHeaderDigest(header), uint32(ordinal), abi.encode(windowFinalization.withdrawals[ordinal]), _claimSiblings(windowFinalization.withdrawals, ordinal));
     }
 
     function _claimSiblings(BridgeOpening.WithdrawalLeaf[] memory leaves, uint256 ordinal) internal pure returns (bytes32[] memory path) {

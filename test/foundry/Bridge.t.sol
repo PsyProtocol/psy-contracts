@@ -202,7 +202,7 @@ contract BridgeTest is AtomicBridgeFixture {
     function testClaimWithdrawalRejectsRecipientHighBits() public {
         (Bridge bridge,) = _setupBridgeSystem();
         Window memory w = _withdrawalWindow(user, address(0x1234), 1, bytes32(uint256(1)));
-        bytes memory opening = w.settlement;
+        bytes memory opening = w.windowFinalizationOpening;
         assembly ("memory-safe") { mstore(add(opening, 1376), shl(160, 1)) }
         vm.prank(owner);
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
@@ -271,16 +271,16 @@ contract BridgeTest is AtomicBridgeFixture {
         bridge.claimPendingWithdrawal(nonce);
     }
 
-    function testEmptySettlementStillRequiresProof() public {
+    function testEmptyWindowFinalizationStillRequiresProof() public {
         (Bridge bridge,) = _setupBridgeSystem();
         Window memory w = _emptyWindow(1, bytes32(uint256(1)));
-        w.settlementProof[0] = 0;
+        w.windowFinalizationProof[0] = 0;
         vm.prank(owner);
         vm.expectRevert(StateManager.InvalidProof.selector);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 0);
         assertEq(bridge.provedDepositCount(), 0);
-        w.settlementProof[0] = 1;
+        w.windowFinalizationProof[0] = 1;
         vm.prank(owner);
         _apply(w);
         assertEq(manager.lastFinalizedCheckpointId(), 1);

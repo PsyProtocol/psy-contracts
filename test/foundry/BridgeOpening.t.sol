@@ -38,6 +38,9 @@ contract BridgeOpeningHarness {
     function sourceCheckpointRewardLeafCommit(bytes calldata body) external pure returns (bytes32) {
         return BridgeOpening.sourceCheckpointRewardLeafCommit(body);
     }
+    function readWindowFinalizationOpening(bytes calldata config, bytes calldata opening, bytes32 depositOpeningDigest) external pure returns (BridgeOpening.WindowFinalizationOpening memory) {
+        return BridgeOpening.readWindowFinalizationOpening(opening, BridgeOpening.readConfig(config), depositOpeningDigest);
+    }
 }
 
 contract BridgeOpeningTest is Test {
@@ -617,6 +620,58 @@ contract BridgeOpeningTest is Test {
         bytes memory recipient = replaceWord(bytes.concat(body), 4, uint256(uint160(address(15))));
         vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
         harness.sourceCheckpointRewardLeafCommit(replaceWord(recipient, 5, 0));
+    }
+    function testParentDigestExcludesDirectWindowKeepsEncodedWindow() public view {
+        bytes memory deposits = depositOpening();
+        bytes memory header = new bytes(224);
+        for (uint256 i; i < header.length; ++i) header[i] = deposits[i];
+        bytes32 configHash = keccak256(bytes.concat(domain("Config"), configBytes()));
+        bytes32 windowId;
+        assembly ("memory-safe") { windowId := mload(add(header, 64)) }
+        bytes32 endRoot = bytes32((uint256(1) << 192) | (uint256(2) << 128) | (uint256(3) << 64) | 4);
+        bytes32 startRoot = endRoot;
+        bytes32 depositRoot = bytes32((uint256(5) << 192) | (uint256(6) << 128) | (uint256(7) << 64) | 8);
+        bytes32 withdrawalRoot = bytes32(0);
+        bytes32 ledgerRoot = bytes32(0);
+        bytes32 economic = bytes32(uint256(0xbb));
+        bytes memory encoded = bytes.concat(
+            header, _vectorU32x8(bytes32(0)), _vectorU32x8(bytes32(0)),
+            abi.encode(uint256(1)), _vectorRoot(startRoot), abi.encode(uint256(1)),
+            abi.encode(uint256(1)), _vectorRoot(depositRoot), abi.encode(uint256(0)), _vectorRoot(withdrawalRoot),
+            abi.encode(uint256(0)), _vectorRoot(ledgerRoot), _vectorRoot(ledgerRoot), abi.encode(economic, uint256(0))
+        );
+        bytes32 depositDigest = bytes32(uint256(0xcc));
+        BridgeOpening.WindowFinalizationOpening memory opening = harness.readWindowFinalizationOpening(configBytes(), encoded, depositDigest);
+        assertEq(opening.windowId, windowId);
+        assertEq(opening.configHash, configHash);
+        bytes32 batchRoot = keccak256(abi.encodePacked(keccak256("PsyBridge/TwoArtifact/2/Empty"), bytes32(uint256(0)), bytes32(uint256(0))));
+        bytes memory excluded = abi.encodePacked(keccak256("PsyBridge/TwoArtifact/2/B"), configHash, bytes32(uint256(0)), _vectorRoot(endRoot), depositDigest);
+        bytes memory included = abi.encodePacked(keccak256("PsyBridge/TwoArtifact/2/B"), configHash, windowId, bytes32(uint256(0)), _vectorRoot(endRoot), depositDigest);
+        assertEq(included.length, excluded.length + 32);
+        bytes32 expected = keccak256(bytes.concat(
+            excluded, _vectorU32x8(bytes32(0)), _vectorU32x8(bytes32(0)), abi.encode(uint256(1)),
+            _vectorRoot(startRoot), abi.encode(uint256(1)),
+            _vectorRoot(depositRoot), abi.encode(uint256(0)), _vectorRoot(withdrawalRoot),
+            abi.encode(uint256(0), uint256(0)), _vectorRoot(ledgerRoot), _vectorRoot(ledgerRoot),
+            abi.encode(economic, uint256(0), batchRoot)
+        ));
+        bytes32 stale = keccak256(bytes.concat(
+            included, _vectorU32x8(bytes32(0)), _vectorU32x8(bytes32(0)), abi.encode(uint256(1)),
+            _vectorRoot(startRoot), abi.encode(uint256(1)),
+            _vectorRoot(depositRoot), abi.encode(uint256(0)), _vectorRoot(withdrawalRoot),
+            abi.encode(uint256(0), uint256(0)), _vectorRoot(ledgerRoot), _vectorRoot(ledgerRoot),
+            abi.encode(economic, uint256(0), batchRoot)
+        ));
+        assertEq(opening.openingDigest, expected);
+        assertNotEq(expected, stale);
+    }
+    function _vectorRoot(bytes32 root) private pure returns (bytes memory) {
+        return abi.encode(uint64(uint256(root) >> 192), uint64(uint256(root) >> 128), uint64(uint256(root) >> 64), uint64(uint256(root)));
+    }
+    function _vectorU32x8(bytes32 packed) private pure returns (bytes memory) {
+        uint256 value = uint256(packed);
+        uint256 mask = type(uint32).max;
+        return abi.encode((value >> 224) & mask, (value >> 192) & mask, (value >> 160) & mask, (value >> 128) & mask, (value >> 96) & mask, (value >> 64) & mask, (value >> 32) & mask, value & mask);
     }
 
 }

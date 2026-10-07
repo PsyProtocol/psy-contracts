@@ -210,48 +210,48 @@ contract StateManager is OwnableUpgradeable {
 
     function applyBridgeWindow(
         uint256[8] calldata depositProof, bytes calldata depositOpening,
-        uint256[8] calldata settlementProof, bytes calldata settlementOpening
+        uint256[8] calldata windowFinalizationProof, bytes calldata windowFinalizationOpening
     ) external onlyProposer {
         if (_applyingAggregate) revert AggregateReentrancy();
         if (configHash == bytes32(0)) revert VerifierNotSet();
         BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(_aggregateConfig);
         BridgeOpening.localChain(config, l1ChainIndex, aggregateBridge, address(this));
         BridgeOpening.DepositAggregateOpening memory a = BridgeOpening.readDepositAggregate(depositOpening, config);
-        BridgeOpening.SettlementOpening memory settlement = BridgeOpening.readSettlementOpening(settlementOpening, config, a.depositOpeningDigest);
+        BridgeOpening.WindowFinalizationOpening memory windowFinalization = BridgeOpening.readWindowFinalizationOpening(windowFinalizationOpening, config, a.depositOpeningDigest);
         uint256 ordinal = BridgeOpening.chainOrdinal(config, l1ChainIndex);
         if (a.starts[ordinal].startCheckpointId != lastFinalizedCheckpointId || a.starts[ordinal].startCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
-        if (settlement.configHash != a.configHash || settlement.windowId != a.windowId || settlement.endCheckpointId != a.endCheckpointId || settlement.endCheckpointRoot != a.endCheckpointRoot) revert InvalidCheckpointContinuity();
+        if (windowFinalization.configHash != a.configHash || windowFinalization.windowId != a.windowId || windowFinalization.endCheckpointId != a.endCheckpointId || windowFinalization.endCheckpointRoot != a.endCheckpointRoot) revert InvalidCheckpointContinuity();
         if (a.endCheckpointId < lastFinalizedCheckpointId) revert InvalidCheckpointContinuity();
         bool advance = a.endCheckpointId > lastFinalizedCheckpointId;
         if (!advance && a.endCheckpointRoot != lastVerifiedCheckpointRoot) revert InvalidCheckpointContinuity();
         for (uint256 i; i < config.chains.length; ++i) {
-            _ensureFinalizationSlot(a.starts[i], settlement.finalizations[i], a.endCheckpointId, a.endCheckpointRoot);
-            if (settlement.endpoints[i].depositRoot != a.deposits[i].newRoot || settlement.endpoints[i].depositCount != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
+            _ensureFinalizationSlot(a.starts[i], windowFinalization.finalizations[i], a.endCheckpointId, a.endCheckpointRoot);
+            if (windowFinalization.endpoints[i].depositRoot != a.deposits[i].newRoot || windowFinalization.endpoints[i].depositCount != a.deposits[i].newCount) revert InvalidDepositMerkleProof();
         }
         if (depositVerifier.code.length == 0 || finalizeVerifier.code.length == 0) revert VerifierNotSet();
-        if (_zeroProof(depositProof) || _zeroProof(settlementProof)) revert InvalidProof();
+        if (_zeroProof(depositProof) || _zeroProof(windowFinalizationProof)) revert InvalidProof();
         IAggregateVerifier(depositVerifier).verifyProof(depositProof, BridgeOpening.proofInputs(a.depositOpeningDigest));
-        IAggregateVerifier(finalizeVerifier).verifyProof(settlementProof, BridgeOpening.proofInputs(settlement.openingDigest));
+        IAggregateVerifier(finalizeVerifier).verifyProof(windowFinalizationProof, BridgeOpening.proofInputs(windowFinalization.openingDigest));
         if (appliedWindowByEndCheckpointId[a.endCheckpointId].isApplied) revert InvalidCheckpointContinuity();
         IAggregateBridge bridge = IAggregateBridge(aggregateBridge);
         if (bridge.configHash() != configHash) revert InvalidDepositMerkleProof();
         _applyingAggregate = true;
         bridge.applyDepositAggregate(depositOpening);
-        bridge.publishClaimHeader(BridgeOpening.withdrawalPublicationHeader(settlement));
+        bridge.publishClaimHeader(BridgeOpening.withdrawalPublicationHeader(windowFinalization));
         if (advance) {
             lastFinalizedCheckpointId = a.endCheckpointId;
             lastVerifiedCheckpointRoot = a.endCheckpointRoot;
-            lastVerifiedDepositTreeRoot = settlement.globalDepositRoot;
-            lastVerifiedWithdrawalTreeRoot = settlement.globalWithdrawalRoot;
+            lastVerifiedDepositTreeRoot = windowFinalization.globalDepositRoot;
+            lastVerifiedWithdrawalTreeRoot = windowFinalization.globalWithdrawalRoot;
             emit Finalized(a.endCheckpointId, a.endCheckpointRoot, lastVerifiedDepositTreeRoot, lastVerifiedWithdrawalTreeRoot);
         }
         if (depositSubtreeRoot != a.deposits[ordinal].newRoot) depositSubtreeRoot = a.deposits[ordinal].newRoot;
         if (depositCount != a.deposits[ordinal].newCount) depositCount = a.deposits[ordinal].newCount;
-        appliedWindowByEndCheckpointId[a.endCheckpointId] = AppliedWindow({windowId: settlement.windowId, isApplied: true});
+        appliedWindowByEndCheckpointId[a.endCheckpointId] = AppliedWindow({windowId: windowFinalization.windowId, isApplied: true});
         _applyingAggregate = false;
-        emit WithdrawalAggregateApplied(BridgeOpening.withdrawalFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
-        if (l1ChainIndex == config.ethereumIndex) emit RewardAggregateApplied(BridgeOpening.rewardFamilyDigest(settlement), a.endCheckpointId, a.endCheckpointRoot);
-        emit SettlementAggregateApplied(settlement.openingDigest, settlement.windowId, a.endCheckpointId, a.endCheckpointRoot, settlement.batchRoot);
+        emit WithdrawalAggregateApplied(BridgeOpening.withdrawalFamilyDigest(windowFinalization), a.endCheckpointId, a.endCheckpointRoot);
+        if (l1ChainIndex == config.ethereumIndex) emit RewardAggregateApplied(BridgeOpening.rewardFamilyDigest(windowFinalization), a.endCheckpointId, a.endCheckpointRoot);
+        emit SettlementAggregateApplied(windowFinalization.openingDigest, windowFinalization.windowId, a.endCheckpointId, a.endCheckpointRoot, windowFinalization.batchRoot);
     }
 
     function _ensureFinalizationSlot(BridgeOpening.ChainStart memory start, BridgeOpening.FinalizationSlot memory slot, uint64 endCheckpointId, bytes32 endCheckpointRoot) private pure {

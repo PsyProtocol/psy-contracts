@@ -42,7 +42,7 @@ export async function buildBridgeWindow(stateManager: Contract, bridge: Contract
   const depositOpening = ethers.utils.hexConcat([header, starts, deposits, word(0)]);
   const span = endId > startId ? endId - startId : 1n;
   const zeroRoot = words(rootWords(ethers.constants.HashZero));
-  const settlementOpening = ethers.utils.hexConcat([
+  const windowFinalizationOpening = ethers.utils.hexConcat([
     header, words(new Array<bigint>(8).fill(0n)), words(new Array<bigint>(8).fill(0n)), word(1),
     words(rootWords(startRoot)), word(span), word(1), words(rootWords(depositRoot)), word(depositCount),
     zeroRoot, word(withdrawals.length),
@@ -51,7 +51,7 @@ export async function buildBridgeWindow(stateManager: Contract, bridge: Contract
     ])),
     zeroRoot, zeroRoot, word(0), word(0),
   ]);
-  return [ORCHESTRATION_PROOF, depositOpening, ORCHESTRATION_PROOF, settlementOpening];
+  return [ORCHESTRATION_PROOF, depositOpening, ORCHESTRATION_PROOF, windowFinalizationOpening];
 }
 
 const LEAF = ethers.utils.id("PsyBridge/TwoArtifact/1/Leaf");
