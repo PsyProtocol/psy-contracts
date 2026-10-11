@@ -24,6 +24,11 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 - Optimizer enabled (`runs=200`)
 - Hardhat source path points to `src/` to share the same contracts with Foundry
 
+## Reward payer
+
+`EthereumRewardPayer` pays only when its caller is the configured `StateManager`. The shared setup JSON must contain `network_config` and `circuit_set` as lowercase hex without `0x`, plus `sources.node_source`, `sources.native_source`, `sources.plonky2_source`, and `sources.wrapper_source`. `withdrawal_policies` is ignored. `forge test -C . --match-contract EthereumRewardPayer` is the payer component test. No reward-only L1 entry is deployed here, so this section is not an operational payout command.
+
+
 ## Contract Verification
 
 After deployment, verify contracts on Etherscan:
