@@ -19,19 +19,25 @@ export type TokenFlowConfigUpdate = {
 };
 export type ForceWithdrawalClaim = {
   target: string;
+  senderUserId: number;
+  tokenContractId: number;
   nonce: string;
   data: string;
 };
 
 export function buildForceWithdrawalClaim(
   bridge: Contract,
+  senderUserId: number,
+  tokenContractId: number,
   nonce: string,
 ): ForceWithdrawalClaim {
   const normalizedNonce = ethers.utils.hexZeroPad(nonce, 32);
   return {
     target: bridge.address,
+    senderUserId,
+    tokenContractId,
     nonce: normalizedNonce,
-    data: bridge.interface.encodeFunctionData("forceClaimWithdrawal", [normalizedNonce]),
+    data: bridge.interface.encodeFunctionData("forceClaimWithdrawal", [senderUserId, tokenContractId, normalizedNonce]),
   };
 }
 

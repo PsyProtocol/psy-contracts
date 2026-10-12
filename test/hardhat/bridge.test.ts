@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { buildBridgeWindow, registerWithdrawal, word } from "./helpers/withdrawalClaim";
+import { buildBridgeOpeningCall, installWithdrawalToken, registerWithdrawal, scopedKey, word } from "./helpers/withdrawalClaim";
 
 describe("Bridge atomic withdrawal orchestration (mock verifier, not cryptographic acceptance)", function () {
   it("disables direct recordDeposit entrypoint", async function () {
@@ -13,46 +13,63 @@ describe("Bridge atomic withdrawal orchestration (mock verifier, not cryptograph
 
   it("registers a pending withdrawal before a separate permissionless claim", async function () {
     const [owner, user, keeper] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address);
+    const { bridge, stateManager, verifier } = await deployCoreSystem(owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Mock", "MOCK");
     await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, stateManager, token.address, 1);
     await token.mint(bridge.address, 777);
-    const nonce = await registerWithdrawal({ bridge, stateManager, recipient: user.address, token: token.address, amount: 777n, nonce: 42n });
+    const record = await registerWithdrawal({ bridge, stateManager, recipient: user.address, tokenContractId: 1, amount: 777n, nonce: 42n });
     expect(await token.balanceOf(user.address)).to.equal(0);
-    expect(await bridge.claimedNullifiers(nonce)).to.equal(true);
-    expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(777);
-    await bridge.connect(keeper).claimPendingWithdrawal(nonce);
+    expect(await bridge.claimedWithdrawals(record.key)).to.equal(false);
+    expect((await bridge.scopedPendingWithdrawals(record.key)).amount).to.equal(777);
+    await bridge.connect(keeper).claimPendingWithdrawal(record.senderUserId, record.tokenContractId, record.nonce);
     expect(await token.balanceOf(user.address)).to.equal(777);
-    expect((await bridge.pendingWithdrawals(nonce)).amount).to.equal(0);
+    expect(await bridge.claimedWithdrawals(record.key)).to.equal(true);
+    expect((await bridge.scopedPendingWithdrawals(record.key)).amount).to.equal(0);
   });
 
-  it("rejects duplicate nullifiers and rolls the checkpoint back", async function () {
+  it("skips an already registered withdrawal without consuming it again", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address);
-    await configureFlowToken(bridge, owner.address);
-    const withdrawal = { bridge, stateManager, recipient: user.address, token: owner.address, amount: 333n, nonce: 77n };
-    await registerWithdrawal(withdrawal);
-    await expect(registerWithdrawal(withdrawal)).to.be.revertedWithCustomError(bridge, "NullifierAlreadyClaimed");
+    const { bridge, stateManager, verifier } = await deployCoreSystem(owner.address);
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Mock", "MOCK");
+    await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, stateManager, token.address, 1);
+    const withdrawal = { bridge, stateManager, recipient: user.address, tokenContractId: 1, amount: 333n, nonce: 77n };
+    const record = await registerWithdrawal(withdrawal);
+    const pending = await bridge.scopedPendingWithdrawals(record.key);
+    await expect(registerWithdrawal(withdrawal))
+      .to.emit(bridge, "WithdrawalSkipped")
+      .withArgs(record.key, 1);
     expect(await stateManager.lastFinalizedCheckpointId()).to.equal(1);
-    expect(await bridge.totalWithdrawalAmount(owner.address)).to.equal(333);
+    expect(await bridge.claimedWithdrawals(record.key)).to.equal(true);
+    const pendingAfter = await bridge.scopedPendingWithdrawals(record.key);
+    expect(pendingAfter.amount).to.equal(pending.amount);
+    expect(pendingAfter.claimableAt).to.equal(pending.claimableAt);
+    expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(333);
   });
 
   it("rejects a destination absent from the configured chain set", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address);
-    const args = await buildBridgeWindow(stateManager, bridge, [{ recipient: user.address, token: owner.address, amount: 444n, nonce: 78n, destinationChainIndex: 1 }]);
-    await expect(stateManager.applyBridgeWindow(...args)).to.be.reverted;
-    expect(await bridge.claimedNullifiers(word(78))).to.equal(false);
+    const { bridge, stateManager, verifier } = await deployCoreSystem(owner.address);
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Mock", "MOCK");
+    await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, stateManager, token.address, 1);
+    const args = await buildBridgeOpeningCall(stateManager, bridge, [{ recipient: user.address, tokenContractId: 1, amount: 444n, nonce: 78n, destinationChainIndex: 1 }]);
+    await expect(stateManager.applyBridgeOpening(...args)).to.be.reverted;
+    expect(await bridge.claimedWithdrawals(scopedKey(0, 1, word(78)))).to.equal(false);
     expect(await stateManager.lastFinalizedCheckpointId()).to.equal(0);
   });
 
   it("rejects a withdrawal opening bound to another checkpoint", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address);
-    const args = await buildBridgeWindow(stateManager, bridge, [{ recipient: user.address, token: owner.address, amount: 555n, nonce: 79n }]);
-    const opening = args[3] as string;
-    args[3] = ethers.utils.hexConcat([ethers.utils.hexDataSlice(opening, 0, 64), word(2), ethers.utils.hexDataSlice(opening, 96)]);
-    await expect(stateManager.applyBridgeWindow(...args)).to.be.revertedWithCustomError(stateManager, "InvalidCheckpointContinuity");
-    expect(await bridge.claimedNullifiers(word(79))).to.equal(false);
+    const { bridge, stateManager, verifier } = await deployCoreSystem(owner.address);
+    const token = await (await ethers.getContractFactory("MockERC20")).deploy("Mock", "MOCK");
+    await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, stateManager, token.address, 1);
+    const args = await buildBridgeOpeningCall(stateManager, bridge, [{ recipient: user.address, tokenContractId: 1, amount: 555n, nonce: 79n }]);
+    const opening = args[1] as string;
+    args[1] = ethers.utils.hexConcat([ethers.utils.hexDataSlice(opening, 0, 64), word(2), ethers.utils.hexDataSlice(opening, 96)]);
+    await expect(stateManager.applyBridgeOpening(...args)).to.be.revertedWithCustomError(stateManager, "InvalidCheckpointContinuity");
+    expect(await bridge.claimedWithdrawals(scopedKey(0, 1, word(79)))).to.equal(false);
   });
 });

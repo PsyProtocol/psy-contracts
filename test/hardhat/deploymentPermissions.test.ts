@@ -6,7 +6,7 @@ import {
   getContractAddress,
   hexZeroPad,
 } from "./helpers/deploySystem";
-import { buildBridgeWindow, ZERO_PROOF } from "./helpers/withdrawalClaim";
+import { buildBridgeOpeningCall, ZERO_PROOF } from "./helpers/withdrawalClaim";
 
 describe("Deployed Permission Configuration", function () {
   it("matches expected permissions after running deploy scripts", async function () {
@@ -59,10 +59,9 @@ describe("Deployed Permission Configuration", function () {
     ).to.not.be.reverted;
 
     // 4) Proposer gate on the atomic window, and a zero-proof window stays invalid
-    const window = await buildBridgeWindow(sm, bridge);
+    const window = await buildBridgeOpeningCall(sm, bridge);
     window[0] = ZERO_PROOF;
-    window[2] = ZERO_PROOF;
-    await expect(sm.connect(outsider).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "OnlyProposer");
-    await expect(sm.connect(proposer).applyBridgeWindow(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
+    await expect(sm.connect(outsider).applyBridgeOpening(...window)).to.be.revertedWithCustomError(sm, "OnlyProposer");
+    await expect(sm.connect(proposer).applyBridgeOpening(...window)).to.be.revertedWithCustomError(sm, "InvalidProof");
   });
 });

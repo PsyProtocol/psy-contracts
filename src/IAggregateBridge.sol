@@ -7,6 +7,6 @@ interface IAggregateBridge {
     function configHash() external view returns (bytes32);
     function depositRoot() external view returns (bytes32);
     function provedDepositCount() external view returns (uint256);
-    function applyDepositAggregate(bytes calldata completeOpening) external;
-    function publishClaimHeader(bytes calldata headerBytes) external;
+    function applyDepositAggregate(BridgeOpening.BridgeChainRow calldata row, BridgeOpening.DepositLeaf[] calldata leaves, bytes32 openingDigest) external;
+    function applyWithdrawals(BridgeOpening.WithdrawalBurnRecord[] calldata records) external;
 }

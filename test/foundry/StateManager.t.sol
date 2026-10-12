@@ -13,7 +13,7 @@ contract StateManagerTest is AtomicBridgeFixture {
 
     function testOnlyProposerCanFinalize() public {
         _deployAtomic(owner, proposer);
-        Window memory w = _emptyWindow(1, bytes32(uint256(1)));
+        Opening memory w = _emptyOpening(1, bytes32(uint256(1)));
         vm.prank(other);
         vm.expectRevert(StateManager.OnlyProposer.selector);
         _apply(w);
@@ -37,7 +37,7 @@ contract StateManagerTest is AtomicBridgeFixture {
 
     function testForceSetStateRestoresFieldsLeavesMappingsAndRetryIsNoOp() public {
         _deployAtomic(owner, proposer);
-        Window memory w = _emptyWindow(1, bytes32(uint256(2)));
+        Opening memory w = _emptyOpening(1, bytes32(uint256(2)));
         vm.prank(proposer);
         _apply(w);
         bytes32 knownDepositRoot = bytes32(uint256(0xD0));
@@ -73,7 +73,7 @@ contract StateManagerTest is AtomicBridgeFixture {
         vm.prank(other);
         vm.expectRevert(StateManager.UnauthorizedStateManagerAdmin.selector);
         manager.forceSetState(initial, initial);
-        Window memory w = _emptyWindow(1, bytes32(uint256(2)));
+        Opening memory w = _emptyOpening(1, bytes32(uint256(2)));
         vm.prank(proposer);
         _apply(w);
         StateManager.StateManagerContractState memory current = _stateManagerContractState(1, 2, uint256(manager.lastVerifiedDepositTreeRoot()), uint256(manager.lastVerifiedWithdrawalTreeRoot()), uint256(manager.withdrawalSubtreeRoot()));

@@ -66,6 +66,9 @@ contract RouterGatewayTest is AtomicBridgeFixture {
         vm.stopPrank();
         assertEq(token.balanceOf(address(bridge)), 500);
         assertEq(bridge.pendingDepositCount(), 1);
+        assertFalse(bridge.claimedWithdrawals(keccak256(abi.encode(uint32(0), uint32(1), bytes32(uint256(1))))));
+        (,, uint256 pending,) = bridge.scopedPendingWithdrawals(keccak256(abi.encode(uint32(0), uint32(1), bytes32(uint256(1)))));
+        assertEq(pending, 0);
     }
     function testRouterETHDepositPath() public {
         (, Bridge bridge, Router router,, ETHGateway ethg, MockWETH weth) = _deployAll();
@@ -77,6 +80,9 @@ contract RouterGatewayTest is AtomicBridgeFixture {
         router.deposit{value: 1 ether}(address(0), 1 ether, bytes32(uint256(7)), bytes32(uint256(2)));
         assertEq(weth.balanceOf(address(bridge)), 1 ether);
         assertEq(bridge.pendingDepositCount(), 1);
+        assertFalse(bridge.claimedWithdrawals(keccak256(abi.encode(uint32(0), uint32(3), bytes32(uint256(2))))));
+        (,, uint256 pending,) = bridge.scopedPendingWithdrawals(keccak256(abi.encode(uint32(0), uint32(3), bytes32(uint256(2)))));
+        assertEq(pending, 0);
         assertEq(ethg.weth(), address(weth));
     }
 }

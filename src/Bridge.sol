@@ -17,6 +17,15 @@ interface IPsyAddressesProviderView {
     function getAddress(bytes32 id) external view returns (address);
 }
 
+interface IStateManagerApplication {
+    function applyingAggregate() external view returns (bool);
+    function openingVerifier() external view returns (address);
+}
+
+interface IOpeningTokenPolicy {
+    function withdrawalTokenPolicyHash(uint8 chainIndex, uint32 contractId) external view returns (bytes32);
+}
+
 
 interface IRouterView {
     function tokenToGateway(address token) external view returns (address);
@@ -38,7 +47,7 @@ interface IPsyACLManagerBridge {
 
 contract Bridge is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant VERSION = 5;
+    uint256 public constant VERSION = 6;
     uint8 internal constant PAUSE_DEPOSITS = 1 << 0;
     uint8 internal constant PAUSE_WITHDRAWAL_REGISTRATION = 1 << 1;
     uint8 internal constant PAUSE_PENDING_CLAIMS = 1 << 2;
@@ -88,7 +97,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
 
     address public addressesProvider;
-    mapping(bytes32 => bool) public claimedNullifiers;
+    mapping(bytes32 => bool) private _reservedClaimedNullifiers;
     bytes32[32] internal _depositFrontier;
     bytes32 public depositRoot;
     uint256 public provedDepositCount;
@@ -101,7 +110,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     // Storage imported from the predecessor implementation is append-only after withdrawalClaimVerifier.
     mapping(address => ImportedTokenFlowConfig) private _importedTokenFlowConfigs;
     mapping(address => bytes32) private _reservedDepositBucketSlot;
-    mapping(bytes32 => PendingWithdrawal) public pendingWithdrawals;
+    mapping(bytes32 => PendingWithdrawal) private _reservedPendingWithdrawals;
     mapping(address => uint8) private _tokenPauseFlags;
     uint8 private _globalPauseFlags;
     // Governed storage is append-only after the imported storage above.
@@ -565,84 +574,110 @@ contract Bridge is Initializable, OwnableUpgradeable {
         return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
     }
 
-    function applyDepositAggregate(bytes calldata completeOpening) external {
+    function applyDepositAggregate(BridgeOpening.BridgeChainRow calldata row, BridgeOpening.DepositLeaf[] calldata leaves, bytes32 openingDigest) external withdrawalGuard {
         if (configHash == bytes32(0) || msg.sender != aggregateStateManager) revert OnlyStateManager();
-        BridgeOpening.NetworkConfig memory config = BridgeOpening.readConfig(_aggregateConfig);
-        BridgeOpening.localChain(config, l1ChainIndex, address(this), aggregateStateManager);
-        BridgeOpening.DepositAggregateOpening memory a = BridgeOpening.readDepositAggregate(completeOpening, config);
-        BridgeOpening.DepositTransition memory transition = a.deposits[BridgeOpening.chainOrdinal(config, l1ChainIndex)];
-        if (transition.newCount > pendingDepositCount) revert InvalidBatchRange();
-        for (uint256 i; i < a.depositLeaves.length; ++i) {
-            BridgeOpening.DepositLeaf memory leaf = a.depositLeaves[i];
+        if (row.chainIndex != l1ChainIndex) revert WrongDestinationChain();
+        if (row.newCount > pendingDepositCount) revert InvalidBatchRange();
+        if (depositRoot != row.oldDepositRoot || provedDepositCount != row.oldCount) revert DepositRootMismatch();
+        for (uint256 i; i < leaves.length; ++i) {
+            BridgeOpening.DepositLeaf calldata leaf = leaves[i];
             if (leaf.chainIndex != l1ChainIndex) continue;
-            bytes32 custodyHash = _computeDepositLeafHash(leaf.shieldAddress, _addressToBytes32(leaf.token), leaf.l2TokenContractId, leaf.amount, leaf.chainIndex, leaf.noteCommitment);
-            if (custodyHash != depositLeafHashes[leaf.absoluteIndex]) revert DepositBatchCommitMismatch();
+            bytes32 leafHash = _computeDepositLeafHash(leaf.shieldAddress, _addressToBytes32(leaf.token), leaf.l2TokenContractId, leaf.amount, leaf.chainIndex, leaf.noteCommitment);
+            if (leafHash != depositLeafHashes[leaf.absoluteIndex]) revert DepositBatchCommitMismatch();
         }
-        if (depositRoot == transition.newRoot && provedDepositCount == transition.newCount) {
-            emit DepositAggregateApplied(a.depositOpeningDigest, transition.newCount, transition.newRoot);
-            return;
-        }
-        if (depositRoot != transition.oldRoot || provedDepositCount != transition.oldCount) revert DepositRootMismatch();
-        depositRoot = transition.newRoot;
-        provedDepositCount = transition.newCount;
-        emit DepositAggregateApplied(a.depositOpeningDigest, transition.newCount, transition.newRoot);
+        depositRoot = row.newDepositRoot;
+        provedDepositCount = row.newCount;
+        emit DepositAggregateApplied(openingDigest, row.newCount, row.newDepositRoot);
     }
 
-    mapping(bytes32 => bytes) private publishedClaimHeader;
-    bool private withdrawalClaimEntered;
-
-    event InclusionAggregateRootPublished(bytes32 indexed headerDigest, uint8 indexed family, bytes32 indexed windowId, uint32 segmentIndex, bytes32 claimTreeRoot, uint32 count, uint64 endCheckpointId);
-
-    function publishClaimHeader(bytes calldata headerBytes) external {
+    function applyWithdrawals(BridgeOpening.WithdrawalBurnRecord[] calldata records) external withdrawalGuard {
         if (configHash == bytes32(0) || msg.sender != aggregateStateManager) revert OnlyStateManager();
-        bytes32 digest = BridgeOpening.inclusionHeaderDigest(headerBytes);
-        bytes memory stored = publishedClaimHeader[digest];
-        if (stored.length != 0) {
-            if (keccak256(stored) != keccak256(headerBytes)) revert InvalidWithdrawalProof();
-            return;
+        if (records.length > 32) revert InvalidRealCount();
+        for (uint256 i; i < records.length; ++i) {
+            BridgeOpening.WithdrawalBurnRecord calldata record = records[i];
+            if (record.chainIndex != l1ChainIndex) continue;
+            WithdrawalTokenPolicy storage policy = withdrawalTokenPolicies[record.contractId];
+            if (!policy.configured) revert UnknownWithdrawalToken(record.contractId);
+            address token = policy.token;
+            address verifier = IStateManagerApplication(aggregateStateManager).openingVerifier();
+            if (IOpeningTokenPolicy(verifier).withdrawalTokenPolicyHash(l1ChainIndex, record.contractId) != policy.policyHash) revert InvalidWithdrawalTokenPolicy();
+            if (record.amount == 0 || record.amount >= GOLDILOCKS_PRIME || record.recipient == address(0)) revert InvalidWithdrawalAmount(record.amount);
+            bytes32 key = _withdrawalKey(record.userId, record.contractId, record.nonce);
+            if (claimedWithdrawals[key]) {
+                emit WithdrawalSkipped(key, 1);
+                continue;
+            }
+            try this.registerWithdrawal(key, token, record.recipient, record.amount) {} catch {
+                emit WithdrawalSkipped(key, 2);
+            }
         }
-        BridgeOpening.InclusionAggregateHeader memory header = BridgeOpening.readInclusionAggregateHeader(headerBytes);
-        if (header.configHash != configHash || header.family != BridgeOpening.WITHDRAWAL_PUBLICATION_FAMILY) revert InvalidWithdrawalProof();
-        publishedClaimHeader[digest] = headerBytes;
-        emit InclusionAggregateRootPublished(digest, header.family, header.windowId, header.segmentIndex, header.claimTreeRoot, header.count, header.endCheckpointId);
     }
 
-    function claimAggregateWithdrawal(bytes32 headerDigest, uint32 ordinal, bytes calldata leafBytes, bytes32[] calldata siblings) external {
-        if (withdrawalClaimEntered) revert InvalidWithdrawalProof();
-        bytes memory headerBytes = publishedClaimHeader[headerDigest];
-        if (headerBytes.length == 0) revert InvalidWithdrawalProof();
-        BridgeOpening.InclusionAggregateHeader memory header = BridgeOpening.readInclusionAggregateHeader(headerBytes);
-        if (ordinal < header.firstOrdinal) revert InvalidWithdrawalProof();
-        uint32 localOrdinal = ordinal - header.firstOrdinal;
-        BridgeOpening.WithdrawalLeaf memory leaf = BridgeOpening.readWithdrawalLeaf(leafBytes);
-        if (leaf.chainIndex != l1ChainIndex) revert WrongDestinationChain();
-        BridgeOpening.verifyClaimPath(header, localOrdinal, BridgeOpening.withdrawalLeafCommit(leafBytes), siblings);
-        if (claimedNullifiers[leaf.nonce]) revert NullifierAlreadyClaimed();
+    function registerWithdrawal(bytes32 key, address token, address recipient, uint256 amount) external {
+        if (msg.sender != address(this) || !withdrawalClaimEntered) revert OnlyStateManager();
+        _registerPendingWithdrawal(key, token, recipient, amount);
+        claimedWithdrawals[key] = true;
+    }
+
+    mapping(bytes32 => bytes) private _reservedClaimHeaders;
+    bool private withdrawalClaimEntered;
+    mapping(bytes32 => bool) public claimedWithdrawals;
+    mapping(bytes32 => PendingWithdrawal) public scopedPendingWithdrawals;
+
+    struct WithdrawalTokenPolicy {
+        address token;
+        bytes32 policyHash;
+        bool configured;
+    }
+    mapping(uint32 => WithdrawalTokenPolicy) public withdrawalTokenPolicies;
+    error UnknownWithdrawalToken(uint32 contractId);
+    error InvalidWithdrawalTokenPolicy();
+    event WithdrawalTokenInstalled(uint32 indexed contractId, address token, bytes32 approvedContractLeaf, uint32 mapBase, uint32 capacity, uint8 height);
+
+    function installWithdrawalToken(uint32 contractId, address token, bytes32 approvedContractLeaf, uint32 mapBase, uint32 capacity, uint8 height) external onlyBridgeAdmin withdrawalGuard {
+        if (contractId >= 1 << 24 || approvedContractLeaf == bytes32(0) || capacity == 0 || uint256(mapBase) + capacity >= 1 << 32 || height != 32 || withdrawalTokenPolicies[contractId].configured) revert InvalidWithdrawalTokenPolicy();
+        bytes32 policyHash = keccak256(abi.encode(l1ChainIndex, contractId, token, approvedContractLeaf, mapBase, capacity, height));
+        address verifier = IStateManagerApplication(aggregateStateManager).openingVerifier();
+        if (IOpeningTokenPolicy(verifier).withdrawalTokenPolicyHash(l1ChainIndex, contractId) != policyHash) revert InvalidWithdrawalTokenPolicy();
+        withdrawalTokenPolicies[contractId] = WithdrawalTokenPolicy(token, policyHash, true);
+        emit WithdrawalTokenInstalled(contractId, token, approvedContractLeaf, mapBase, capacity, height);
+    }
+
+    event WithdrawalSkipped(bytes32 indexed withdrawalKey, uint8 reason);
+    event WithdrawalSettled(uint8 namespace, bytes32 storageKey, address recipient, uint256 amount);
+
+    modifier withdrawalGuard() {
+        if (withdrawalClaimEntered || (msg.sender != aggregateStateManager && aggregateStateManager.code.length != 0 && IStateManagerApplication(aggregateStateManager).applyingAggregate())) revert InvalidWithdrawalProof();
         withdrawalClaimEntered = true;
-        _registerPendingWithdrawal(leaf.nonce, leaf.token, leaf.recipient, leaf.amount);
-        claimedNullifiers[leaf.nonce] = true;
+        _;
         withdrawalClaimEntered = false;
     }
 
-    function claimPendingWithdrawal(bytes32 nonce) external {
-        PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
-        if (block.timestamp < pending.claimableAt) {
-            revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
-        }
-        _settlePendingWithdrawal(nonce, pending);
+    function _withdrawalKey(uint32 senderUserId, uint32 tokenContractId, bytes32 nonce) private pure returns (bytes32) {
+        return keccak256(abi.encode(senderUserId, tokenContractId, nonce));
     }
 
-    function forceClaimWithdrawal(bytes32 nonce) external {
+    function claimPendingWithdrawal(uint32 senderUserId, uint32 tokenContractId, bytes32 nonce) external withdrawalGuard {
+        bytes32 key = _withdrawalKey(senderUserId, tokenContractId, nonce);
+        PendingWithdrawal memory pending = _loadPendingWithdrawal(key);
+        if (block.timestamp < pending.claimableAt) {
+            revert PendingWithdrawalNotClaimable(key, pending.claimableAt);
+        }
+        _settlePendingWithdrawal(key, pending);
+    }
+
+    function forceClaimWithdrawal(uint32 senderUserId, uint32 tokenContractId, bytes32 nonce) external withdrawalGuard {
         if (msg.sender != withdrawalForceClaimExecutor) {
             revert UnauthorizedWithdrawalForceClaimExecutor(msg.sender);
         }
-        PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
-        _settlePendingWithdrawal(nonce, pending);
-        emit WithdrawalForceClaimed(nonce, msg.sender);
+        bytes32 key = _withdrawalKey(senderUserId, tokenContractId, nonce);
+        PendingWithdrawal memory pending = _loadPendingWithdrawal(key);
+        _settlePendingWithdrawal(key, pending);
+        emit WithdrawalForceClaimed(key, msg.sender);
     }
 
     function _loadPendingWithdrawal(bytes32 nonce) internal view returns (PendingWithdrawal memory pending) {
-        pending = pendingWithdrawals[nonce];
+        pending = scopedPendingWithdrawals[nonce];
         if (pending.amount == 0) revert PendingWithdrawalNotFound(nonce);
         if ((_effectivePauseFlags(pending.token) & PAUSE_PENDING_CLAIMS) != 0) {
             revert PendingClaimsPaused(pending.token);
@@ -650,7 +685,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
 
     function _settlePendingWithdrawal(bytes32 nonce, PendingWithdrawal memory pending) internal {
-        delete pendingWithdrawals[nonce];
+        delete scopedPendingWithdrawals[nonce];
         if (pending.token == address(0)) {
             IWETHWithdraw(_nativeWithdrawalAsset()).withdraw(pending.amount);
             (bool ok,) = payable(pending.recipient).call{value: pending.amount}("");
@@ -658,7 +693,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         } else {
             IERC20(pending.token).safeTransfer(pending.recipient, pending.amount);
         }
-        emit WithdrawalClaimed(nonce, pending.recipient, pending.token, pending.amount);
+        emit WithdrawalSettled(1, nonce, pending.recipient, pending.amount);
     }
 
 
@@ -690,7 +725,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if (claimTime > type(uint64).max) revert ClaimableAtOverflow();
 
         _totalWithdrawalAmounts[token] = nextTotal;
-        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
+        scopedPendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
         emit WithdrawalPendingCreated(nonce, token, recipient, amount, uint64(claimTime));
     }
 

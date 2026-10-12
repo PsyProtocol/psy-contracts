@@ -1,12 +1,11 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { registerWithdrawal } from "./helpers/withdrawalClaim";
+import { installWithdrawalToken, registerWithdrawal } from "./helpers/withdrawalClaim";
 
 describe("Multicall3 claim", function () {
   it("batches pending withdrawal claims through Multicall3", async function () {
-    const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, verifier } = await deployCoreSystem(owner.address, owner.address);
 
     const M = await ethers.getContractFactory("Multicall3");
     const multicall = await M.deploy();
@@ -16,13 +15,16 @@ describe("Multicall3 claim", function () {
     const token = await T.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, sm, token.address, 1);
     const amount = 99n;
     const nonce = 9n;
     await token.mint(bridge.address, amount);
 
-    const nullifier = await registerWithdrawal({ bridge, stateManager: sm,
-      recipient: user.address, token: token.address, amount, nonce });
-    const settleCallData = bridge.interface.encodeFunctionData("claimPendingWithdrawal", [nullifier]);
+    const record = await registerWithdrawal({ bridge, stateManager: sm,
+      recipient: user.address, tokenContractId: 1, amount, nonce });
+    const settleCallData = bridge.interface.encodeFunctionData(
+      "claimPendingWithdrawal", [record.senderUserId, record.tokenContractId, record.nonce],
+    );
     await multicall.aggregate3([
       {
         target: bridge.address,

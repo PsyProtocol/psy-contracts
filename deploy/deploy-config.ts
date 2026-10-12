@@ -16,10 +16,7 @@ export type DeployConfig = {
   weth?: string;
   networkConfig?: string;
   bridgeAddress?: string;
-  finalizeVerifier?: string;
-  depositVerifier?: string;
-  withdrawalVerifier?: string;
-  rewardVerifier?: string;
+  openingVerifier?: string;
 };
 
 const PLACEHOLDER_ADDRESSES = new Set<string>([
@@ -52,9 +49,7 @@ function normalize(cfg: Partial<DeployConfig>, fallback: { deployer: string; adm
 
   if (cfg.weth) validateAddressLike(cfg.weth, "weth");
   if (cfg.bridgeAddress) validateAddressLike(cfg.bridgeAddress, "bridgeAddress");
-  for (const field of (["finalizeVerifier", "depositVerifier", "withdrawalVerifier", "rewardVerifier"] as const)) {
-    if (cfg[field]) validateAddressLike(cfg[field], field);
-  }
+  if (cfg.openingVerifier) validateAddressLike(cfg.openingVerifier, "openingVerifier");
 
   return {
     admin,
@@ -68,10 +63,7 @@ function normalize(cfg: Partial<DeployConfig>, fallback: { deployer: string; adm
     weth: cfg.weth,
     networkConfig: cfg.networkConfig,
     bridgeAddress: cfg.bridgeAddress,
-    finalizeVerifier: cfg.finalizeVerifier,
-    depositVerifier: cfg.depositVerifier,
-    withdrawalVerifier: cfg.withdrawalVerifier,
-    rewardVerifier: cfg.rewardVerifier,
+    openingVerifier: cfg.openingVerifier,
   };
 }
 
@@ -150,25 +142,22 @@ export async function loadDeployConfig(hre: HardhatRuntimeEnvironment): Promise<
 export type AtomicDeployConfig = DeployConfig & {
   networkConfig: string;
   bridgeAddress: string;
-  finalizeVerifier: string;
-  depositVerifier: string;
-  withdrawalVerifier: string;
-  rewardVerifier: string;
+  openingVerifier: string;
 };
 
 // Bridge and StateManager bind each other through the provider during initialize, so the
-// reviewed network config must already name both precommitted proxy addresses and the four
-// circuit-specific verifier addresses exported from the matching setup cohorts.
+// reviewed network config must already name both precommitted proxy addresses and the
+// single full opening verifier address exported from the matching setup cohort.
 export function requireAtomicDeployConfig(cfg: DeployConfig): AtomicDeployConfig {
-  const { networkConfig, bridgeAddress, finalizeVerifier, depositVerifier, withdrawalVerifier, rewardVerifier } = cfg;
-  if (!networkConfig || !bridgeAddress || !finalizeVerifier || !depositVerifier || !withdrawalVerifier || !rewardVerifier) {
+  const { networkConfig, bridgeAddress, openingVerifier } = cfg;
+  if (!networkConfig || !bridgeAddress || !openingVerifier) {
     throw new Error(
       "Atomic bridge deployment requires reviewed networkConfig bytes, the precommitted bridgeAddress, and " +
-        "finalize/deposit/withdrawal/reward verifier addresses in config/<network>.json; " +
+        "the full opening verifier address in config/<network>.json; " +
         "setup export and deployment remain separate authorization gates."
     );
   }
-  return { ...cfg, networkConfig, bridgeAddress, finalizeVerifier, depositVerifier, withdrawalVerifier, rewardVerifier };
+  return { ...cfg, networkConfig, bridgeAddress, openingVerifier };
 }
 
 const func: DeployFunction = async function () {};

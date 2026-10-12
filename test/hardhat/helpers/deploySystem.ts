@@ -5,13 +5,13 @@ import { deployProxy } from "./deployProxy";
 import { buildNetworkConfig } from "./withdrawalClaim";
 
 // Deploy-script tests require the reviewed atomic deploy prerequisites (network config bytes,
-// precommitted bridge address, and the four setup-exported verifier addresses). They stay
+// precommitted bridge address, and the setup-exported full opening verifier address). They stay
 // skipped until the matching setup cohorts are exported and recorded in config/<network>.json.
 export function atomicDeployPrerequisitesMissing(): boolean {
   const file = path.join(__dirname, "../../../config", `${network.name}.json`);
   if (!fs.existsSync(file)) return true;
   const cfg = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-  return ["networkConfig", "bridgeAddress", "finalizeVerifier", "depositVerifier", "withdrawalVerifier", "rewardVerifier"]
+  return ["networkConfig", "bridgeAddress", "openingVerifier"]
     .some((key) => !cfg[key]);
 }
 
@@ -143,12 +143,9 @@ export async function deployCoreSystem(owner: string, proposer?: string) {
   const V = await ethers.getContractFactory("MockGnarkVerifier");
   const verifier = await V.deploy();
   await waitForContractDeployment(verifier);
-  const batchVerifier = await V.deploy();
-  await waitForContractDeployment(batchVerifier);
 
   const providerAddress = await getContractAddress(provider);
   const verifierAddress = await getContractAddress(verifier);
-  const batchVerifierAddress = await getContractAddress(batchVerifier);
   const stateManager = await deployProxy("StateManager", null);
   const router = await deployProxy("Router", [owner, providerAddress]);
   const bridge = await deployProxy("Bridge", null);
@@ -164,15 +161,13 @@ export async function deployCoreSystem(owner: string, proposer?: string) {
   const networkConfig = buildNetworkConfig((await ethers.provider.getNetwork()).chainId,
     await getContractAddress(bridge), await getContractAddress(stateManager), owner, owner);
   await bridge.initialize(owner, providerAddress, networkConfig, 0);
-  await stateManager.initialize(owner, providerAddress, 0, networkConfig,
-    verifierAddress, batchVerifierAddress, verifierAddress, verifierAddress);
+  await stateManager.initialize(owner, providerAddress, 0, networkConfig, verifierAddress);
   await acl.grantRole(await acl.GUARDIAN_ROLE(), owner);
 
   return {
     provider,
     acl,
     verifier,
-    batchVerifier,
     stateManager,
     router,
     bridge,

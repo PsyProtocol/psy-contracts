@@ -87,8 +87,10 @@ describe("governance operation tooling", function () {
   it("builds and decodes a governance pending-withdrawal claim", async function () {
     const [owner] = await ethers.getSigners();
     const { bridge } = await deployCoreSystem(owner.address, owner.address);
-    const claim = buildForceWithdrawalClaim(bridge, "0x1234");
+    const claim = buildForceWithdrawalClaim(bridge, 7, 2, "0x1234");
     const decoded = bridge.interface.decodeFunctionData("forceClaimWithdrawal", claim.data);
+    expect(decoded.senderUserId).to.equal(7);
+    expect(decoded.tokenContractId).to.equal(2);
     expect(decoded.nonce).to.equal(ethers.utils.hexZeroPad("0x1234", 32));
     expect(decodeGovernanceTransaction(claim.target, claim.data).functionName)
       .to.equal("forceClaimWithdrawal");

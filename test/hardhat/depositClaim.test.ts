@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { registerWithdrawal } from "./helpers/withdrawalClaim";
+import { installWithdrawalToken, registerWithdrawal } from "./helpers/withdrawalClaim";
 
 function addrToBytes32(addr: string): string {
   return ethers.utils.hexZeroPad(addr, 32);
@@ -112,40 +112,45 @@ describe("Deposit And Claim", function () {
 
   it("tests ERC20 claim and ETH claim separately", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm, weth } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, verifier, weth } = await deployCoreSystem(owner.address, owner.address);
 
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address);
+    await installWithdrawalToken(bridge, verifier, sm, token.address, 1);
     await configureFlowToken(bridge, ethers.constants.AddressZero, {
       smallWithdrawalMax: 2_000_000_000n,
       mediumWithdrawalMax: 3_000_000_000n,
       totalWithdrawalCap: 4_000_000_000n,
     });
+    await installWithdrawalToken(bridge, verifier, sm, ethers.constants.AddressZero, 2);
 
     const erc20Amount = 777n;
     const erc20Nonce = 42n;
     await token.mint(bridge.address, erc20Amount);
 
-    await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
-      token: token.address, amount: erc20Amount, nonce: erc20Nonce });
+    const erc20Record = await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
+      tokenContractId: 1, amount: erc20Amount, nonce: erc20Nonce });
     expect(await token.balanceOf(user.address)).to.equal(0);
-    await bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32));
+    await bridge.claimPendingWithdrawal(erc20Record.senderUserId, erc20Record.tokenContractId, erc20Record.nonce);
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
 
-    // ETH claim
+    // Token policy address(0) is native ETH: custody is WETH, settlement unwraps then pays ETH.
     const ethAmount = 900_000_000n;
     const ethNonce = 43n;
     await weth.deposit({ value: ethAmount });
     await weth.transfer(bridge.address, ethAmount);
 
     const before = await ethers.provider.getBalance(user.address);
-    await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
-      token: ethers.constants.AddressZero, amount: ethAmount, nonce: ethNonce });
+    const ethRecord = await registerWithdrawal({ bridge, stateManager: sm, recipient: user.address,
+      tokenContractId: 2, amount: ethAmount, nonce: ethNonce });
     expect(await ethers.provider.getBalance(user.address)).to.equal(before);
-    await expect(
-      bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))
-    ).to.changeEtherBalance(user, ethAmount);
+    const claim = await bridge.connect(user).claimPendingWithdrawal(
+      ethRecord.senderUserId, ethRecord.tokenContractId, ethRecord.nonce);
+    const receipt = await claim.wait();
+    const gas = receipt.gasUsed.mul(receipt.effectiveGasPrice);
+    expect((await ethers.provider.getBalance(user.address)).add(gas).sub(before)).to.equal(ethAmount);
+    expect(await weth.balanceOf(bridge.address)).to.equal(0);
   });
 });

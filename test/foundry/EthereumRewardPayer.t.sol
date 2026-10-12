@@ -7,14 +7,16 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {BridgeOpening} from "../../src/BridgeOpening.sol";
 import {EthereumRewardPayer} from "../../src/EthereumRewardPayer.sol";
+import {IEthereumRewardPayer} from "../../src/IEthereumRewardPayer.sol";
 
 // Adversarial token behaviors are confined to this test package.
 contract RewardPayoutToken is ERC20 {
-    enum Behavior { Exact, Fee, ExtraDebit, Rebase, FalseReturn, RevertTransfer, Reenter }
+    enum Behavior { Exact, Fee, ExtraDebit, Rebase, FalseReturn, RevertTransfer, Reenter, BurnGas }
 
     Behavior public behavior;
     address public failingRecipient;
     address public callback;
+    uint256 public burn;
 
     error TransferRejected();
 
@@ -30,6 +32,10 @@ contract RewardPayoutToken is ERC20 {
         callback = callback_;
     }
 
+    function setBurn(uint256 iterations) external {
+        burn = iterations;
+    }
+
     function transfer(address recipient, uint256 amount) public override returns (bool) {
         if (failingRecipient != address(0) && failingRecipient != recipient) {
             return super.transfer(recipient, amount);
@@ -38,6 +44,11 @@ contract RewardPayoutToken is ERC20 {
         if (behavior == Behavior.RevertTransfer) revert TransferRejected();
         if (behavior == Behavior.Reenter) {
             RewardPayoutCallback(callback).reenter();
+        }
+        if (behavior == Behavior.BurnGas) {
+            uint256 sink;
+            for (uint256 i; i < burn; ++i) sink = uint256(keccak256(abi.encode(sink, i)));
+            sink;
         }
         if (behavior == Behavior.Fee) {
             _transfer(msg.sender, recipient, amount - 1);
@@ -57,8 +68,10 @@ interface RewardPayoutCallback {
 
 contract EthereumRewardPayerTest is Test, RewardPayoutCallback {
     uint256 internal constant PRICE = 17;
-    uint64 internal constant CUTOVER = 100;
-    uint64 internal constant END = 200;
+    uint256 internal constant GAS_CAP = 500_000;
+    bytes32 internal constant EMPTY =
+        0x529e7df136402acdfe6445425d3d3f067df8eeacb72c4c10796146105b07bbd6;
+    uint256 internal constant PRIME = 18446744069414584321;
     address internal constant ALICE = address(0xA11CE);
     address internal constant BOB = address(0xB0B);
     RewardPayoutToken internal token;
@@ -66,322 +79,289 @@ contract EthereumRewardPayerTest is Test, RewardPayoutCallback {
 
     function setUp() public {
         token = new RewardPayoutToken();
-        payer = _deploy(PRICE);
+        payer = _deploy(GAS_CAP);
         token.mint(address(payer), PRICE * 10);
     }
 
-    function _config(address payerAddress, address tokenAddress, uint256 price, uint256 chainId)
-        internal view returns (bytes memory)
-    {
+    function _config(address payerAddress, address tokenAddress, uint256 chainId) internal view returns (bytes memory) {
         return bytes.concat(
             abi.encode(uint32(1), uint64(42), uint32(524288), bytes32(uint256(1)), uint256(1)),
-            abi.encode(uint8(7), chainId, address(0xB123), address(this), uint64(0),
-                uint64(1), uint64(2), uint64(3), uint64(4)),
-            abi.encode(uint8(7), payerAddress, tokenAddress, price, uint8(18), CUTOVER, END,
-                uint32(1024), uint32(1024), uint32(1024))
+            abi.encode(
+                uint8(7), chainId, address(0xB123), address(this), uint64(0), uint64(1), uint64(2), uint64(3), uint64(4)
+            ),
+            abi.encode(uint8(7), payerAddress, tokenAddress, uint256(1), uint8(18), uint32(32), uint32(32))
         );
     }
 
-    function _deploy(uint256 price) internal returns (EthereumRewardPayer) {
+    function _deploy(uint256 gasCap) internal returns (EthereumRewardPayer) {
         address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
-        return new EthereumRewardPayer(_config(predicted, address(token), price, block.chainid));
+        return new EthereumRewardPayer(_config(predicted, address(token), block.chainid), gasCap);
     }
 
-    function _rewards() internal pure returns (BridgeOpening.RewardLeaf[] memory rewards) {
-        rewards = new BridgeOpening.RewardLeaf[](2);
-        rewards[0] = BridgeOpening.RewardLeaf(CUTOVER, 1000, 2, 0, 3, ALICE);
-        rewards[1] = BridgeOpening.RewardLeaf(CUTOVER, 1001, 3, 1, 8, BOB);
+    function _pack(uint256 limb0, uint256 limb1, uint256 limb2, uint256 limb3) internal pure returns (bytes32) {
+        return bytes32((limb0 << 192) | (limb1 << 128) | (limb2 << 64) | limb3);
     }
 
-    function _key(BridgeOpening.RewardLeaf memory reward) internal view returns (bytes32) {
-        return keccak256(abi.encode(payer.rewardNullifierDomain(), reward.claimCheckpointId, reward.nullifierIndex));
+    function _claim(uint32 userId, bytes32 oldRoot, bytes32 newRoot, uint256 amount, address recipient)
+        internal
+        pure
+        returns (IEthereumRewardPayer.RewardClaim memory)
+    {
+        return IEthereumRewardPayer.RewardClaim(userId, oldRoot, newRoot, 1, amount, recipient);
     }
 
-    function _assertUnpaid(BridgeOpening.RewardLeaf[] memory rewards) internal view {
+    function _claims() internal pure returns (IEthereumRewardPayer.RewardClaim[] memory claims) {
+        claims = new IEthereumRewardPayer.RewardClaim[](2);
+        claims[0] = _claim(1000, EMPTY, _pack(1, 0, 0, 0), PRICE, ALICE);
+        claims[1] = _claim(1001, EMPTY, _pack(2, 0, 0, 0), PRICE, BOB);
+    }
+
+    function _assertUntouched(IEthereumRewardPayer.RewardClaim[] memory claims) internal view {
         assertEq(token.balanceOf(address(payer)), PRICE * 10);
         assertEq(token.balanceOf(ALICE), 0);
         assertEq(token.balanceOf(BOB), 0);
-        for (uint256 i; i < rewards.length; ++i) assertFalse(payer.spentRewards(_key(rewards[i])));
+        assertEq(token.totalSupply(), PRICE * 10);
+        for (uint256 i; i < claims.length; ++i) assertEq(payer.rewardNullifierRoot(claims[i].userId), bytes32(0));
     }
 
-    function testPaysExactFixedPriceAndConsumesEachKey() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        payer.payRewards(rewards);
+    function testPaysLineageAndAdvancesLiveRoot() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        vm.expectEmit(true, true, true, true);
+        emit IEthereumRewardPayer.RewardPaid(1000, EMPTY, claims[0].newNullifierRoot, 1, PRICE, ALICE);
+        payer.payRewards(claims);
         assertEq(token.balanceOf(ALICE), PRICE);
         assertEq(token.balanceOf(BOB), PRICE);
         assertEq(token.balanceOf(address(payer)), PRICE * 8);
-        assertTrue(payer.spentRewards(_key(rewards[0])));
-        assertTrue(payer.spentRewards(_key(rewards[1])));
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), claims[1].newNullifierRoot);
     }
 
-    function testRepeatedRecipientReceivesEachDistinctReward() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].recipient = ALICE;
-        payer.payRewards(rewards);
+    function testSameUserSecondRowReadsLiveRoot() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        claims[1].userId = claims[0].userId;
+        claims[1].recipient = ALICE;
+        claims[1].oldNullifierRoot = claims[0].newNullifierRoot;
+        payer.payRewards(claims);
         assertEq(token.balanceOf(ALICE), PRICE * 2);
-        assertEq(token.balanceOf(address(payer)), PRICE * 8);
+        assertEq(payer.rewardNullifierRoot(claims[0].userId), claims[1].newNullifierRoot);
     }
 
-    function testChangedRecipientAndUserCannotReplayConsumedPosition() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        payer.payRewards(rewards);
-        rewards[0].recipient = BOB;
-        rewards[0].userId = 9999;
-        vm.expectRevert(EthereumRewardPayer.RewardAlreadySpent.selector);
-        payer.payRewards(rewards);
+    function testRepeatedPaymentRequiresSuccessorRoot() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        payer.payRewards(claims);
+        claims[0].oldNullifierRoot = claims[0].newNullifierRoot;
+        claims[0].newNullifierRoot = _pack(3, 0, 0, 0);
+        claims = _one(claims[0]);
+        payer.payRewards(claims);
+        assertEq(token.balanceOf(ALICE), PRICE * 2);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+    }
+
+    function testStaleRootSkipsWithoutChangingLineage() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        payer.payRewards(_one(claims[0]));
+        vm.expectEmit(true, true, false, true);
+        emit IEthereumRewardPayer.RewardSkipped(1000, EMPTY, payer.REASON_STALE_ROOT());
+        payer.payRewards(claims);
         assertEq(token.balanceOf(ALICE), PRICE);
         assertEq(token.balanceOf(BOB), PRICE);
-        assertEq(token.balanceOf(address(payer)), PRICE * 8);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), claims[1].newNullifierRoot);
     }
 
-    function testRejectsUnconfiguredCaller() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
+    function testInvalidClaimSkipsAndPreservesEarlierRoot() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        claims[1].amount = 0;
+        payer.payRewards(claims);
+        assertEq(token.balanceOf(ALICE), PRICE);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
+
+        claims[1].amount = PRICE;
+        claims[1].recipient = address(0);
+        payer.payRewards(_one(claims[1]));
+        claims[1].recipient = address(payer);
+        payer.payRewards(_one(claims[1]));
+        claims[1].recipient = BOB;
+        claims[1].oldNullifierRoot = _pack(PRIME, 0, 0, 0);
+        payer.payRewards(_one(claims[1]));
+        claims[1].oldNullifierRoot = EMPTY;
+        claims[1].newNullifierRoot = _pack(0, 0, 0, PRIME);
+        payer.payRewards(_one(claims[1]));
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
+    }
+
+    function testReserveShortSkipsOnlyThatRow() public {
+        token = new RewardPayoutToken();
+        payer = _deploy(GAS_CAP);
+        token.mint(address(payer), PRICE);
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        payer.payRewards(claims);
+        assertEq(token.balanceOf(ALICE), PRICE);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(token.balanceOf(address(payer)), 0);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
+        token.mint(address(payer), PRICE);
+        payer.payRewards(_one(claims[1]));
+        assertEq(token.balanceOf(BOB), PRICE);
+        assertEq(payer.rewardNullifierRoot(1001), claims[1].newNullifierRoot);
+    }
+
+    function testReceiptMismatchSkipsAndPreservesEarlierPayment() public {
+        _skipTransfer(RewardPayoutToken.Behavior.Fee);
+        _skipTransfer(RewardPayoutToken.Behavior.ExtraDebit);
+        _skipTransfer(RewardPayoutToken.Behavior.Rebase);
+        _skipTransfer(RewardPayoutToken.Behavior.FalseReturn);
+        _skipTransfer(RewardPayoutToken.Behavior.RevertTransfer);
+    }
+
+    function testAuthorityAndChainRejectBeforePayment() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
         vm.prank(ALICE);
         vm.expectRevert(EthereumRewardPayer.OnlyStateManager.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testRejectsOtherChainAfterDeployment() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
+        payer.payRewards(claims);
         vm.chainId(block.chainid + 1);
         vm.expectRevert(EthereumRewardPayer.WrongChain.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
+        payer.payRewards(claims);
+        vm.chainId(block.chainid - 1);
+        _assertUntouched(claims);
     }
 
-    function testZeroPriceCannotDeploy() public {
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
-        bytes memory config = _config(predicted, address(token), 0, block.chainid);
-        vm.expectRevert(BridgeOpening.InvalidConfig.selector);
-        new EthereumRewardPayer(config);
-    }
-
-    function testWrongPayerAddressCannotDeploy() public {
-        bytes memory config = _config(ALICE, address(token), PRICE, block.chainid);
-        vm.expectRevert(EthereumRewardPayer.InvalidPayerConfig.selector);
-        new EthereumRewardPayer(config);
-    }
-
-    function testTokenWithoutCodeCannotDeploy() public {
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
-        bytes memory config = _config(predicted, ALICE, PRICE, block.chainid);
-        vm.expectRevert(EthereumRewardPayer.InvalidPayerConfig.selector);
-        new EthereumRewardPayer(config);
-    }
-
-    function testOtherChainCannotDeploy() public {
-        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
-        bytes memory config = _config(predicted, address(token), PRICE, block.chainid + 1);
-        vm.expectRevert(EthereumRewardPayer.WrongChain.selector);
-        new EthereumRewardPayer(config);
-    }
-
-    function testAggregatePriceOverflowRevertsBeforeConsumption() public {
-        payer = _deploy(type(uint256).max);
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        vm.expectRevert(abi.encodeWithSignature("Panic(uint256)", uint256(0x11)));
-        payer.payRewards(rewards);
-        assertFalse(payer.spentRewards(_key(rewards[0])));
-        assertFalse(payer.spentRewards(_key(rewards[1])));
-        assertEq(token.balanceOf(ALICE), 0);
-    }
-
-    function testUnderfundedBatchCannotConsumeAnyKey() public {
-        payer = _deploy(PRICE);
-        token.mint(address(payer), PRICE * 2 - 1);
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        vm.expectRevert(EthereumRewardPayer.InsufficientRewardReserve.selector);
-        payer.payRewards(rewards);
-        assertEq(token.balanceOf(address(payer)), PRICE * 2 - 1);
-        assertFalse(payer.spentRewards(_key(rewards[0])));
-        assertFalse(payer.spentRewards(_key(rewards[1])));
-        assertEq(token.balanceOf(ALICE), 0);
-        token.mint(address(payer), 1);
-        payer.payRewards(rewards);
+    function testReentrancySkipsOnlyTheCallingRow() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        token.setBehavior(RewardPayoutToken.Behavior.Reenter, BOB, address(this));
+        payer.payRewards(claims);
         assertEq(token.balanceOf(ALICE), PRICE);
-        assertEq(token.balanceOf(BOB), PRICE);
-        assertEq(token.balanceOf(address(payer)), 0);
-    }
-
-    function testDuplicatePositionRejectsWholeBatch() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1] = rewards[0];
-        rewards[1].recipient = BOB;
-        vm.expectRevert(EthereumRewardPayer.InvalidRewardOrdering.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testDescendingCheckpointRejectsWholeBatch() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[0].claimCheckpointId = CUTOVER + 1;
-        vm.expectRevert(EthereumRewardPayer.InvalidRewardOrdering.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testRejectsClaimBeforeCutover() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[0].claimCheckpointId = CUTOVER - 1;
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testEndCheckpointIsExclusive() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].claimCheckpointId = END;
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-        rewards[1].claimCheckpointId = END - 1;
-        payer.payRewards(rewards);
-        assertEq(token.balanceOf(BOB), PRICE);
-    }
-
-    function testRejectsNonGutaPosition() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].pathIndex = 2;
-        rewards[1].nullifierIndex = 9;
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testRejectsNullifierAlias() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].nullifierIndex = 7;
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testFuzzRejectsOutOfRangeHeight(uint8 height) public {
-        vm.assume(height < 2 || height > 21);
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].height = height;
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testMaximumCanonicalGutaPositionAccepts() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].height = 21;
-        rewards[1].pathIndex = (uint32(1) << 19) - 1;
-        rewards[1].nullifierIndex = (uint32(1) << 21) - 1 + rewards[1].pathIndex;
-        payer.payRewards(rewards);
-        assertEq(token.balanceOf(BOB), PRICE);
-    }
-
-    function testRejectsZeroRecipient() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].recipient = address(0);
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testRejectsPayerAsRecipient() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        rewards[1].recipient = address(payer);
-        vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testFeeTransferRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.Fee,
-            abi.encodeWithSelector(EthereumRewardPayer.UnsupportedTokenTransfer.selector));
-    }
-
-    function testExtraDebitRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.ExtraDebit,
-            abi.encodeWithSelector(EthereumRewardPayer.UnsupportedTokenTransfer.selector));
-    }
-
-    function testRebaseRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.Rebase,
-            abi.encodeWithSelector(EthereumRewardPayer.UnsupportedTokenTransfer.selector));
-    }
-
-    function testFalseTransferRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.FalseReturn,
-            abi.encodeWithSelector(SafeERC20.SafeERC20FailedOperation.selector, address(token)));
-    }
-
-    function testRevertedTransferRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.RevertTransfer,
-            abi.encodeWithSelector(RewardPayoutToken.TransferRejected.selector));
-    }
-
-    function testAuthorizedReentryRollsBackEarlierPaymentAndAllKeys() public {
-        _rejectTransfer(RewardPayoutToken.Behavior.Reenter,
-            abi.encodeWithSelector(ReentrancyGuard.ReentrancyGuardReentrantCall.selector));
-    }
-
-    function _rejectTransfer(RewardPayoutToken.Behavior behavior, bytes memory reason) internal {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        token.setBehavior(behavior, BOB, address(this));
-        vm.expectRevert(reason);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-        assertEq(token.totalSupply(), PRICE * 10);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
         token.setBehavior(RewardPayoutToken.Behavior.Exact, address(0), address(0));
-        payer.payRewards(rewards);
+        payer.payRewards(_one(claims[1]));
+        assertEq(token.balanceOf(BOB), PRICE);
+    }
+
+    function testGasBurnBecomesTransferFailedWithoutRootWrite() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        token.setBehavior(RewardPayoutToken.Behavior.BurnGas, BOB, address(0));
+        token.setBurn(20_000);
+        payer.payRewards(claims);
+        assertEq(token.balanceOf(ALICE), PRICE);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
+        token.setBehavior(RewardPayoutToken.Behavior.Exact, address(0), address(0));
+        payer.payRewards(_one(claims[1]));
+        assertEq(token.balanceOf(BOB), PRICE);
+    }
+
+    function testCapOneStarvesRowCallsIntoTransferFailure() public {
+        EthereumRewardPayer low = _deploy(1);
+        token.mint(address(low), PRICE * 2);
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        // A cap of 1 clears the parent reserve gate but starves every child
+        // call out of gas, so each row surfaces as a transfer failure; the
+        // parent gate needs explicit bounded call gas and is covered below.
+        vm.expectEmit(true, true, false, true);
+        emit IEthereumRewardPayer.RewardSkipped(1000, EMPTY, low.REASON_TRANSFER_FAILED());
+        vm.expectEmit(true, true, false, true);
+        emit IEthereumRewardPayer.RewardSkipped(1001, EMPTY, low.REASON_TRANSFER_FAILED());
+        low.payRewards(claims);
+        assertEq(token.balanceOf(address(low)), PRICE * 2);
+        assertEq(token.balanceOf(ALICE), 0);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(low.rewardNullifierRoot(1000), bytes32(0));
+        assertEq(low.rewardNullifierRoot(1001), bytes32(0));
+    }
+
+    function testInsufficientParentGasSkipsRemainingRowsAndPreservesPaidTail() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        payer.payRewards(claims);
+        // Bounded gas below the parent reserve need (4000 + cap + cap/63 + 1 +
+        // remaining * 3000 + 8000 ~= 526k here) but far above the skip tail,
+        // so both rows are skipped by the parent gate itself with reason 5.
+        vm.expectEmit(true, true, false, true);
+        emit IEthereumRewardPayer.RewardSkipped(1000, EMPTY, payer.REASON_INSUFFICIENT_GAS());
+        vm.expectEmit(true, true, false, true);
+        emit IEthereumRewardPayer.RewardSkipped(1001, EMPTY, payer.REASON_INSUFFICIENT_GAS());
+        payer.payRewards{gas: 100_000}(claims);
+        assertEq(token.balanceOf(address(payer)), PRICE * 8);
         assertEq(token.balanceOf(ALICE), PRICE);
         assertEq(token.balanceOf(BOB), PRICE);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), claims[1].newNullifierRoot);
     }
 
-    function testConsumedLaterKeyRollsBackEarlierFreshKey() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        BridgeOpening.RewardLeaf[] memory one = new BridgeOpening.RewardLeaf[](1);
-        one[0] = rewards[1];
-        payer.payRewards(one);
-        vm.expectRevert(EthereumRewardPayer.RewardAlreadySpent.selector);
-        payer.payRewards(rewards);
-        assertFalse(payer.spentRewards(_key(rewards[0])));
-        assertTrue(payer.spentRewards(_key(rewards[1])));
-        assertEq(token.balanceOf(ALICE), 0);
-        assertEq(token.balanceOf(BOB), PRICE);
-        assertEq(token.balanceOf(address(payer)), PRICE * 9);
+    function testDeploymentRejectsBadIdentityAndGasCap() public {
+        vm.expectRevert(EthereumRewardPayer.InvalidPayerConfig.selector);
+        new EthereumRewardPayer(_config(ALICE, address(token), block.chainid), GAS_CAP);
+        // A reverted CREATE still burns the deployer nonce, so the predicted
+        // address is recomputed before every subsequent attempt.
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(EthereumRewardPayer.InvalidPayerConfig.selector);
+        new EthereumRewardPayer(_config(predicted, ALICE, block.chainid), GAS_CAP);
+        predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(EthereumRewardPayer.WrongChain.selector);
+        new EthereumRewardPayer(_config(predicted, address(token), block.chainid + 1), GAS_CAP);
+        predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(EthereumRewardPayer.InvalidGasCap.selector);
+        new EthereumRewardPayer(_config(predicted, address(token), block.chainid), 0);
+        // The WrongChain attempt above read the same source config
+        // successfully, so trailing bytes isolate the typed decoder only.
+        predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+        vm.expectRevert(BridgeOpening.InvalidEncoding.selector);
+        new EthereumRewardPayer(bytes.concat(_config(predicted, address(token), block.chainid), bytes32(0)), GAS_CAP);
     }
 
-    function testDescendingNullifierRejectsWholeBatch() public {
-        BridgeOpening.RewardLeaf[] memory rewards = _rewards();
-        BridgeOpening.RewardLeaf memory first = rewards[0];
-        rewards[0] = rewards[1];
-        rewards[1] = first;
-        vm.expectRevert(EthereumRewardPayer.InvalidRewardOrdering.selector);
-        payer.payRewards(rewards);
-        _assertUnpaid(rewards);
-    }
-
-    function testRejectsRewardCountAboveCommittedMaximum() public {
-        BridgeOpening.RewardLeaf[] memory rewards = new BridgeOpening.RewardLeaf[](1025);
+    function testRejectsMoreThanThirtyTwoClaims() public {
+        IEthereumRewardPayer.RewardClaim[] memory claims = new IEthereumRewardPayer.RewardClaim[](33);
         vm.expectRevert(EthereumRewardPayer.InvalidReward.selector);
-        payer.payRewards(rewards);
+        payer.payRewards(claims);
         assertEq(token.balanceOf(address(payer)), PRICE * 10);
-    }
-
-    function testCanonicalDomainConsumesExpectedStableKey() public {
-        bytes32 domain = keccak256(abi.encode(
-            keccak256("PsyBridge/TwoArtifact/1/Reward"), uint256(1), uint64(42), uint32(524288),
-            block.chainid, uint8(7), address(payer), address(token)
-        ));
-        payer.payRewards(_rewards());
-        assertTrue(payer.spentRewards(keccak256(abi.encode(domain, uint64(CUTOVER), uint32(3)))));
-        assertFalse(payer.spentRewards(keccak256(abi.encode(domain, uint64(CUTOVER + 1), uint32(3)))));
     }
 
     function testEmptyBatchDoesNotSpendReserve() public {
-        payer.payRewards(new BridgeOpening.RewardLeaf[](0));
+        payer.payRewards(new IEthereumRewardPayer.RewardClaim[](0));
         assertEq(token.balanceOf(address(payer)), PRICE * 10);
+    }
+
+    function testDirectPayRewardIsSelfOnly() public {
+        vm.expectRevert(EthereumRewardPayer.OnlySelf.selector);
+        payer.payReward(_claims()[0]);
+        _assertUntouched(_claims());
+    }
+
+    function _one(IEthereumRewardPayer.RewardClaim memory claim)
+        internal
+        pure
+        returns (IEthereumRewardPayer.RewardClaim[] memory claims)
+    {
+        claims = new IEthereumRewardPayer.RewardClaim[](1);
+        claims[0] = claim;
+    }
+
+    function _skipTransfer(RewardPayoutToken.Behavior behavior) internal {
+        token = new RewardPayoutToken();
+        payer = _deploy(GAS_CAP);
+        token.mint(address(payer), PRICE * 2);
+        IEthereumRewardPayer.RewardClaim[] memory claims = _claims();
+        token.setBehavior(behavior, BOB, address(this));
+        payer.payRewards(claims);
+        assertEq(token.balanceOf(ALICE), PRICE);
+        assertEq(token.balanceOf(BOB), 0);
+        assertEq(token.balanceOf(address(payer)), PRICE);
+        // The Rebase mint happens inside the reverted child frame, so it rolls
+        // back atomically: supply is the pre-row baseline and no new call
+        // frame's effect survives.
+        assertEq(token.totalSupply(), PRICE * 2);
+        assertEq(payer.rewardNullifierRoot(1000), claims[0].newNullifierRoot);
+        assertEq(payer.rewardNullifierRoot(1001), bytes32(0));
     }
 
     function reenter() external override {
         require(msg.sender == address(token));
-        payer.payRewards(_rewards());
+        payer.payRewards(_claims());
     }
 }

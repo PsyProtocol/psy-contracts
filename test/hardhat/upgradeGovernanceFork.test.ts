@@ -62,11 +62,8 @@ async function deployForkSystem(owner: string, proposer: string) {
   const verifierFactory = await ethers.getContractFactory("MockGnarkVerifier");
   const verifier = await verifierFactory.deploy();
   await waitForContractDeployment(verifier);
-  const depositBatchVerifier = await verifierFactory.deploy();
-  await waitForContractDeployment(depositBatchVerifier);
   const providerAddress = await getContractAddress(provider);
   const verifierAddress = await getContractAddress(verifier);
-  const depositBatchVerifierAddress = await getContractAddress(depositBatchVerifier);
   const state = await deployTransparent("StateManager", owner, null);
   const router = await deployTransparent("Router", owner, [owner, providerAddress]);
   const bridge = await deployTransparent("Bridge", owner, null);
@@ -78,7 +75,7 @@ async function deployForkSystem(owner: string, proposer: string) {
   await wireCoreAddresses({ provider, acl, bridge: bridge.proxy, stateManager: state.proxy, router: router.proxy, erc20Gateway: erc20Gateway.proxy, ethGateway: ethGateway.proxy, verifier });
   const config = buildNetworkConfig((await ethers.provider.getNetwork()).chainId, bridge.proxy.address, state.proxy.address, owner, owner);
   await bridge.proxy.initialize(owner, providerAddress, config, 0);
-  await state.proxy.initialize(owner, providerAddress, 0, config, verifierAddress, depositBatchVerifierAddress, verifierAddress, verifierAddress);
+  await state.proxy.initialize(owner, providerAddress, 0, config, verifierAddress);
   return { acl, state, bridge };
 }
 

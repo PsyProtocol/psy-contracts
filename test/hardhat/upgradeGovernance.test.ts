@@ -16,7 +16,7 @@ import {
 } from "./helpers/deploySystem";
 import { forceSetBridgeState } from "../../scripts/upgrade/forceSetBridgeState";
 import { forceSetState } from "../../scripts/upgrade/forceSetState";
-import { buildNetworkConfig } from "./helpers/withdrawalClaim";
+import { buildNetworkConfig, scopedKey } from "./helpers/withdrawalClaim";
 
 const ADMIN_SLOT = "0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103";
 
@@ -68,12 +68,9 @@ async function deploySystemWithTransparentBridge(owner: string, proposer: string
   const verifierFactory = await ethers.getContractFactory("MockGnarkVerifier");
   const verifier = await verifierFactory.deploy();
   await waitForContractDeployment(verifier);
-  const depositBatchVerifier = await verifierFactory.deploy();
-  await waitForContractDeployment(depositBatchVerifier);
 
   const providerAddress = await getContractAddress(provider);
   const verifierAddress = await getContractAddress(verifier);
-  const depositBatchVerifierAddress = await getContractAddress(depositBatchVerifier);
   const state = await deployTransparent("StateManager", owner, null);
   const router = await deployTransparent("Router", owner, [owner, providerAddress]);
   const bridge = await deployTransparent("Bridge", owner, null);
@@ -96,7 +93,7 @@ async function deploySystemWithTransparentBridge(owner: string, proposer: string
   });
   const config = buildNetworkConfig((await ethers.provider.getNetwork()).chainId, bridge.proxy.address, state.proxy.address, owner, owner);
   await bridge.proxy.initialize(owner, providerAddress, config, 0);
-  await state.proxy.initialize(owner, providerAddress, 0, config, verifierAddress, depositBatchVerifierAddress, verifierAddress, verifierAddress);
+  await state.proxy.initialize(owner, providerAddress, 0, config, verifierAddress);
 
   return { provider, acl, verifier, state, bridge, router, erc20Gateway, ethGateway, weth };
 }
@@ -306,7 +303,7 @@ describe("governance upgrade and rescue", function () {
     expect(await upgradedBridge.pendingDepositCount()).to.equal(targetBridge.pendingDepositCount);
     expect(await upgradedBridge.getDepositFrontier()).to.deep.equal(targetBridge.depositFrontier);
     expect(await upgradedBridge.depositLeafHashes(0)).to.equal(depositLeafHash);
-    expect(await upgradedBridge.claimedNullifiers(untouchedNullifier)).to.equal(false);
+    expect(await upgradedBridge.claimedWithdrawals(scopedKey(0, 1, untouchedNullifier))).to.equal(false);
     await expect(upgradedBridge.forceSetState(expectedBridge, targetBridge)).to.not.emit(upgradedBridge, "ForceSetState");
   });
 
