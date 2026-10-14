@@ -20,12 +20,14 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const verifier = await get("ZKVerifier");
   const depositBatchVerifier = await get("DepositBatchVerifier");
   const withdrawalClaimVerifier = await get("WithdrawalClaimVerifier");
+  const rewardClaimVerifier = await get("RewardClaimVerifier");
   const bridgeId = (await read("PsyAddressesProvider", "BRIDGE_ID")) as string;
   const stateManagerId = (await read("PsyAddressesProvider", "STATE_MANAGER_ID")) as string;
   const routerId = (await read("PsyAddressesProvider", "ROUTER_ID")) as string;
   const erc20GatewayId = (await read("PsyAddressesProvider", "ERC20_GATEWAY_ID")) as string;
   const ethGatewayId = (await read("PsyAddressesProvider", "ETH_GATEWAY_ID")) as string;
   const zkVerifierId = (await read("PsyAddressesProvider", "ZK_VERIFIER_ID")) as string;
+  const rewardClaimVerifierId = (await read("PsyAddressesProvider", "REWARD_CLAIM_VERIFIER_ID")) as string;
   const aclManagerId = (await read("PsyAddressesProvider", "ACL_MANAGER_ID")) as string;
 
   log("Running 006_wire_core");
@@ -45,6 +47,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   await ensureAddress(zkVerifierId, verifier.address);
   const acl = await get("PsyACLManager");
   await ensureAddress(aclManagerId, acl.address);
+  await ensureAddress(rewardClaimVerifierId, rewardClaimVerifier.address);
 
   const currentDepositBatchVerifier = (await read("Bridge", "depositBatchVerifier")) as string;
   if (currentDepositBatchVerifier.toLowerCase() !== depositBatchVerifier.address.toLowerCase()) {

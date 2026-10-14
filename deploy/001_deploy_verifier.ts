@@ -14,6 +14,8 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const withdrawalClaimVerifierDeployment = "WithdrawalClaimVerifier";
   const depositBatchVerifierArtifact = "src/DepositBatchVerifier.sol:Verifier";
   const depositBatchVerifierDeployment = "DepositBatchVerifier";
+  const rewardClaimVerifierArtifact = "src/RewardClaimVerifier.sol:Verifier";
+  const rewardClaimVerifierDeployment = "RewardClaimVerifier";
 
   log(`Running 001_deploy_verifier on ${network.name}`);
   if (cfg.verifier) {
@@ -59,6 +61,22 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   } else {
     await deploy(hre, depositBatchVerifierDeployment, {
       contract: depositBatchVerifierArtifact,
+      from: deployer,
+      args: [],
+      log: true,
+    });
+  }
+
+  if (cfg.rewardClaimVerifier) {
+    const artifact = await getArtifact(rewardClaimVerifierArtifact);
+    await save(rewardClaimVerifierDeployment, {
+      abi: artifact.abi,
+      address: cfg.rewardClaimVerifier,
+    });
+    log(`Using external reward claim verifier from config: ${cfg.rewardClaimVerifier}`);
+  } else {
+    await deploy(hre, rewardClaimVerifierDeployment, {
+      contract: rewardClaimVerifierArtifact,
       from: deployer,
       args: [],
       log: true,

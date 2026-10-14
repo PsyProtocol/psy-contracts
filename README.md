@@ -24,6 +24,15 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 - Optimizer enabled (`runs=200`)
 - Hardhat source path points to `src/` to share the same contracts with Foundry
 
+## Token reward claim
+
+`PsyToken.claimReward` is the reward entry. It reverts unless `block.chainid` is 1, 31337, or 11155111 (`WrongChain`), before any mint or claimed-state write. A valid claim mints `totalAmount` of PSY (9 decimals) to `recipient` and sets `claimed[userId][checkpointId]` for each strictly increasing checkpoint id (at most 64). The same pair cannot be claimed again (`AlreadyClaimed`). Owner `mint` is separate and is not a claim.
+
+The checkpoint root must be the current `StateManager` reward-root epoch (`UnrecognizedRewardRoot` otherwise). The proof is 256 bytes decoded as `uint256[8]` and checked by the address stored at `REWARD_CLAIM_VERIFIER_ID`. The verifier input is the high and low 128 bits of `keccak256(abi.encode(CLAIM_DOMAIN, token, stateManager, userId, recipient, checkpointRoot, count, totalAmount, paddedIds))`, where `CLAIM_DOMAIN` is `keccak256("PsyReward/TokenCheckpointClaim/1")` and unused id slots are zero.
+
+No real Groth16 verifier is deployed for this path. `forge test -C . --match-contract PsyTokenClaimTest` is a component test: `RewardClaimDigestVerifier` accepts one explicit 8-word test proof for the digest `PsyToken` computed. It is not an end-to-end payout and not real-proof evidence.
+
+
 ## Contract Verification
 
 After deployment, verify contracts on Etherscan:

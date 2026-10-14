@@ -233,11 +233,14 @@ describe("governance upgrade and rescue", function () {
     expect(await upgradedState.lastVerifiedDepositTreeRoot()).to.equal(targetState.lastVerifiedDepositTreeRoot);
     expect(await upgradedState.lastVerifiedWithdrawalTreeRoot()).to.equal(targetState.lastVerifiedWithdrawalTreeRoot);
     expect(await upgradedState.withdrawalSubtreeRoot()).to.equal(targetState.withdrawalSubtreeRoot);
+    expect(await upgradedState.rewardRootEpoch()).to.equal(2n);
+    expect(await upgradedState.rewardRootEpochs(targetState.lastVerifiedCheckpointRoot)).to.equal(0n);
     expect(await upgradedState.knownDepositSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
     expect(await upgradedState.knownWithdrawalSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
     expect(await upgradedState.knownDepositSubtreeRoots(untouchedStateMappingKey)).to.equal(false);
     expect(await upgradedState.knownWithdrawalSubtreeRoots(untouchedStateMappingKey)).to.equal(false);
     await expect(upgradedState.forceSetState(expectedState, targetState)).to.not.emit(upgradedState, "ForceSetState");
+    expect(await upgradedState.rewardRootEpoch()).to.equal(2n);
 
     const tokenFactory = await ethers.getContractFactory("MockERC20");
     const depositToken = await tokenFactory.deploy("Deposit", "DEP");

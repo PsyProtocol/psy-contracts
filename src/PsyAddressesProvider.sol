@@ -14,6 +14,7 @@ contract PsyAddressesProvider is Initializable, OwnableUpgradeable {
     bytes32 public constant ERC20_GATEWAY_ID = keccak256("ERC20_GATEWAY");
     bytes32 public constant ETH_GATEWAY_ID = keccak256("ETH_GATEWAY");
     bytes32 public constant ZK_VERIFIER_ID = keccak256("ZK_VERIFIER");
+    bytes32 public constant REWARD_CLAIM_VERIFIER_ID = keccak256("REWARD_CLAIM_VERIFIER");
 
     mapping(bytes32 => address) private _addresses;
 

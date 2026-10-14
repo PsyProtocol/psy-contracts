@@ -48,6 +48,8 @@ describe("StateManager.finalize", function () {
     ).to.not.be.reverted;
 
     expect(await sm.lastFinalizedCheckpointId()).to.equal(10n);
+    expect(await sm.rewardRootEpoch()).to.equal(1n);
+    expect(await sm.rewardRootEpochs(ethers.utils.hexZeroPad("0x02", 32))).to.equal(1n);
     expect(await sm.lastVerifiedDepositTreeRoot()).to.equal(deposit.root);
     expect(await sm.lastVerifiedWithdrawalTreeRoot()).to.equal(withdrawal.root);
     expect(await sm.withdrawalSubtreeRoot()).to.equal(withdrawal.proof[0]);
