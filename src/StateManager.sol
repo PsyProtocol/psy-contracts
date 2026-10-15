@@ -43,7 +43,8 @@ contract StateManager is OwnableUpgradeable {
     // Reserved storage slots kept for upgrade safety.
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
-
+    uint64 public rewardRootEpoch;
+    mapping(bytes32 root => uint64 epoch) public rewardRootEpochs;
     event Finalized(
         uint64 indexed newLastFinalizedCheckpointId,
         bytes32 indexed newLastVerifiedCheckpointRoot,
@@ -108,6 +109,7 @@ contract StateManager is OwnableUpgradeable {
         if (addressesProvider_ == address(0)) revert ZeroAddress();
         addressesProvider = addressesProvider_;
         l1ChainIndex = l1ChainIndex_;
+        rewardRootEpoch = 1;
         knownDepositSubtreeRoots[bytes32(0)] = true;
         knownWithdrawalSubtreeRoots[bytes32(0)] = true;
     }
@@ -139,6 +141,7 @@ contract StateManager is OwnableUpgradeable {
         if (target.lastFinalizedCheckpointId > expected.lastFinalizedCheckpointId) {
             revert InvalidForceSetState();
         }
+        rewardRootEpoch += 1;
 
         lastFinalizedCheckpointId = target.lastFinalizedCheckpointId;
         lastVerifiedCheckpointRoot = target.lastVerifiedCheckpointRoot;
@@ -214,6 +217,7 @@ contract StateManager is OwnableUpgradeable {
         knownDepositSubtreeRoots[depositMerkleProof[0]] = true;
         knownWithdrawalSubtreeRoots[withdrawalMerkleProof[0]] = true;
         lastVerifiedCheckpointRoot = checkpointRoots[1];
+        rewardRootEpochs[checkpointRoots[1]] = rewardRootEpoch;
         lastVerifiedDepositTreeRoot = depositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = withdrawalTreeRoot;
         withdrawalSubtreeRoot = withdrawalMerkleProof[0];
@@ -294,13 +298,6 @@ contract StateManager is OwnableUpgradeable {
         uint256 pub0 = uint256(uint128(uint256(msgHash) >> 128));
         uint256 pub1 = uint256(uint128(uint256(msgHash)));
         if (!_verifyZkProof(zkVerifier, proof, pub0, pub1)) revert InvalidProof();
-    }
-
-    function _reverseBytes16(uint128 x) internal pure returns (uint128 y) {
-        bytes16 b = bytes16(x);
-        for (uint256 i = 0; i < 16; ++i) {
-            y |= uint128(uint8(b[i])) << uint8(i * 8);
-        }
     }
 
     function _pairSwapU32x8(bytes32 root) internal pure returns (bytes32) {

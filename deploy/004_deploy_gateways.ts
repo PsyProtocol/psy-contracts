@@ -72,10 +72,14 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     }
     const initialSupply = (1_000_000_000n * (10n ** BigInt(token.decimals))).toString();
     const initialHolder = token.symbol === "PSY" ? bridge.address : deployer;
+    const args =
+      deployment.deployName === "PsyToken"
+        ? [initialHolder, initialSupply, provider.address]
+        : [initialHolder, initialSupply];
     await deploy(hre, deployment.deployName, {
       from: deployer,
       log: true,
-      args: [initialHolder, initialSupply],
+      args,
     });
   }
 };

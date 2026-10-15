@@ -77,6 +77,8 @@ contract StateManagerTest is Test {
         vm.prank(proposer);
         sm.finalize(_dummyGnarkProof(), bytes32(0), roots, bytes32(0), 0, 1, proofZero, proofZero);
         assertEq(sm.lastFinalizedCheckpointId(), 1);
+        assertEq(sm.rewardRootEpoch(), 1);
+        assertEq(sm.rewardRootEpochs(bytes32(0)), 1);
     }
 
     function testOwnerCanRotateBridge() public {
@@ -157,6 +159,9 @@ contract StateManagerTest is Test {
         assertEq(resetLogs[0].topics[0], StateManager.ForceSetState.selector);
 
         assertEq(sm.lastFinalizedCheckpointId(), target.lastFinalizedCheckpointId);
+        assertEq(sm.rewardRootEpoch(), 2);
+        assertEq(sm.rewardRootEpochs(bytes32(uint256(2))), 1);
+        assertEq(sm.rewardRootEpochs(target.lastVerifiedCheckpointRoot), 0);
         assertEq(sm.lastVerifiedCheckpointRoot(), target.lastVerifiedCheckpointRoot);
         assertEq(sm.lastVerifiedDepositTreeRoot(), target.lastVerifiedDepositTreeRoot);
         assertEq(sm.lastVerifiedWithdrawalTreeRoot(), target.lastVerifiedWithdrawalTreeRoot);
@@ -169,6 +174,7 @@ contract StateManagerTest is Test {
         vm.recordLogs();
         vm.prank(owner);
         sm.forceSetState(expected, target);
+        assertEq(sm.rewardRootEpoch(), 2);
         assertEq(vm.getRecordedLogs().length, 0);
     }
 

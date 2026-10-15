@@ -17,6 +17,7 @@ export type DeployConfig = {
   verifier?: string;
   withdrawalClaimVerifier?: string;
   depositBatchVerifier?: string;
+  rewardClaimVerifier?: string;
 };
 
 const PLACEHOLDER_ADDRESSES = new Set<string>([
@@ -51,6 +52,7 @@ function normalize(cfg: Partial<DeployConfig>, fallback: { deployer: string; adm
   if (cfg.verifier) validateAddressLike(cfg.verifier, "verifier");
   if (cfg.withdrawalClaimVerifier) validateAddressLike(cfg.withdrawalClaimVerifier, "withdrawalClaimVerifier");
   if (cfg.depositBatchVerifier) validateAddressLike(cfg.depositBatchVerifier, "depositBatchVerifier");
+  if (cfg.rewardClaimVerifier) validateAddressLike(cfg.rewardClaimVerifier, "rewardClaimVerifier");
 
   return {
     admin,
@@ -65,6 +67,7 @@ function normalize(cfg: Partial<DeployConfig>, fallback: { deployer: string; adm
     verifier: cfg.verifier,
     withdrawalClaimVerifier: cfg.withdrawalClaimVerifier,
     depositBatchVerifier: cfg.depositBatchVerifier,
+    rewardClaimVerifier: cfg.rewardClaimVerifier,
   };
 }
 
