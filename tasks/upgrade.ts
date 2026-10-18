@@ -79,6 +79,15 @@ task("state-manager:force-set-state", "Encode or execute StateManager.forceSetSt
     await forceSetState(args.executionTime);
   });
 
+task("state-manager:revoke-abandoned-reward-roots", "Encode or execute one bounded reward-root cleanup")
+  .addParam("maxEntries", "Maximum reward roots to delete", undefined, types.string)
+  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
+  .setAction(async (args: { maxEntries: string; executionTime?: string }) => {
+    // Hardhat config loads tasks before its runtime exists; helpers import that runtime.
+    const { revokeAbandonedRewardRoots } = await import("../scripts/upgrade/forceSetState");
+    await revokeAbandonedRewardRoots(args.maxEntries, args.executionTime);
+  });
+
 task("bridge:force-set-state", "Encode or execute Bridge.forceSetState")
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
   .setAction(async (args: { executionTime?: string }) => {

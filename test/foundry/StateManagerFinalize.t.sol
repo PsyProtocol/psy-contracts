@@ -141,9 +141,8 @@ contract StateManagerFinalizeTest is Test {
         );
 
         assertEq(sm.lastVerifiedCheckpointRoot(), endRoot);
-        assertEq(sm.rewardRootEpoch(), 1);
-        assertEq(sm.rewardRootEpochs(endRoot), 1);
-        assertEq(sm.rewardRootEpochs(startRoot), 0);
+        assertEq(sm.rewardRootCheckpointId(endRoot), 10);
+        assertEq(sm.rewardRootCheckpointId(startRoot), 0);
         assertEq(sm.lastVerifiedDepositTreeRoot(), depositRoot);
         assertEq(sm.lastVerifiedWithdrawalTreeRoot(), withdrawalRoot);
         assertEq(sm.withdrawalSubtreeRoot(), withdrawalProof[0]);
@@ -191,7 +190,7 @@ contract StateManagerFinalizeTest is Test {
         );
 
         assertEq(sm.lastFinalizedCheckpointId(), terminalCheckpointId);
-        assertEq(sm.rewardRootEpochs(checkpointRoots[1]), 1);
+        assertEq(sm.rewardRootCheckpointId(checkpointRoots[1]), terminalCheckpointId);
     }
 
     function testFinalizeRejectsContinuityMismatch() public {
@@ -301,8 +300,8 @@ contract StateManagerFinalizeTest is Test {
             depositProof,
             zeroWithdrawalProof
         );
-        assertEq(sm.rewardRootEpochs(bytes32(uint256(1))), 1);
-        assertEq(sm.rewardRootEpochs(bytes32(uint256(2))), 1);
+        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(1))), 1);
+        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(2))), 2);
 
         (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) =
             _mkTopProof(bytes32(uint256(0xAA)), 0);

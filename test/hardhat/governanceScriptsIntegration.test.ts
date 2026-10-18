@@ -8,7 +8,7 @@ import { setBridgeTokenFlowConfig } from "../../scripts/governance/bridgeFlowCon
 import { rescueBridgeFunds } from "../../scripts/upgrade/rescueBridgeFunds";
 import initializeBridgeFlowLimits from "../../deploy/003b_initialize_bridge_flow_limits";
 import { upgradeBridge } from "../../scripts/upgrade/bridge";
-import { forceSetState } from "../../scripts/upgrade/forceSetState";
+import { forceSetState, revokeAbandonedRewardRoots } from "../../scripts/upgrade/forceSetState";
 import { UPGRADEABLE_CONTRACTS, upgradeAllContracts } from "../../scripts/upgrade/utils";
 import { getDeployedContract } from "../../helpers/contracts-helpers";
 import {
@@ -136,6 +136,43 @@ describe("governance scripts local integration", function () {
     await forceSetState();
     expect(await stateManager.lastFinalizedCheckpointId()).to.equal(process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID);
     expect(await stateManager.lastVerifiedCheckpointRoot()).to.equal(hexZeroPad("0x11", 32));
+  });
+
+  it("executes bounded reward-root cleanup through the governance task", async function () {
+    const stateManager = await getDeployedContract("StateManager");
+    const provider = await getDeployedContract("PsyAddressesProvider");
+    const acl = await getDeployedContract("PsyACLManager");
+    const [admin] = await ethers.getSigners();
+    await acl.grantRole(await acl.PROPOSER_ROLE(), admin.address);
+    const verifier = await (await ethers.getContractFactory("MockGnarkVerifier")).deploy();
+    await verifier.deployed();
+    await provider.setAddress(await provider.ZK_VERIFIER_ID(), verifier.address);
+    const zero = ethers.constants.HashZero;
+    const root = hexZeroPad("0xa1", 32);
+    const nextRoot = hexZeroPad("0xa2", 32);
+    const proof = ethers.utils.defaultAbiCoder.encode(["uint256[8]"], [[1, 2, 3, 4, 5, 6, 7, 8]]);
+    const path = Array(9).fill(zero);
+    const chainIndex = await stateManager.l1ChainIndex();
+    await stateManager.finalize(proof, zero, [zero, root], zero, chainIndex, 10, path, path);
+    await stateManager.finalize(proof, zero, [root, nextRoot], zero, chainIndex, 11, path, path);
+    const expected = [11, nextRoot, zero, zero, zero];
+    const target = [5, hexZeroPad("0xb5", 32), zero, zero, zero];
+    await stateManager.forceSetState(expected, target);
+    await hre.run("state-manager:revoke-abandoned-reward-roots", { maxEntries: "1" });
+    expect(await stateManager.finalizedRewardRootCount()).to.equal(1);
+    expect(await stateManager.rewardRootsClean()).to.equal(false);
+    expect(await stateManager.rewardRootCheckpointId(nextRoot)).to.equal(0);
+    const cleanup = await revokeAbandonedRewardRoots("1");
+    expect(cleanup.data).to.equal(stateManager.interface.encodeFunctionData("revokeAbandonedRewardRoots", [1]));
+    expect(await stateManager.finalizedRewardRootCount()).to.equal(0);
+    expect(await stateManager.rewardRootsClean()).to.equal(true);
+    expect(await stateManager.rewardRootCheckpointId(root)).to.equal(0);
+  });
+
+  it("rejects invalid cleanup bounds before deployment lookup", async function () {
+    for (const bound of ["0", "-1", "1.5", "01", ethers.BigNumber.from(2).pow(256).toString()]) {
+      await expect(revokeAbandonedRewardRoots(bound)).to.be.rejectedWith("maxEntries must be a positive uint256");
+    }
   });
 
   it("runs atomic Bridge upgrade, one-token config update, and all rescue modes", async function () {

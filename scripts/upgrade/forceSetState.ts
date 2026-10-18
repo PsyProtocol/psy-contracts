@@ -62,6 +62,21 @@ export async function forceSetState(executionTime?: string) {
   return { target: stateManager.address, data, args };
 }
 
+export async function revokeAbandonedRewardRoots(maxEntries: string, executionTime?: string) {
+  if (!/^[1-9][0-9]*$/.test(maxEntries) || BigNumber.from(maxEntries).gte(BigNumber.from(2).pow(256))) {
+    throw new Error("maxEntries must be a positive uint256");
+  }
+  const stateManager = await getDeployedContract("StateManager");
+  const args = [BigNumber.from(maxEntries)] as const;
+  const data = stateManager.interface.encodeFunctionData("revokeAbandonedRewardRoots", args);
+  if (DRY_RUN) {
+    await dryRunEncodedData(stateManager.address, data, executionTime);
+  } else {
+    await waitForTx(await stateManager.revokeAbandonedRewardRoots(...args, GLOBAL_OVERRIDES));
+  }
+  return { target: stateManager.address, data, args };
+}
+
 if (require.main === module) {
   forceSetState(process.env.TIMELOCK_EXECUTION_TIME).catch((err: unknown) => {
     console.error(err);

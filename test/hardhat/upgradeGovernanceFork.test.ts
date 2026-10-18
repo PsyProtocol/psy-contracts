@@ -120,8 +120,7 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
       lastVerifiedCheckpointRoot: hexZeroPad("0x01", 32),
     });
     expect(await upgradedState.getRevision()).to.equal(2);
-    expect(await upgradedState.rewardRootEpoch()).to.equal(2n);
-    expect(await upgradedState.rewardRootEpochs(hexZeroPad("0x01", 32))).to.equal(0n);
+    expect(await upgradedState.rewardRootCheckpointId(hexZeroPad("0x01", 32))).to.equal(0n);
     expect(await upgradedState.lastFinalizedCheckpointId()).to.equal(0);
 
     const bridgeFactory = await ethers.getContractFactory("Bridge");

@@ -28,7 +28,7 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 
 `PsyToken.claimReward` is the reward entry. It reverts unless `block.chainid` is 1, 31337, or 11155111 (`WrongChain`), before any mint or claimed-state write. A valid claim mints `totalAmount` of PSY (9 decimals) to `recipient` and sets `claimed[userId][checkpointId]` for each strictly increasing checkpoint id (at most 64). The same pair cannot be claimed again (`AlreadyClaimed`). Owner `mint` is separate and is not a claim.
 
-The checkpoint root must be the current `StateManager` reward-root epoch (`UnrecognizedRewardRoot` otherwise). The proof is 256 bytes decoded as `uint256[8]` and checked by the address stored at `REWARD_CLAIM_VERIFIER_ID`. The verifier input is the high and low 128 bits of `keccak256(abi.encode(CLAIM_DOMAIN, token, stateManager, userId, recipient, checkpointRoot, count, totalAmount, paddedIds))`, where `CLAIM_DOMAIN` is `keccak256("PsyReward/TokenCheckpointClaim/1")` and unused id slots are zero.
+The checkpoint root must have a nonzero `StateManager.rewardRootCheckpointId` within the finalized tip, and `rewardRootsClean()` must be true (`UnrecognizedRewardRoot` otherwise). Ordinary finalization preserves historical roots. A real force-set, including same-height replacement, pauses finalization and claims until bounded cleanup deletes all registered roots; later alternate-branch advancement cannot restore them. Only a new proof finalization can register a deleted root again. Claimed pairs never reset. The proof is 256 bytes decoded as `uint256[8]` and checked by the address stored at `REWARD_CLAIM_VERIFIER_ID`. The verifier input is the high and low 128 bits of `keccak256(abi.encode(commitment))`, where `commitment = keccak256(abi.encode(CLAIM_DOMAIN, token, stateManager, userId, recipient, checkpointRoot, count, totalAmount, paddedIds))`, `CLAIM_DOMAIN = keccak256("PsyReward/TokenCheckpointClaim/1")`, and unused id slots are zero.
 
 No real Groth16 verifier is deployed for this path. `forge test -C . --match-contract PsyTokenClaimTest` is a component test: `RewardClaimDigestVerifier` accepts one explicit 8-word test proof for the digest `PsyToken` computed. It is not an end-to-end payout and not real-proof evidence.
 
@@ -208,7 +208,9 @@ DRY_RUN=Run npx hardhat upgrade --contract Bridge --network localhost
 DRY_RUN=TimeLock npx hardhat upgrade:all --network sepolia
 ```
 
-StateManager force state repair after upgrading the in-place implementation:
+StateManager force state repair on a deployment initialized with reward-root enumeration:
+
+**Deployment boundary:** existing populated mappings cannot be reconstructed from the new enumeration. This is not an in-place migration: appended storage preserves slot meanings, but an uninitialized upgraded proxy fails closed (`rewardRootsClean == false`). Empty cleanup cannot enable it. Rebuild/redeploy the local StateManager and non-upgradeable PsyToken before E2E, wire the provider consistently, and regenerate guardian authorization after deployment because it binds L1 code hashes. Do not reuse authorization from the preceding deployment.
 
 ```bash
 DRY_RUN=TimeLock \
@@ -224,6 +226,14 @@ NEW_LAST_VERIFIED_WITHDRAWAL_TREE_ROOT=0x030522995310a315f591ff2e948dd628b1fa274
 NEW_WITHDRAWAL_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8857a6622fda55c \
 npx hardhat state-manager:force-set-state --network sepolia
 ```
+
+After the force-set transaction executes, read `finalizedRewardRootCount()` and `rewardRootsClean()` from StateManager. If cleanup is pending, encode/execute one bounded batch with the same StateManager-admin authority:
+
+```bash
+DRY_RUN=TimeLock npx hardhat state-manager:revoke-abandoned-reward-roots --max-entries 100 --network sepolia
+```
+
+Queue and execute each batch through the existing timelock/Safe workflow (`SafeWithTimeLock` when the Safe owns timelock administration); use a distinct `--execution-time` for repeated identical timelock operations. Re-read the count after each executed batch and repeat until it is zero and `rewardRootsClean()` is true. Choose a bound that fits the network gas limit. This command does not auto-loop or bypass governance. Claims and finalization intentionally remain blocked throughout cleanup. A no-op force-set neither starts nor completes cleanup; force-set targets are never registered as reward proofs.
 
 Bridge force state repair uses `EXPECTED_BRIDGE_*` and `NEW_BRIDGE_*` values for the deposit root, proved/pending counts, and `DEPOSIT_FRONTIER_JSON`. Each frontier must be a JSON array containing exactly 32 bytes32 hex values:
 

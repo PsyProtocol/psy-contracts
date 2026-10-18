@@ -12,8 +12,9 @@ interface IPsyAddressesProviderToken {
 
 interface IStateManagerRewardRoot {
     function addressesProvider() external view returns (address);
-    function rewardRootEpoch() external view returns (uint64);
-    function rewardRootEpochs(bytes32 root) external view returns (uint64);
+    function lastFinalizedCheckpointId() external view returns (uint64);
+    function rewardRootCheckpointId(bytes32 checkpointRoot) external view returns (uint64);
+    function rewardRootsClean() external view returns (bool);
 }
 
 interface IZKVerifierProof {
@@ -86,8 +87,9 @@ contract PsyToken is ERC20, Ownable {
         if (verifier.code.length == 0) revert VerifierNotSet();
         if (IStateManagerRewardRoot(stateManager).addressesProvider() != addressesProvider) revert ProviderMismatch();
 
-        uint64 epoch = IStateManagerRewardRoot(stateManager).rewardRootEpoch();
-        if (epoch == 0 || IStateManagerRewardRoot(stateManager).rewardRootEpochs(checkpointRoot) != epoch) {
+        uint64 registeredCheckpointId = IStateManagerRewardRoot(stateManager).rewardRootCheckpointId(checkpointRoot);
+        if (!IStateManagerRewardRoot(stateManager).rewardRootsClean() || registeredCheckpointId == 0
+            || registeredCheckpointId > IStateManagerRewardRoot(stateManager).lastFinalizedCheckpointId()) {
             revert UnrecognizedRewardRoot();
         }
 
@@ -101,7 +103,7 @@ contract PsyToken is ERC20, Ownable {
             paddedIds[i] = checkpointId;
         }
 
-        bytes32 messageHash = keccak256(
+        bytes32 commitment = keccak256(
             abi.encode(
                 CLAIM_DOMAIN,
                 address(this),
@@ -114,6 +116,7 @@ contract PsyToken is ERC20, Ownable {
                 paddedIds
             )
         );
+        bytes32 messageHash = keccak256(abi.encode(commitment));
         if (proof.length != 256) revert InvalidProof();
         uint256[8] memory decodedProof = abi.decode(proof, (uint256[8]));
         uint256[2] memory input =

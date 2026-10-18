@@ -43,8 +43,10 @@ contract StateManager is OwnableUpgradeable {
     // Reserved storage slots kept for upgrade safety.
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
-    uint64 public rewardRootEpoch;
-    mapping(bytes32 root => uint64 epoch) public rewardRootEpochs;
+    mapping(bytes32 checkpointRoot => uint64 checkpointId) public rewardRootCheckpointId;
+    // Appended storage: populated deployments need an explicit migration, not an in-place upgrade.
+    bytes32[] private finalizedRewardRoots;
+    bool public rewardRootsClean;
     event Finalized(
         uint64 indexed newLastFinalizedCheckpointId,
         bytes32 indexed newLastVerifiedCheckpointRoot,
@@ -74,6 +76,9 @@ contract StateManager is OwnableUpgradeable {
 
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
+    error RewardRootCleanupRequired();
+    error InvalidRewardRootCleanup();
+    error RewardRootAlreadyRegistered();
     error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
@@ -109,9 +114,9 @@ contract StateManager is OwnableUpgradeable {
         if (addressesProvider_ == address(0)) revert ZeroAddress();
         addressesProvider = addressesProvider_;
         l1ChainIndex = l1ChainIndex_;
-        rewardRootEpoch = 1;
         knownDepositSubtreeRoots[bytes32(0)] = true;
         knownWithdrawalSubtreeRoots[bytes32(0)] = true;
+        rewardRootsClean = true;
     }
 
     function getRevision() external pure virtual returns (uint256) {
@@ -141,13 +146,13 @@ contract StateManager is OwnableUpgradeable {
         if (target.lastFinalizedCheckpointId > expected.lastFinalizedCheckpointId) {
             revert InvalidForceSetState();
         }
-        rewardRootEpoch += 1;
 
         lastFinalizedCheckpointId = target.lastFinalizedCheckpointId;
         lastVerifiedCheckpointRoot = target.lastVerifiedCheckpointRoot;
         lastVerifiedDepositTreeRoot = target.lastVerifiedDepositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = target.lastVerifiedWithdrawalTreeRoot;
         withdrawalSubtreeRoot = target.withdrawalSubtreeRoot;
+        if (finalizedRewardRoots.length != 0) rewardRootsClean = false;
 
         emit ForceSetState(
             actualStateHash,
@@ -158,6 +163,22 @@ contract StateManager is OwnableUpgradeable {
             target.lastVerifiedWithdrawalTreeRoot,
             target.withdrawalSubtreeRoot
         );
+    }
+
+    function finalizedRewardRootCount() external view returns (uint256) {
+        return finalizedRewardRoots.length;
+    }
+
+    function revokeAbandonedRewardRoots(uint256 maxEntries) external onlyStateManagerAdmin {
+        uint256 count = finalizedRewardRoots.length;
+        if (rewardRootsClean || count == 0 || maxEntries == 0) revert InvalidRewardRootCleanup();
+        uint256 remaining = count > maxEntries ? count - maxEntries : 0;
+        while (count > remaining) {
+            delete rewardRootCheckpointId[finalizedRewardRoots[count - 1]];
+            finalizedRewardRoots.pop();
+            --count;
+        }
+        if (remaining == 0) rewardRootsClean = true;
     }
 
     function _forceSetStateHash(StateManagerContractState memory state_) internal pure returns (bytes32) {
@@ -183,6 +204,8 @@ contract StateManager is OwnableUpgradeable {
         bytes32[9] calldata depositMerkleProof,
         bytes32[9] calldata withdrawalMerkleProof
     ) external onlyProposer {
+        if (!rewardRootsClean) revert RewardRootCleanupRequired();
+        if (rewardRootCheckpointId[checkpointRoots[1]] != 0) revert RewardRootAlreadyRegistered();
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         address zkVerifier = provider.getAddress(provider.ZK_VERIFIER_ID());
         if (zkVerifier == address(0)) revert VerifierNotSet();
@@ -217,7 +240,8 @@ contract StateManager is OwnableUpgradeable {
         knownDepositSubtreeRoots[depositMerkleProof[0]] = true;
         knownWithdrawalSubtreeRoots[withdrawalMerkleProof[0]] = true;
         lastVerifiedCheckpointRoot = checkpointRoots[1];
-        rewardRootEpochs[checkpointRoots[1]] = rewardRootEpoch;
+        rewardRootCheckpointId[checkpointRoots[1]] = newCheckpointId;
+        finalizedRewardRoots.push(checkpointRoots[1]);
         lastVerifiedDepositTreeRoot = depositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = withdrawalTreeRoot;
         withdrawalSubtreeRoot = withdrawalMerkleProof[0];
