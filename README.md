@@ -28,7 +28,7 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 
 `PsyToken.claimReward` is the reward entry. It reverts unless `block.chainid` is 1, 31337, or 11155111 (`WrongChain`), before any mint or claimed-state write. A valid claim mints `totalAmount` of PSY (9 decimals) to `recipient` and sets `claimed[userId][checkpointId]` for each strictly increasing checkpoint id (at most 64). The same pair cannot be claimed again (`AlreadyClaimed`). Owner `mint` is separate and is not a claim.
 
-The checkpoint root must have a nonzero `StateManager.rewardRootCheckpointId` within the finalized tip, and `rewardRootsClean()` must be true (`UnrecognizedRewardRoot` otherwise). Ordinary finalization preserves historical roots. A real force-set, including same-height replacement, pauses finalization and claims until bounded cleanup deletes all registered roots; later alternate-branch advancement cannot restore them. Only a new proof finalization can register a deleted root again. Claimed pairs never reset. The proof is 256 bytes decoded as `uint256[8]` and checked by the address stored at `REWARD_CLAIM_VERIFIER_ID`. The verifier input is the high and low 128 bits of `keccak256(abi.encode(commitment))`, where `commitment = keccak256(abi.encode(CLAIM_DOMAIN, token, stateManager, userId, recipient, checkpointRoot, count, totalAmount, paddedIds))`, `CLAIM_DOMAIN = keccak256("PsyReward/TokenCheckpointClaim/1")`, and unused id slots are zero.
+The checkpoint tree root must have a nonzero `StateManager.checkpointTreeRootCheckpointId` within the finalized tip, and `checkpointTreeRootsClean()` must be true (`UnrecognizedRewardRoot` otherwise). The mapping is the single source of truth; there is no root array or count. Ordinary finalization preserves historical roots. A real force-set, including same-height replacement or an empty registry, pauses finalization and claims. Administrators revoke named abandoned roots and explicitly call `setCheckpointTreeRootsClean(true)` after cleanup; unaffected historical roots remain registered. Later alternate-branch advancement cannot restore revoked roots; only a new proof finalization can register them again. Claimed pairs never reset. The proof is 256 bytes decoded as `uint256[8]` and checked by the address stored at `REWARD_CLAIM_VERIFIER_ID`. The verifier input is the high and low 128 bits of `keccak256(abi.encode(commitment))`, where `commitment = keccak256(abi.encode(CLAIM_DOMAIN, token, stateManager, userId, recipient, checkpointRoot, count, totalAmount, paddedIds))`, `CLAIM_DOMAIN = keccak256("PsyReward/TokenCheckpointClaim/1")`, and unused id slots are zero.
 
 No real Groth16 verifier is deployed for this path. `forge test -C . --match-contract PsyTokenClaimTest` is a component test: `RewardClaimDigestVerifier` accepts one explicit 8-word test proof for the digest `PsyToken` computed. It is not an end-to-end payout and not real-proof evidence.
 
@@ -198,19 +198,18 @@ GRANT_TIMELOCK_ROLES=1 \
 TRANSFER_PROXY_ADMIN_TO_TIMELOCK=1 \
 npx hardhat deploy --tags timelock_proxy_admin --network sepolia
 
-# Encode a timelock queue operation for the in-place StateManager implementation
-DRY_RUN=TimeLock npx hardhat upgrade --contract StateManager --network sepolia
+# Encode a timelock queue operation for a storage-compatible Router upgrade
+DRY_RUN=TimeLock npx hardhat upgrade --contract Router --network sepolia
 
 # Upgrade Bridge to the current in-place implementation directly on a fork/local network
 DRY_RUN=Run npx hardhat upgrade --contract Bridge --network localhost
-
-# Encode all known proxy upgrades
-DRY_RUN=TimeLock npx hardhat upgrade:all --network sepolia
 ```
 
-StateManager force state repair on a deployment initialized with reward-root enumeration:
+StateManager in-place upgrades are blocked by the shared upgrade helper until a reviewed migration exists. This includes `upgrade --contract StateManager`, `upgrade:state-manager`, and `upgrade:all`; the all-contract helper preflights the entire set before any implementation deployment or upgrade. Do not bypass this guard with raw proxy-admin calldata.
 
-**Deployment boundary:** existing populated mappings cannot be reconstructed from the new enumeration. This is not an in-place migration: appended storage preserves slot meanings, but an uninitialized upgraded proxy fails closed (`rewardRootsClean == false`). Empty cleanup cannot enable it. Rebuild/redeploy the local StateManager and non-upgradeable PsyToken before E2E, wire the provider consistently, and regenerate guardian authorization after deployment because it binds L1 code hashes. Do not reuse authorization from the preceding deployment.
+StateManager force state repair uses named checkpoint-tree-root revocation and an independent clean flag:
+
+**Deployment boundary:** removing the parallel root array changes the clean flag's storage slot. Do not upgrade a populated deployment with the former array layout in place: its array length could be interpreted as the clean flag. Rebuild/redeploy the local StateManager and non-upgradeable PsyToken before E2E, wire the provider consistently, and regenerate guardian authorization after deployment because it binds L1 code hashes. Production migration requires a separately reviewed storage and registry migration; do not reuse authorization from the preceding deployment.
 
 ```bash
 DRY_RUN=TimeLock \
@@ -227,13 +226,27 @@ NEW_WITHDRAWAL_SUBTREE_ROOT=0x54deb75cb039b1e82e43dff69194f26d10eae2876fb0aa33c8
 npx hardhat state-manager:force-set-state --network sepolia
 ```
 
-After the force-set transaction executes, read `finalizedRewardRootCount()` and `rewardRootsClean()` from StateManager. If cleanup is pending, encode/execute one bounded batch with the same StateManager-admin authority:
+After the force-set transaction executes, `checkpointTreeRootsClean()` is false. Identify abandoned roots from retained settlement evidence (`Finalized` events and the approved rollback lineage); the contract does not enumerate them. Preserve unaffected historical roots. Encode/execute each named batch with StateManager-admin authority:
 
 ```bash
-DRY_RUN=TimeLock npx hardhat state-manager:revoke-abandoned-reward-roots --max-entries 100 --network sepolia
+DRY_RUN=TimeLock npx hardhat state-manager:revoke-checkpoint-tree-roots --roots-json abandoned-checkpoint-roots.json --network sepolia
 ```
 
-Queue and execute each batch through the existing timelock/Safe workflow (`SafeWithTimeLock` when the Safe owns timelock administration); use a distinct `--execution-time` for repeated identical timelock operations. Re-read the count after each executed batch and repeat until it is zero and `rewardRootsClean()` is true. Choose a bound that fits the network gas limit. This command does not auto-loop or bypass governance. Claims and finalization intentionally remain blocked throughout cleanup. A no-op force-set neither starts nor completes cleanup; force-set targets are never registered as reward proofs.
+`--roots-json` accepts a file path or an inline JSON array of nonzero bytes32 hex values. `revokeCheckpointTreeRoots(bytes32[])` zeroes only the named mapping entries, accepts repeated/already-revoked roots, and never changes the clean flag. Split the approved list into batches that fit the network gas limit. If bridge subtree memberships are abandoned, separately encode `revokeKnownSubtreeRoots(bytes32[],bytes32[])` with the deposit and withdrawal subtree lists; it sets only those known-root entries false, is idempotent, and does not change the clean flag or current state fields.
+
+```bash
+DRY_RUN=TimeLock npx hardhat state-manager:revoke-known-subtree-roots --deposit-roots-json abandoned-deposit-roots.json --withdrawal-roots-json abandoned-withdrawal-roots.json --network sepolia
+```
+
+Both subtree options accept JSON files or inline arrays, including empty arrays and the zero root. **Withdrawal warning:** clearing `knownWithdrawalSubtreeRoots[root]` does not revoke the current `withdrawalSubtreeRoot` field: Bridge accepts equality with that current root independently of the mapping (`src/Bridge.sol:719-724`). Abandoning the current withdrawal root requires repairing the state field as well as revoking its historical membership. `knownDepositSubtreeRoots` currently has no production reader; it is audit state, not an enforced deposit-acceptance gate.
+
+Queue and execute all operations through the existing timelock/Safe workflow (`SafeWithTimeLock` when the Safe owns timelock administration); use a distinct `--execution-time` for repeated identical timelock operations. Verify every named checkpoint root now maps to zero, every revoked subtree membership is false, and retained roots are unchanged. Only after the complete cleanup has been verified, explicitly re-enable claims and finalization:
+
+```bash
+DRY_RUN=TimeLock npx hardhat state-manager:set-checkpoint-tree-roots-clean --clean true --network sepolia
+```
+
+The clean flag attests only to the operator's named list, not its completeness or ancestry; it is not a computed array-length check. `setCheckpointTreeRootsClean(false)` can pause claims and finalization independently. An empty registry still requires explicit re-enablement after a real force-set. A no-op force-set neither starts nor completes cleanup; force-set targets are never registered as checkpoint tree proofs.
 
 Bridge force state repair uses `EXPECTED_BRIDGE_*` and `NEW_BRIDGE_*` values for the deposit root, proved/pending counts, and `DEPOSIT_FRONTIER_JSON`. Each frontier must be a JSON array containing exactly 32 bytes32 hex values:
 

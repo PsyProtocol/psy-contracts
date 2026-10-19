@@ -301,7 +301,7 @@ contract PsyTokenClaimTest is Test {
         token.claimReward(_rewardClaimProof(), bytes32(uint256(2)), 11, recipient, ids, 23);
 
         _assertUnclaimed(token, 11, ids, supply, 0);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(2))), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(2))), 1);
         assertEq(token.balanceOf(holder), INITIAL_SUPPLY);
     }
 
@@ -436,11 +436,15 @@ contract PsyTokenClaimTest is Test {
         bytes32 abandoned = bytes32(uint256(0xA10));
         _advanceRewardRoot(sm, abandoned, 10);
         _replaceRewardTip(sm, 5, bytes32(uint256(0xB5)));
-        assertFalse(sm.rewardRootsClean());
+        assertFalse(sm.checkpointTreeRootsClean());
+        bytes32[] memory roots = new bytes32[](1);
+        roots[0] = abandoned;
         vm.prank(owner);
-        sm.revokeAbandonedRewardRoots(100);
-        assertEq(sm.rewardRootCheckpointId(abandoned), 0);
-        assertEq(sm.rewardRootCheckpointId(historical), 0);
+        sm.revokeCheckpointTreeRoots(roots);
+        assertEq(sm.checkpointTreeRootCheckpointId(abandoned), 0);
+        assertEq(sm.checkpointTreeRootCheckpointId(historical), 1);
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(true);
         _advanceRewardRoot(sm, bytes32(uint256(0xB10)), 10);
         vm.chainId(1);
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
@@ -448,48 +452,49 @@ contract PsyTokenClaimTest is Test {
         _advanceRewardRoot(sm, bytes32(uint256(0xB11)), 11);
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), abandoned, 11, recipient, _ids(9), 77);
-        vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), historical, 11, recipient, _ids(9), 77);
-        assertFalse(token.claimed(11, 9));
+        assertTrue(token.claimed(11, 9));
     }
 
-    function testSameHeightReplacementBlocksClaimsUntilBoundedCleanup() public {
+    function testSameHeightReplacementBlocksClaimsUntilExplicitCleanupAcknowledgement() public {
         (PsyToken token, StateManager sm,, bytes32 historical,,,) = _buildRecognizedRewardRoot(11, _ids(9), 77);
         _advanceRewardRoot(sm, bytes32(uint256(0xA10)), 10);
         _advanceRewardRoot(sm, bytes32(uint256(0xA11)), 11);
         _replaceRewardTip(sm, 11, bytes32(uint256(0xB11)));
-        assertFalse(sm.rewardRootsClean());
-        assertEq(sm.finalizedRewardRootCount(), 3);
+        assertFalse(sm.checkpointTreeRootsClean());
         vm.chainId(1);
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), historical, 11, recipient, _ids(9), 77);
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), bytes32(uint256(0xA11)), 11, recipient, _ids(9), 77);
+        bytes32[] memory roots = new bytes32[](2);
+        roots[0] = bytes32(uint256(0xA10));
+        roots[1] = bytes32(uint256(0xA11));
         vm.prank(owner);
-        sm.revokeAbandonedRewardRoots(2);
-        assertEq(sm.finalizedRewardRootCount(), 1);
-        assertEq(sm.rewardRootCheckpointId(historical), 1);
-        assertFalse(sm.rewardRootsClean());
+        sm.revokeCheckpointTreeRoots(roots);
+        assertEq(sm.checkpointTreeRootCheckpointId(historical), 1);
+        assertFalse(sm.checkpointTreeRootsClean());
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), historical, 11, recipient, _ids(9), 77);
         bytes32[9] memory empty;
         vm.prank(proposer);
-        vm.expectRevert(StateManager.RewardRootCleanupRequired.selector);
+        vm.expectRevert(StateManager.CheckpointTreeRootCleanupRequired.selector);
         sm.finalize(_rewardClaimProof(), 0, _checkpointRoots(0, 0), 0, 0, 12, empty, empty);
         _replaceRewardTip(sm, 11, bytes32(uint256(0xB11)));
-        assertFalse(sm.rewardRootsClean());
-        assertEq(sm.finalizedRewardRootCount(), 1);
+        assertFalse(sm.checkpointTreeRootsClean());
         vm.prank(owner);
-        sm.revokeAbandonedRewardRoots(2);
-        assertTrue(sm.rewardRootsClean());
-        assertEq(sm.finalizedRewardRootCount(), 0);
-        assertEq(sm.rewardRootCheckpointId(historical), 0);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(0xA10))), 0);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(0xA11))), 0);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(0xB11))), 0);
+        sm.revokeCheckpointTreeRoots(roots);
+        assertFalse(sm.checkpointTreeRootsClean());
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(true);
+        assertTrue(sm.checkpointTreeRootsClean());
+        assertEq(sm.checkpointTreeRootCheckpointId(historical), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xA10))), 0);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xA11))), 0);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xB11))), 0);
         _advanceRewardRoot(sm, bytes32(uint256(0xB12)), 12);
-        vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);
         token.claimReward(_rewardClaimProof(), historical, 11, recipient, _ids(9), 77);
+        assertTrue(token.claimed(11, 9));
     }
 
     function testExactRefinalizeRestoresRootAndPreservesClaimedPairs() public {
@@ -497,11 +502,15 @@ contract PsyTokenClaimTest is Test {
         vm.chainId(1);
         token.claimReward(_rewardClaimProof(), root, 11, recipient, _ids(9), 77);
         _replaceRewardTip(sm, 0, bytes32(0));
+        bytes32[] memory roots = new bytes32[](1);
+        roots[0] = root;
         vm.prank(owner);
-        sm.revokeAbandonedRewardRoots(1);
-        assertEq(sm.rewardRootCheckpointId(root), 0);
+        sm.revokeCheckpointTreeRoots(roots);
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(true);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 0);
         _advanceRewardRoot(sm, root, 1);
-        assertEq(sm.rewardRootCheckpointId(root), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 1);
         assertTrue(token.claimed(11, 9));
         vm.expectRevert(PsyToken.AlreadyClaimed.selector);
         token.claimReward(_rewardClaimProof(), root, 11, recipient, _ids(9), 77);
@@ -516,55 +525,65 @@ contract PsyTokenClaimTest is Test {
         (PsyToken token, StateManager sm,, bytes32 root,,,) = _buildRecognizedRewardRoot(11, _ids(9), 77);
         _advanceRewardRoot(sm, bytes32(uint256(0xA10)), 10);
         _replaceRewardTip(sm, 10, bytes32(uint256(0xA10)));
-        assertTrue(sm.rewardRootsClean());
-        assertEq(sm.finalizedRewardRootCount(), 2);
-        assertEq(sm.rewardRootCheckpointId(root), 1);
+        assertTrue(sm.checkpointTreeRootsClean());
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xA10))), 10);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 1);
         vm.chainId(1);
         token.claimReward(_rewardClaimProof(), root, 11, recipient, _ids(9), 77);
         assertTrue(token.claimed(11, 9));
     }
 
-    function testRewardCleanupRequiresAdminPositiveBoundAndPendingRoots() public {
+    function testCheckpointTreeRootRevocationRequiresAdminAndNonzeroRoots() public {
         (, StateManager sm,, bytes32 root,,,) = _buildRecognizedRewardRoot(11, _ids(9), 77);
-        vm.prank(owner);
-        vm.expectRevert(StateManager.InvalidRewardRootCleanup.selector);
-        sm.revokeAbandonedRewardRoots(1);
-        _replaceRewardTip(sm, 0, bytes32(0));
+        bytes32[] memory roots = new bytes32[](2);
+        roots[0] = root;
         vm.prank(other);
         vm.expectRevert(StateManager.UnauthorizedStateManagerAdmin.selector);
-        sm.revokeAbandonedRewardRoots(1);
+        sm.revokeCheckpointTreeRoots(roots);
         vm.prank(owner);
-        vm.expectRevert(StateManager.InvalidRewardRootCleanup.selector);
-        sm.revokeAbandonedRewardRoots(0);
-        assertEq(sm.rewardRootCheckpointId(root), 1);
+        vm.expectRevert(StateManager.InvalidCheckpointTreeRoot.selector);
+        sm.revokeCheckpointTreeRoots(roots);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 1);
+        roots[1] = root;
         vm.prank(owner);
-        sm.revokeAbandonedRewardRoots(type(uint256).max);
-        assertTrue(sm.rewardRootsClean());
+        sm.revokeCheckpointTreeRoots(roots);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 0);
+        assertTrue(sm.checkpointTreeRootsClean());
         vm.prank(owner);
-        vm.expectRevert(StateManager.InvalidRewardRootCleanup.selector);
-        sm.revokeAbandonedRewardRoots(1);
+        sm.revokeCheckpointTreeRoots(roots);
+        vm.prank(owner);
+        sm.revokeCheckpointTreeRoots(new bytes32[](0));
+        vm.prank(other);
+        vm.expectRevert(StateManager.UnauthorizedStateManagerAdmin.selector);
+        sm.setCheckpointTreeRootsClean(false);
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(false);
+        assertFalse(sm.checkpointTreeRootsClean());
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(true);
+        assertTrue(sm.checkpointTreeRootsClean());
     }
 
     function testDuplicateRewardRootCannotOverwriteCheckpointId() public {
         (, StateManager sm,, bytes32 root,,,) = _buildRecognizedRewardRoot(11, _ids(9), 77);
         bytes32[9] memory empty;
         vm.prank(proposer);
-        vm.expectRevert(StateManager.RewardRootAlreadyRegistered.selector);
+        vm.expectRevert(StateManager.CheckpointTreeRootAlreadyRegistered.selector);
         sm.finalize(_rewardClaimProof(), 0, _checkpointRoots(root, root), 0, 0, 2, empty, empty);
-        assertEq(sm.rewardRootCheckpointId(root), 1);
-        assertEq(sm.finalizedRewardRootCount(), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(root), 1);
     }
 
-    function testForceSetWithoutRewardRootsNeedsNoCleanup() public {
+    function testForceSetWithoutCheckpointTreeRootsRequiresExplicitAcknowledgement() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
         StateManager sm = _deployStateManager(provider);
         _setRewardClaimVerifier(provider, sm, bytes32(0));
         _replaceRewardTip(sm, 0, bytes32(uint256(0xB5)));
-        assertTrue(sm.rewardRootsClean());
-        assertEq(sm.finalizedRewardRootCount(), 0);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(0xB5))), 0);
+        assertFalse(sm.checkpointTreeRootsClean());
+        vm.prank(owner);
+        sm.setCheckpointTreeRootsClean(true);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xB5))), 0);
         _advanceRewardRoot(sm, bytes32(uint256(0xB10)), 10);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(0xB10))), 10);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(0xB10))), 10);
     }
 
     function testHistoricalRootUnrecognizedAfterStateRollback() public {
@@ -597,8 +616,8 @@ contract PsyTokenClaimTest is Test {
             continuedDeposit,
             continuedWithdrawal
         );
-        assertEq(sm.rewardRootCheckpointId(checkpointRoot), 1);
-        assertEq(sm.rewardRootCheckpointId(historical), 2);
+        assertEq(sm.checkpointTreeRootCheckpointId(checkpointRoot), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(historical), 2);
 
         vm.chainId(1);
         token.claimReward(_rewardClaimProof(), checkpointRoot, 11, recipient, ids, 77);
@@ -617,7 +636,7 @@ contract PsyTokenClaimTest is Test {
             ),
             _stateManagerContractState(0, 0x21, 0x22, 0x23, 0x24)
         );
-        assertEq(sm.rewardRootCheckpointId(checkpointRoot), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(checkpointRoot), 1);
         assertTrue(token.claimed(11, 9));
 
         vm.expectRevert(PsyToken.UnrecognizedRewardRoot.selector);

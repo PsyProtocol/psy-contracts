@@ -79,13 +79,32 @@ task("state-manager:force-set-state", "Encode or execute StateManager.forceSetSt
     await forceSetState(args.executionTime);
   });
 
-task("state-manager:revoke-abandoned-reward-roots", "Encode or execute one bounded reward-root cleanup")
-  .addParam("maxEntries", "Maximum reward roots to delete", undefined, types.string)
+task("state-manager:revoke-checkpoint-tree-roots", "Encode or execute named checkpoint-tree-root revocation")
+  .addParam("rootsJson", "JSON array of roots or path to a JSON file", undefined, types.string)
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
-  .setAction(async (args: { maxEntries: string; executionTime?: string }) => {
+  .setAction(async (args: { rootsJson: string; executionTime?: string }) => {
     // Hardhat config loads tasks before its runtime exists; helpers import that runtime.
-    const { revokeAbandonedRewardRoots } = await import("../scripts/upgrade/forceSetState");
-    await revokeAbandonedRewardRoots(args.maxEntries, args.executionTime);
+    const { revokeCheckpointTreeRoots } = await import("../scripts/upgrade/forceSetState");
+    await revokeCheckpointTreeRoots(args.rootsJson, args.executionTime);
+  });
+
+task("state-manager:revoke-known-subtree-roots", "Encode or execute named subtree membership revocation")
+  .addParam("depositRootsJson", "Deposit subtree roots JSON array or file path", undefined, types.string)
+  .addParam("withdrawalRootsJson", "Withdrawal subtree roots JSON array or file path", undefined, types.string)
+  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
+  .setAction(async (args: { depositRootsJson: string; withdrawalRootsJson: string; executionTime?: string }) => {
+    // Hardhat config loads tasks before its runtime exists; helpers import that runtime.
+    const { revokeKnownSubtreeRoots } = await import("../scripts/upgrade/forceSetState");
+    await revokeKnownSubtreeRoots(args.depositRootsJson, args.withdrawalRootsJson, args.executionTime);
+  });
+
+task("state-manager:set-checkpoint-tree-roots-clean", "Encode or execute the checkpoint-tree-root clean flag")
+  .addParam("clean", "Whether checkpoint-tree-root cleanup is complete", undefined, types.boolean)
+  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
+  .setAction(async (args: { clean: boolean; executionTime?: string }) => {
+    // Hardhat config loads tasks before its runtime exists; helpers import that runtime.
+    const { setCheckpointTreeRootsClean } = await import("../scripts/upgrade/forceSetState");
+    await setCheckpointTreeRootsClean(args.clean, args.executionTime);
   });
 
 task("bridge:force-set-state", "Encode or execute Bridge.forceSetState")

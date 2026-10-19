@@ -57,6 +57,47 @@ contract StateManagerTest is Test {
         r[1] = last;
     }
 
+    function testRevokeKnownSubtreeRootsIsNamedIdempotentAndAdminOnly() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        StateManager sm = _deployStateManager(provider);
+        bytes32 aclManagerId = provider.ACL_MANAGER_ID();
+        vm.prank(owner);
+        provider.setAddress(aclManagerId, address(acl));
+        bytes32 depositRoot = bytes32(uint256(0xD0));
+        bytes32 withdrawalRoot = bytes32(uint256(0xA0));
+        vm.store(address(sm), keccak256(abi.encode(depositRoot, uint256(5))), bytes32(uint256(1)));
+        vm.store(address(sm), keccak256(abi.encode(withdrawalRoot, uint256(6))), bytes32(uint256(1)));
+        bytes32[] memory deposits = new bytes32[](2);
+        bytes32[] memory withdrawals = new bytes32[](2);
+        deposits[0] = depositRoot;
+        deposits[1] = depositRoot;
+        withdrawals[0] = withdrawalRoot;
+        withdrawals[1] = bytes32(uint256(0xAB));
+        vm.prank(other);
+        vm.expectRevert(StateManager.UnauthorizedStateManagerAdmin.selector);
+        sm.revokeKnownSubtreeRoots(deposits, withdrawals);
+        assertTrue(sm.knownDepositSubtreeRoots(depositRoot));
+        assertTrue(sm.knownWithdrawalSubtreeRoots(withdrawalRoot));
+        vm.prank(owner);
+        sm.revokeKnownSubtreeRoots(deposits, withdrawals);
+        assertFalse(sm.knownDepositSubtreeRoots(depositRoot));
+        assertFalse(sm.knownWithdrawalSubtreeRoots(withdrawalRoot));
+        assertFalse(sm.knownWithdrawalSubtreeRoots(withdrawals[1]));
+        assertTrue(sm.knownDepositSubtreeRoots(bytes32(0)));
+        assertTrue(sm.knownWithdrawalSubtreeRoots(bytes32(0)));
+        assertTrue(sm.checkpointTreeRootsClean());
+        vm.prank(owner);
+        sm.revokeKnownSubtreeRoots(deposits, withdrawals);
+        vm.prank(owner);
+        sm.revokeKnownSubtreeRoots(new bytes32[](0), new bytes32[](0));
+        deposits = new bytes32[](1);
+        vm.prank(owner);
+        sm.revokeKnownSubtreeRoots(deposits, new bytes32[](0));
+        assertFalse(sm.knownDepositSubtreeRoots(bytes32(0)));
+        assertTrue(sm.knownWithdrawalSubtreeRoots(bytes32(0)));
+    }
+
     function testOnlyProposerCanFinalize() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
         PsyACLManager acl = _deployACL();
@@ -77,7 +118,7 @@ contract StateManagerTest is Test {
         vm.prank(proposer);
         sm.finalize(_dummyGnarkProof(), bytes32(0), roots, bytes32(0), 0, 1, proofZero, proofZero);
         assertEq(sm.lastFinalizedCheckpointId(), 1);
-        assertEq(sm.rewardRootCheckpointId(bytes32(0)), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(0)), 1);
     }
 
     function testOwnerCanRotateBridge() public {
@@ -158,8 +199,8 @@ contract StateManagerTest is Test {
         assertEq(resetLogs[0].topics[0], StateManager.ForceSetState.selector);
 
         assertEq(sm.lastFinalizedCheckpointId(), target.lastFinalizedCheckpointId);
-        assertEq(sm.rewardRootCheckpointId(bytes32(uint256(2))), 1);
-        assertEq(sm.rewardRootCheckpointId(target.lastVerifiedCheckpointRoot), 0);
+        assertEq(sm.checkpointTreeRootCheckpointId(bytes32(uint256(2))), 1);
+        assertEq(sm.checkpointTreeRootCheckpointId(target.lastVerifiedCheckpointRoot), 0);
         assertEq(sm.lastVerifiedCheckpointRoot(), target.lastVerifiedCheckpointRoot);
         assertEq(sm.lastVerifiedDepositTreeRoot(), target.lastVerifiedDepositTreeRoot);
         assertEq(sm.lastVerifiedWithdrawalTreeRoot(), target.lastVerifiedWithdrawalTreeRoot);

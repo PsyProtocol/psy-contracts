@@ -233,7 +233,7 @@ describe("governance upgrade and rescue", function () {
     expect(await upgradedState.lastVerifiedDepositTreeRoot()).to.equal(targetState.lastVerifiedDepositTreeRoot);
     expect(await upgradedState.lastVerifiedWithdrawalTreeRoot()).to.equal(targetState.lastVerifiedWithdrawalTreeRoot);
     expect(await upgradedState.withdrawalSubtreeRoot()).to.equal(targetState.withdrawalSubtreeRoot);
-    expect(await upgradedState.rewardRootCheckpointId(targetState.lastVerifiedCheckpointRoot)).to.equal(0n);
+    expect(await upgradedState.checkpointTreeRootCheckpointId(targetState.lastVerifiedCheckpointRoot)).to.equal(0n);
     expect(await upgradedState.knownDepositSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
     expect(await upgradedState.knownWithdrawalSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
     expect(await upgradedState.knownDepositSubtreeRoots(untouchedStateMappingKey)).to.equal(false);

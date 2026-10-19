@@ -43,10 +43,8 @@ contract StateManager is OwnableUpgradeable {
     // Reserved storage slots kept for upgrade safety.
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
-    mapping(bytes32 checkpointRoot => uint64 checkpointId) public rewardRootCheckpointId;
-    // Appended storage: populated deployments need an explicit migration, not an in-place upgrade.
-    bytes32[] private finalizedRewardRoots;
-    bool public rewardRootsClean;
+    mapping(bytes32 checkpointTreeRoot => uint64 checkpointId) public checkpointTreeRootCheckpointId;
+    bool public checkpointTreeRootsClean;
     event Finalized(
         uint64 indexed newLastFinalizedCheckpointId,
         bytes32 indexed newLastVerifiedCheckpointRoot,
@@ -76,9 +74,9 @@ contract StateManager is OwnableUpgradeable {
 
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
-    error RewardRootCleanupRequired();
-    error InvalidRewardRootCleanup();
-    error RewardRootAlreadyRegistered();
+    error CheckpointTreeRootCleanupRequired();
+    error InvalidCheckpointTreeRoot();
+    error CheckpointTreeRootAlreadyRegistered();
     error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
@@ -116,7 +114,7 @@ contract StateManager is OwnableUpgradeable {
         l1ChainIndex = l1ChainIndex_;
         knownDepositSubtreeRoots[bytes32(0)] = true;
         knownWithdrawalSubtreeRoots[bytes32(0)] = true;
-        rewardRootsClean = true;
+        checkpointTreeRootsClean = true;
     }
 
     function getRevision() external pure virtual returns (uint256) {
@@ -152,7 +150,7 @@ contract StateManager is OwnableUpgradeable {
         lastVerifiedDepositTreeRoot = target.lastVerifiedDepositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = target.lastVerifiedWithdrawalTreeRoot;
         withdrawalSubtreeRoot = target.withdrawalSubtreeRoot;
-        if (finalizedRewardRoots.length != 0) rewardRootsClean = false;
+        checkpointTreeRootsClean = false;
 
         emit ForceSetState(
             actualStateHash,
@@ -165,20 +163,27 @@ contract StateManager is OwnableUpgradeable {
         );
     }
 
-    function finalizedRewardRootCount() external view returns (uint256) {
-        return finalizedRewardRoots.length;
+    function revokeCheckpointTreeRoots(bytes32[] calldata roots) external onlyStateManagerAdmin {
+        for (uint256 i; i < roots.length; ++i) {
+            if (roots[i] == bytes32(0)) revert InvalidCheckpointTreeRoot();
+            delete checkpointTreeRootCheckpointId[roots[i]];
+        }
     }
 
-    function revokeAbandonedRewardRoots(uint256 maxEntries) external onlyStateManagerAdmin {
-        uint256 count = finalizedRewardRoots.length;
-        if (rewardRootsClean || count == 0 || maxEntries == 0) revert InvalidRewardRootCleanup();
-        uint256 remaining = count > maxEntries ? count - maxEntries : 0;
-        while (count > remaining) {
-            delete rewardRootCheckpointId[finalizedRewardRoots[count - 1]];
-            finalizedRewardRoots.pop();
-            --count;
+    function setCheckpointTreeRootsClean(bool clean) external onlyStateManagerAdmin {
+        checkpointTreeRootsClean = clean;
+    }
+
+    function revokeKnownSubtreeRoots(
+        bytes32[] calldata depositSubtreeRoots,
+        bytes32[] calldata withdrawalSubtreeRoots
+    ) external onlyStateManagerAdmin {
+        for (uint256 i; i < depositSubtreeRoots.length; ++i) {
+            knownDepositSubtreeRoots[depositSubtreeRoots[i]] = false;
         }
-        if (remaining == 0) rewardRootsClean = true;
+        for (uint256 i; i < withdrawalSubtreeRoots.length; ++i) {
+            knownWithdrawalSubtreeRoots[withdrawalSubtreeRoots[i]] = false;
+        }
     }
 
     function _forceSetStateHash(StateManagerContractState memory state_) internal pure returns (bytes32) {
@@ -204,8 +209,8 @@ contract StateManager is OwnableUpgradeable {
         bytes32[9] calldata depositMerkleProof,
         bytes32[9] calldata withdrawalMerkleProof
     ) external onlyProposer {
-        if (!rewardRootsClean) revert RewardRootCleanupRequired();
-        if (rewardRootCheckpointId[checkpointRoots[1]] != 0) revert RewardRootAlreadyRegistered();
+        if (!checkpointTreeRootsClean) revert CheckpointTreeRootCleanupRequired();
+        if (checkpointTreeRootCheckpointId[checkpointRoots[1]] != 0) revert CheckpointTreeRootAlreadyRegistered();
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         address zkVerifier = provider.getAddress(provider.ZK_VERIFIER_ID());
         if (zkVerifier == address(0)) revert VerifierNotSet();
@@ -240,8 +245,7 @@ contract StateManager is OwnableUpgradeable {
         knownDepositSubtreeRoots[depositMerkleProof[0]] = true;
         knownWithdrawalSubtreeRoots[withdrawalMerkleProof[0]] = true;
         lastVerifiedCheckpointRoot = checkpointRoots[1];
-        rewardRootCheckpointId[checkpointRoots[1]] = newCheckpointId;
-        finalizedRewardRoots.push(checkpointRoots[1]);
+        checkpointTreeRootCheckpointId[checkpointRoots[1]] = newCheckpointId;
         lastVerifiedDepositTreeRoot = depositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = withdrawalTreeRoot;
         withdrawalSubtreeRoot = withdrawalMerkleProof[0];

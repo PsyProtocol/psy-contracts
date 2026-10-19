@@ -8,8 +8,9 @@ import { setBridgeTokenFlowConfig } from "../../scripts/governance/bridgeFlowCon
 import { rescueBridgeFunds } from "../../scripts/upgrade/rescueBridgeFunds";
 import initializeBridgeFlowLimits from "../../deploy/003b_initialize_bridge_flow_limits";
 import { upgradeBridge } from "../../scripts/upgrade/bridge";
-import { forceSetState, revokeAbandonedRewardRoots } from "../../scripts/upgrade/forceSetState";
-import { UPGRADEABLE_CONTRACTS, upgradeAllContracts } from "../../scripts/upgrade/utils";
+import { forceSetState, revokeCheckpointTreeRoots, revokeKnownSubtreeRoots, setCheckpointTreeRootsClean } from "../../scripts/upgrade/forceSetState";
+import { UPGRADEABLE_CONTRACTS, upgradeAllContracts, upgradeContract } from "../../scripts/upgrade/utils";
+import { upgradeStateManager } from "../../scripts/upgrade/stateManager";
 import { getDeployedContract } from "../../helpers/contracts-helpers";
 import {
   defaultFlowConfig,
@@ -99,7 +100,7 @@ describe("governance scripts local integration", function () {
     ]) delete process.env[name];
   });
 
-  it("runs the complete proxy upgrade set and force-state recovery script", async function () {
+  it("blocks incompatible StateManager upgrades before side effects and retains force-state recovery", async function () {
     const token = await getDeployedContract("USDTToken");
     const bridge = await getDeployedContract("Bridge");
     const timelock = await deployments.get("ExecutorWithTimelock");
@@ -116,10 +117,15 @@ describe("governance scripts local integration", function () {
       const proxy = await deployments.get(`${name}_Proxy`);
       before.set(name, await implementationOf(proxy.address));
     }
-    await upgradeAllContracts(undefined, bridgeInitData);
+    const blocked = "StateManager in-place upgrade is blocked";
+    await expect(upgradeAllContracts(undefined, bridgeInitData)).to.be.rejectedWith(blocked);
+    await expect(upgradeContract("StateManager")).to.be.rejectedWith(blocked);
+    await expect(upgradeStateManager()).to.be.rejectedWith(blocked);
+    await expect(hre.run("upgrade", { contract: "StateManager" })).to.be.rejectedWith(blocked);
+    await expect(hre.run("upgrade:state-manager")).to.be.rejectedWith(blocked);
     for (const name of UPGRADEABLE_CONTRACTS) {
       const proxy = await deployments.get(`${name}_Proxy`);
-      expect(await implementationOf(proxy.address)).to.not.equal(before.get(name));
+      expect(await implementationOf(proxy.address)).to.equal(before.get(name));
     }
 
     const stateManager = await getDeployedContract("StateManager");
@@ -138,7 +144,7 @@ describe("governance scripts local integration", function () {
     expect(await stateManager.lastVerifiedCheckpointRoot()).to.equal(hexZeroPad("0x11", 32));
   });
 
-  it("executes bounded reward-root cleanup through the governance task", async function () {
+  it("revokes named checkpoint tree roots and explicitly re-enables finalization", async function () {
     const stateManager = await getDeployedContract("StateManager");
     const provider = await getDeployedContract("PsyAddressesProvider");
     const acl = await getDeployedContract("PsyACLManager");
@@ -151,27 +157,71 @@ describe("governance scripts local integration", function () {
     const root = hexZeroPad("0xa1", 32);
     const nextRoot = hexZeroPad("0xa2", 32);
     const proof = ethers.utils.defaultAbiCoder.encode(["uint256[8]"], [[1, 2, 3, 4, 5, 6, 7, 8]]);
-    const path = Array(9).fill(zero);
+    const merklePath = Array(9).fill(zero);
     const chainIndex = await stateManager.l1ChainIndex();
-    await stateManager.finalize(proof, zero, [zero, root], zero, chainIndex, 10, path, path);
-    await stateManager.finalize(proof, zero, [root, nextRoot], zero, chainIndex, 11, path, path);
+    await stateManager.finalize(proof, zero, [zero, root], zero, chainIndex, 1, merklePath, merklePath);
+    await stateManager.finalize(proof, zero, [root, nextRoot], zero, chainIndex, 11, merklePath, merklePath);
     const expected = [11, nextRoot, zero, zero, zero];
-    const target = [5, hexZeroPad("0xb5", 32), zero, zero, zero];
+    const replacement = hexZeroPad("0xb5", 32);
+    const target = [5, replacement, zero, zero, zero];
     await stateManager.forceSetState(expected, target);
-    await hre.run("state-manager:revoke-abandoned-reward-roots", { maxEntries: "1" });
-    expect(await stateManager.finalizedRewardRootCount()).to.equal(1);
-    expect(await stateManager.rewardRootsClean()).to.equal(false);
-    expect(await stateManager.rewardRootCheckpointId(nextRoot)).to.equal(0);
-    const cleanup = await revokeAbandonedRewardRoots("1");
-    expect(cleanup.data).to.equal(stateManager.interface.encodeFunctionData("revokeAbandonedRewardRoots", [1]));
-    expect(await stateManager.finalizedRewardRootCount()).to.equal(0);
-    expect(await stateManager.rewardRootsClean()).to.equal(true);
-    expect(await stateManager.rewardRootCheckpointId(root)).to.equal(0);
+    await hre.run("state-manager:revoke-checkpoint-tree-roots", { rootsJson: JSON.stringify([nextRoot]) });
+    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
+    expect(await stateManager.checkpointTreeRootCheckpointId(nextRoot)).to.equal(0);
+    const cleanup = await revokeCheckpointTreeRoots([nextRoot]);
+    expect(cleanup.data).to.equal(stateManager.interface.encodeFunctionData("revokeCheckpointTreeRoots", [[nextRoot]]));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "psy-checkpoint-roots-"));
+    try {
+      const file = path.join(dir, "roots.json");
+      fs.writeFileSync(file, JSON.stringify([nextRoot]));
+      await revokeCheckpointTreeRoots(file);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+    expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
+    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
+    await expect(stateManager.finalize(proof, zero, [replacement, nextRoot], zero, chainIndex, 12, merklePath, merklePath))
+      .to.be.revertedWithCustomError(stateManager, "CheckpointTreeRootCleanupRequired");
+    await hre.run("state-manager:set-checkpoint-tree-roots-clean", { clean: true });
+    expect(await stateManager.checkpointTreeRootsClean()).to.equal(true);
+    await stateManager.finalize(proof, zero, [replacement, nextRoot], zero, chainIndex, 12, merklePath, merklePath);
+    expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
+    expect(await stateManager.checkpointTreeRootCheckpointId(nextRoot)).to.equal(12);
+    const paused = await setCheckpointTreeRootsClean(false);
+    expect(paused.data).to.equal(stateManager.interface.encodeFunctionData("setCheckpointTreeRootsClean", [false]));
+    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
   });
 
-  it("rejects invalid cleanup bounds before deployment lookup", async function () {
-    for (const bound of ["0", "-1", "1.5", "01", ethers.BigNumber.from(2).pow(256).toString()]) {
-      await expect(revokeAbandonedRewardRoots(bound)).to.be.rejectedWith("maxEntries must be a positive uint256");
+  it("revokes named subtree memberships through JSON file and inline governance inputs", async function () {
+    const stateManager = await getDeployedContract("StateManager");
+    const zero = ethers.constants.HashZero;
+    expect(await stateManager.knownDepositSubtreeRoots(zero)).to.equal(true);
+    expect(await stateManager.knownWithdrawalSubtreeRoots(zero)).to.equal(true);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "psy-subtree-roots-"));
+    try {
+      const file = path.join(dir, "roots.json");
+      fs.writeFileSync(file, JSON.stringify([zero]));
+      await hre.run("state-manager:revoke-known-subtree-roots", {
+        depositRootsJson: file, withdrawalRootsJson: "[]",
+      });
+      expect(await stateManager.knownDepositSubtreeRoots(zero)).to.equal(false);
+      expect(await stateManager.knownWithdrawalSubtreeRoots(zero)).to.equal(true);
+      const revoked = await revokeKnownSubtreeRoots([], file);
+      expect(revoked.data).to.equal(stateManager.interface.encodeFunctionData("revokeKnownSubtreeRoots", [[], [zero]]));
+      await revokeKnownSubtreeRoots(JSON.stringify([zero]), [zero]);
+      expect(await stateManager.knownWithdrawalSubtreeRoots(zero)).to.equal(false);
+      expect(await stateManager.withdrawalSubtreeRoot()).to.equal(zero);
+      expect(await stateManager.checkpointTreeRootsClean()).to.equal(true);
+      await expect(revokeKnownSubtreeRoots(["0x01"], [])).to.be.rejectedWith("depositRootsJson");
+      await expect(revokeKnownSubtreeRoots([], ["0x01"])).to.be.rejectedWith("withdrawalRootsJson");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid named roots before deployment lookup", async function () {
+    for (const roots of [[ethers.constants.HashZero], ["0x01"], [1], {}]) {
+      await expect(revokeCheckpointTreeRoots(JSON.stringify(roots))).to.be.rejected;
     }
   });
 

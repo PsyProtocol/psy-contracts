@@ -1,3 +1,4 @@
+import fs from "fs";
 import { BigNumber, ethers } from "ethers";
 import { dryRunEncodedData, getDeployedContract, waitForTx } from "../../helpers/contracts-helpers";
 import { DRY_RUN, GLOBAL_OVERRIDES } from "../../helpers/hardhat-constants";
@@ -62,17 +63,60 @@ export async function forceSetState(executionTime?: string) {
   return { target: stateManager.address, data, args };
 }
 
-export async function revokeAbandonedRewardRoots(maxEntries: string, executionTime?: string) {
-  if (!/^[1-9][0-9]*$/.test(maxEntries) || BigNumber.from(maxEntries).gte(BigNumber.from(2).pow(256))) {
-    throw new Error("maxEntries must be a positive uint256");
+function parseRootsJson(rootsJson: string | string[], name: string): string[] {
+  const roots: unknown = typeof rootsJson === "string"
+    ? JSON.parse(rootsJson.trimStart().startsWith("[") ? rootsJson : fs.readFileSync(rootsJson, "utf8"))
+    : rootsJson;
+  if (!Array.isArray(roots) || roots.some((root) =>
+    typeof root !== "string" || !ethers.utils.isHexString(root, 32))) {
+    throw new Error(`${name} must be an array of 32-byte hex values`);
+  }
+  return roots;
+}
+
+export async function revokeCheckpointTreeRoots(rootsJson: string | string[], executionTime?: string) {
+  const roots = parseRootsJson(rootsJson, "rootsJson");
+  if (roots.includes(ethers.constants.HashZero)) {
+    throw new Error("rootsJson must contain only nonzero roots");
   }
   const stateManager = await getDeployedContract("StateManager");
-  const args = [BigNumber.from(maxEntries)] as const;
-  const data = stateManager.interface.encodeFunctionData("revokeAbandonedRewardRoots", args);
+  const args = [roots] as const;
+  const data = stateManager.interface.encodeFunctionData("revokeCheckpointTreeRoots", args);
   if (DRY_RUN) {
     await dryRunEncodedData(stateManager.address, data, executionTime);
   } else {
-    await waitForTx(await stateManager.revokeAbandonedRewardRoots(...args, GLOBAL_OVERRIDES));
+    await waitForTx(await stateManager.revokeCheckpointTreeRoots(...args, GLOBAL_OVERRIDES));
+  }
+  return { target: stateManager.address, data, args };
+}
+
+export async function revokeKnownSubtreeRoots(
+  depositRootsJson: string | string[],
+  withdrawalRootsJson: string | string[],
+  executionTime?: string,
+) {
+  const deposits = parseRootsJson(depositRootsJson, "depositRootsJson");
+  const withdrawals = parseRootsJson(withdrawalRootsJson, "withdrawalRootsJson");
+  const stateManager = await getDeployedContract("StateManager");
+  const args = [deposits, withdrawals] as const;
+  const data = stateManager.interface.encodeFunctionData("revokeKnownSubtreeRoots", args);
+  if (DRY_RUN) {
+    await dryRunEncodedData(stateManager.address, data, executionTime);
+  } else {
+    await waitForTx(await stateManager.revokeKnownSubtreeRoots(...args, GLOBAL_OVERRIDES));
+  }
+  return { target: stateManager.address, data, args };
+}
+
+export async function setCheckpointTreeRootsClean(clean: boolean, executionTime?: string) {
+  if (typeof clean !== "boolean") throw new Error("clean must be a boolean");
+  const stateManager = await getDeployedContract("StateManager");
+  const args = [clean] as const;
+  const data = stateManager.interface.encodeFunctionData("setCheckpointTreeRootsClean", args);
+  if (DRY_RUN) {
+    await dryRunEncodedData(stateManager.address, data, executionTime);
+  } else {
+    await waitForTx(await stateManager.setCheckpointTreeRootsClean(...args, GLOBAL_OVERRIDES));
   }
   return { target: stateManager.address, data, args };
 }

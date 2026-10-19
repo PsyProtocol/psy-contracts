@@ -10,11 +10,11 @@ interface IPsyAddressesProviderToken {
     function getAddress(bytes32 id) external view returns (address);
 }
 
-interface IStateManagerRewardRoot {
+interface IStateManagerCheckpointTreeRoot {
     function addressesProvider() external view returns (address);
     function lastFinalizedCheckpointId() external view returns (uint64);
-    function rewardRootCheckpointId(bytes32 checkpointRoot) external view returns (uint64);
-    function rewardRootsClean() external view returns (bool);
+    function checkpointTreeRootCheckpointId(bytes32 checkpointTreeRoot) external view returns (uint64);
+    function checkpointTreeRootsClean() external view returns (bool);
 }
 
 interface IZKVerifierProof {
@@ -85,11 +85,11 @@ contract PsyToken is ERC20, Ownable {
         if (stateManager.code.length == 0) revert StateManagerNotSet();
         address verifier = provider.getAddress(provider.REWARD_CLAIM_VERIFIER_ID());
         if (verifier.code.length == 0) revert VerifierNotSet();
-        if (IStateManagerRewardRoot(stateManager).addressesProvider() != addressesProvider) revert ProviderMismatch();
+        if (IStateManagerCheckpointTreeRoot(stateManager).addressesProvider() != addressesProvider) revert ProviderMismatch();
 
-        uint64 registeredCheckpointId = IStateManagerRewardRoot(stateManager).rewardRootCheckpointId(checkpointRoot);
-        if (!IStateManagerRewardRoot(stateManager).rewardRootsClean() || registeredCheckpointId == 0
-            || registeredCheckpointId > IStateManagerRewardRoot(stateManager).lastFinalizedCheckpointId()) {
+        uint64 registeredCheckpointId = IStateManagerCheckpointTreeRoot(stateManager).checkpointTreeRootCheckpointId(checkpointRoot);
+        if (!IStateManagerCheckpointTreeRoot(stateManager).checkpointTreeRootsClean() || registeredCheckpointId == 0
+            || registeredCheckpointId > IStateManagerCheckpointTreeRoot(stateManager).lastFinalizedCheckpointId()) {
             revert UnrecognizedRewardRoot();
         }
 
