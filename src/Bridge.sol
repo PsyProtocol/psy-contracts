@@ -5,6 +5,7 @@ import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Ini
 import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
 interface IPsyAddressesProviderView {
     function ACL_MANAGER_ID() external view returns (bytes32);
@@ -37,6 +38,7 @@ interface IWETHWithdraw {
 
 interface IPsyACLManagerBridge {
     function isBridgeAdmin(address account) external view returns (bool);
+    function isGuardian(address account) external view returns (bool);
 }
 
 interface IGnarkGroth16Verifier {
@@ -45,7 +47,12 @@ interface IGnarkGroth16Verifier {
 
 contract Bridge is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant VERSION = 2;
+    uint256 public constant VERSION = 3;
+    uint8 internal constant PAUSE_DEPOSITS = 1 << 0;
+    uint8 internal constant PAUSE_WITHDRAWAL_REGISTRATION = 1 << 1;
+    uint8 internal constant PAUSE_PENDING_CLAIMS = 1 << 2;
+    uint8 internal constant ALL_PAUSE_FLAGS =
+        PAUSE_DEPOSITS | PAUSE_WITHDRAWAL_REGISTRATION | PAUSE_PENDING_CLAIMS;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_PUBLIC_INPUTS_LEN = 18;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 34;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT = 32;
@@ -58,6 +65,67 @@ contract Bridge is Initializable, OwnableUpgradeable {
     bytes32 internal constant EMPTY_DEPOSIT_ROOT =
         0xd65af5933a094e8329332a714327ba72b1e4dac93c0cde8ee479b9bb36c3fc43;
 
+    struct TokenFlowConfig {
+        uint128 minDepositAmount;
+        uint128 depositCapacity;
+        uint128 depositRefillPerSecond;
+        uint128 custodyCap;
+        uint128 smallWithdrawalMax;
+        uint128 mediumWithdrawalMax;
+        uint32 smallWithdrawalDelay;
+        uint32 mediumWithdrawalDelay;
+        uint32 largeWithdrawalDelay;
+        bool configured;
+    }
+
+    struct BucketState {
+        uint128 available;
+        uint64 lastUpdated;
+    }
+
+    struct PendingWithdrawal {
+        address token;
+        address recipient;
+        uint256 amount;
+        uint64 claimableAt;
+    }
+
+    enum DepositStatus {
+        Accepted,
+        NotConfigured,
+        Paused,
+        BelowMinimum,
+        RateLimited,
+        CustodyCapExceeded
+    }
+
+    struct DepositPreview {
+        DepositStatus status;
+        uint256 available;
+        uint64 availableAt;
+        uint256 projectedCustody;
+        bytes32 configHash;
+    }
+
+    enum WithdrawalStatus {
+        Accepted,
+        NotConfigured,
+        RegistrationPaused
+    }
+
+    enum WithdrawalTier {
+        Small,
+        Medium,
+        Large
+    }
+
+    struct WithdrawalPreview {
+        WithdrawalStatus status;
+        WithdrawalTier tier;
+        uint64 claimableAt;
+        bytes32 configHash;
+    }
+
     address public addressesProvider;
     mapping(bytes32 => bool) public claimedNullifiers;
     bytes32[32] internal _depositFrontier;
@@ -69,6 +137,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
     mapping(uint256 => bytes32) public depositLeafHashes;
     address public depositBatchVerifier;
     address public withdrawalClaimVerifier;
+    // V3 storage is append-only after withdrawalClaimVerifier.
+    mapping(address => TokenFlowConfig) private _tokenFlowConfigs;
+    mapping(address => BucketState) private _depositBuckets;
+    mapping(bytes32 => PendingWithdrawal) public pendingWithdrawals;
+    mapping(address => uint8) private _tokenPauseFlags;
+    uint8 private _globalPauseFlags;
 
     event DepositRecorded(
         uint32 indexed index,
@@ -86,6 +160,16 @@ contract Bridge is Initializable, OwnableUpgradeable {
         address indexed token,
         uint256 amount
     );
+    event WithdrawalPendingCreated(
+        bytes32 indexed nonce,
+        address indexed token,
+        address indexed recipient,
+        uint256 amount,
+        uint64 claimableAt
+    );
+    event TokenFlowConfigUpdated(address indexed token, bytes32 indexed oldHash, bytes32 indexed newHash);
+    event TokenPauseFlagsUpdated(address indexed token, uint8 oldFlags, uint8 newFlags);
+    event GlobalPauseFlagsUpdated(uint8 oldFlags, uint8 newFlags);
     event DepositBatchAppended(
         uint32 indexed fromIndex,
         uint32 indexed toIndex,
@@ -117,8 +201,25 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error InvalidBatchRange();
     error AddressHighBitsNonZero();
     error InvalidRealCount();
-
     error UnauthorizedBridgeAdmin();
+    error UnauthorizedGuardian();
+    error InvalidArrayLength();
+    error DuplicateToken(address token);
+    error InvalidFlowConfig(address token);
+    error StaleConfigHash(bytes32 expected, bytes32 actual);
+    error TokenNotConfigured(address token);
+    error DepositsPaused(address token);
+    error DepositBelowMinimum(address token, uint256 amount, uint256 minimum);
+    error DepositRateLimited(address token, uint256 available, uint64 availableAt);
+    error CustodyCapExceeded(address token, uint256 custody, uint256 cap);
+    error WithdrawalRegistrationPaused(address token);
+    error ClaimableAtOverflow();
+    error PendingWithdrawalNotFound(bytes32 nonce);
+    error PendingWithdrawalNotClaimable(bytes32 nonce, uint64 claimableAt);
+    error PendingClaimsPaused(address token);
+    error InvalidPauseFlags(uint8 flags);
+    error BridgeNotFullyPaused();
+    error UnauthorizedFlowInitializer();
     constructor() {
         _disableInitializers();
     }
@@ -149,6 +250,101 @@ contract Bridge is Initializable, OwnableUpgradeable {
         return _depositFrontier;
     }
 
+    function initializeFlowLimits(address[] calldata tokens, TokenFlowConfig[] calldata configs)
+        external
+        reinitializer(3)
+        onlyFlowInitializer
+    {
+        if (tokens.length == 0 || tokens.length != configs.length) revert InvalidArrayLength();
+        uint64 nowTimestamp = uint64(block.timestamp);
+        for (uint256 i = 0; i < tokens.length; ++i) {
+            for (uint256 j = 0; j < i; ++j) {
+                if (tokens[j] == tokens[i]) revert DuplicateToken(tokens[i]);
+            }
+            _validateFlowConfig(tokens[i], configs[i]);
+            _tokenFlowConfigs[tokens[i]] = configs[i];
+            _depositBuckets[tokens[i]] = BucketState(configs[i].depositCapacity, nowTimestamp);
+            emit TokenFlowConfigUpdated(
+                tokens[i], bytes32(0), keccak256(abi.encode(tokens[i], configs[i]))
+            );
+        }
+    }
+
+    function getTokenFlowConfig(address token) external view returns (TokenFlowConfig memory) {
+        return _tokenFlowConfigs[token];
+    }
+
+    function getTokenFlowConfigHash(address token) public view returns (bytes32) {
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        if (!config.configured) return bytes32(0);
+        return keccak256(abi.encode(token, config));
+    }
+
+    function setTokenFlowConfig(address token, TokenFlowConfig calldata next, bytes32 expectedConfigHash)
+        external
+        onlyBridgeAdmin
+    {
+        _validateFlowConfig(token, next);
+        bytes32 oldHash = getTokenFlowConfigHash(token);
+        if (expectedConfigHash != oldHash) revert StaleConfigHash(expectedConfigHash, oldHash);
+
+        TokenFlowConfig storage current = _tokenFlowConfigs[token];
+        if (current.configured) {
+            uint128 depositAvailable = _materializeBucket(
+                _depositBuckets[token], current.depositCapacity, current.depositRefillPerSecond
+            );
+            _tokenFlowConfigs[token] = next;
+            _depositBuckets[token].available =
+                depositAvailable > next.depositCapacity ? next.depositCapacity : depositAvailable;
+        } else {
+            uint64 nowTimestamp = uint64(block.timestamp);
+            _tokenFlowConfigs[token] = next;
+            _depositBuckets[token] = BucketState(next.depositCapacity, nowTimestamp);
+        }
+
+        emit TokenFlowConfigUpdated(token, oldHash, keccak256(abi.encode(token, next)));
+    }
+
+    function getPauseFlags(address token)
+        external
+        view
+        returns (uint8 globalFlags, uint8 tokenFlags, uint8 effectiveFlags)
+    {
+        globalFlags = _globalPauseFlags;
+        tokenFlags = _tokenPauseFlags[token];
+        effectiveFlags = globalFlags | tokenFlags;
+    }
+
+    function guardianPauseToken(address token, uint8 flags) external onlyGuardian {
+        _validatePauseFlags(flags);
+        uint8 oldFlags = _tokenPauseFlags[token];
+        uint8 newFlags = oldFlags | flags;
+        _tokenPauseFlags[token] = newFlags;
+        emit TokenPauseFlagsUpdated(token, oldFlags, newFlags);
+    }
+
+    function guardianPauseGlobal(uint8 flags) external onlyGuardian {
+        _validatePauseFlags(flags);
+        uint8 oldFlags = _globalPauseFlags;
+        uint8 newFlags = oldFlags | flags;
+        _globalPauseFlags = newFlags;
+        emit GlobalPauseFlagsUpdated(oldFlags, newFlags);
+    }
+
+    function setTokenPauseFlags(address token, uint8 flags) external onlyBridgeAdmin {
+        _validatePauseFlags(flags);
+        uint8 oldFlags = _tokenPauseFlags[token];
+        _tokenPauseFlags[token] = flags;
+        emit TokenPauseFlagsUpdated(token, oldFlags, flags);
+    }
+
+    function setGlobalPauseFlags(uint8 flags) external onlyBridgeAdmin {
+        _validatePauseFlags(flags);
+        uint8 oldFlags = _globalPauseFlags;
+        _globalPauseFlags = flags;
+        emit GlobalPauseFlagsUpdated(oldFlags, flags);
+    }
+
     function setDepositBatchVerifier(address verifier) external onlyOwner {
         if (verifier == address(0)) revert ZeroAddress();
         depositBatchVerifier = verifier;
@@ -169,7 +365,24 @@ contract Bridge is Initializable, OwnableUpgradeable {
         _;
     }
 
+    modifier onlyGuardian() {
+        IPsyAddressesProviderView provider = IPsyAddressesProviderView(addressesProvider);
+        address aclManager = provider.getAddress(provider.ACL_MANAGER_ID());
+        if (!IPsyACLManagerBridge(aclManager).isGuardian(msg.sender)) {
+            revert UnauthorizedGuardian();
+        }
+        _;
+    }
+
+    modifier onlyFlowInitializer() {
+        if (msg.sender != owner() && msg.sender != ERC1967Utils.getAdmin()) {
+            revert UnauthorizedFlowInitializer();
+        }
+        _;
+    }
+
     function rescueERC20(address token, address to, uint256 amount) external onlyBridgeAdmin {
+        _requireFullyPaused();
         if (token == address(0) || to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         IERC20(token).safeTransfer(to, amount);
@@ -177,6 +390,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
 
     function rescueNative(address payable to, uint256 amount) external onlyBridgeAdmin {
+        _requireFullyPaused();
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         (bool ok,) = to.call{value: amount}("");
@@ -185,6 +399,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
 
     function rescueWETHAsNative(address payable to, uint256 amount) external onlyBridgeAdmin {
+        _requireFullyPaused();
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
         address wethAddr = _nativeWithdrawalAsset();
@@ -286,6 +501,29 @@ contract Bridge is Initializable, OwnableUpgradeable {
     {
         if (!_isAuthorizedGateway(token)) revert UnauthorizedGateway();
         if (amount == 0) revert ZeroAmount();
+
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        if (!config.configured) revert TokenNotConfigured(token);
+        if ((_effectivePauseFlags(token) & PAUSE_DEPOSITS) != 0) revert DepositsPaused(token);
+        if (amount < config.minDepositAmount) {
+            revert DepositBelowMinimum(token, amount, config.minDepositAmount);
+        }
+
+        BucketState storage bucket = _depositBuckets[token];
+        uint128 available =
+            _materializeBucket(bucket, config.depositCapacity, config.depositRefillPerSecond);
+        if (amount > available) {
+            revert DepositRateLimited(
+                token,
+                available,
+                _availabilityTimestamp(amount - available, config.depositRefillPerSecond)
+            );
+        }
+        uint256 custody = _custodyBalance(token);
+        if (custody > config.custodyCap) {
+            revert CustodyCapExceeded(token, custody, config.custodyCap);
+        }
+        bucket.available = available - uint128(amount);
 
         return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
     }
@@ -450,20 +688,186 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
             if (claimedNullifiers[nonce]) revert NullifierAlreadyClaimed();
             claimedNullifiers[nonce] = true;
-
-            if (tokenAddr == address(0)) {
-                address wethAddr = _nativeWithdrawalAsset();
-                IWETHWithdraw(wethAddr).withdraw(amount);
-                (bool ok,) = payable(recipientAddr).call{value: amount}("");
-                if (!ok) revert TransferFailed();
-            } else {
-                IERC20(tokenAddr).safeTransfer(recipientAddr, amount);
-            }
-
-            emit WithdrawalClaimed(nonce, recipientAddr, tokenAddr, amount);
+            _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount);
         }
 
         if (computedBatchCommit != proofBatchCommit) revert InvalidWithdrawalProof();
+    }
+
+    function claimPendingWithdrawal(bytes32 nonce) external {
+        PendingWithdrawal memory pending = pendingWithdrawals[nonce];
+        if (pending.amount == 0) revert PendingWithdrawalNotFound(nonce);
+        if (block.timestamp < pending.claimableAt) {
+            revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
+        }
+        if ((_effectivePauseFlags(pending.token) & PAUSE_PENDING_CLAIMS) != 0) {
+            revert PendingClaimsPaused(pending.token);
+        }
+        delete pendingWithdrawals[nonce];
+
+        if (pending.token == address(0)) {
+            IWETHWithdraw(_nativeWithdrawalAsset()).withdraw(pending.amount);
+            (bool ok,) = payable(pending.recipient).call{value: pending.amount}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            IERC20(pending.token).safeTransfer(pending.recipient, pending.amount);
+        }
+
+        emit WithdrawalClaimed(nonce, pending.recipient, pending.token, pending.amount);
+    }
+
+    function previewDeposit(address token, uint256 amount) external view returns (DepositPreview memory preview) {
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        preview.configHash = getTokenFlowConfigHash(token);
+        if (!config.configured) {
+            preview.status = DepositStatus.NotConfigured;
+            return preview;
+        }
+
+        BucketState memory bucket = _previewBucket(
+            _depositBuckets[token], config.depositCapacity, config.depositRefillPerSecond
+        );
+        preview.available = bucket.available;
+        if ((_effectivePauseFlags(token) & PAUSE_DEPOSITS) != 0) {
+            preview.status = DepositStatus.Paused;
+            return preview;
+        }
+        if (amount < config.minDepositAmount) {
+            preview.status = DepositStatus.BelowMinimum;
+            return preview;
+        }
+        preview.projectedCustody = _custodyBalance(token) + amount;
+        if (amount > bucket.available) {
+            preview.status = DepositStatus.RateLimited;
+            preview.availableAt =
+                _availabilityTimestamp(amount - bucket.available, config.depositRefillPerSecond);
+            return preview;
+        }
+        if (preview.projectedCustody > config.custodyCap) {
+            preview.status = DepositStatus.CustodyCapExceeded;
+            return preview;
+        }
+        preview.status = DepositStatus.Accepted;
+        preview.availableAt = uint64(block.timestamp);
+    }
+
+    function previewWithdrawal(address token, uint256 amount)
+        external
+        view
+        returns (WithdrawalPreview memory preview)
+    {
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        preview.configHash = getTokenFlowConfigHash(token);
+        if (!config.configured) {
+            preview.status = WithdrawalStatus.NotConfigured;
+            return preview;
+        }
+        if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
+            preview.status = WithdrawalStatus.RegistrationPaused;
+            return preview;
+        }
+
+        (preview.tier, preview.claimableAt) = _withdrawalTierAndTimestamp(config, amount);
+        preview.status = WithdrawalStatus.Accepted;
+    }
+
+    function getMaterializedDepositBucket(address token) external view returns (BucketState memory deposit) {
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        deposit = _previewBucket(
+            _depositBuckets[token], config.depositCapacity, config.depositRefillPerSecond
+        );
+    }
+
+    function _registerPendingWithdrawal(bytes32 nonce, address token, address recipient, uint256 amount) internal {
+        TokenFlowConfig storage config = _tokenFlowConfigs[token];
+        if (!config.configured) revert TokenNotConfigured(token);
+        if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
+            revert WithdrawalRegistrationPaused(token);
+        }
+        (, uint64 claimableAt) = _withdrawalTierAndTimestamp(config, amount);
+        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, claimableAt);
+        emit WithdrawalPendingCreated(nonce, token, recipient, amount, claimableAt);
+    }
+
+    function _withdrawalTierAndTimestamp(TokenFlowConfig storage config, uint256 amount)
+        internal
+        view
+        returns (WithdrawalTier tier, uint64 claimableAt)
+    {
+        uint32 delay;
+        if (amount <= config.smallWithdrawalMax) {
+            tier = WithdrawalTier.Small;
+            delay = config.smallWithdrawalDelay;
+        } else if (amount <= config.mediumWithdrawalMax) {
+            tier = WithdrawalTier.Medium;
+            delay = config.mediumWithdrawalDelay;
+        } else {
+            tier = WithdrawalTier.Large;
+            delay = config.largeWithdrawalDelay;
+        }
+        uint256 timestamp = block.timestamp + delay;
+        if (timestamp > type(uint64).max) revert ClaimableAtOverflow();
+        claimableAt = uint64(timestamp);
+    }
+
+    function _validateFlowConfig(address token, TokenFlowConfig calldata config) internal pure {
+        if (
+            !config.configured || config.minDepositAmount == 0
+                || config.minDepositAmount > config.depositCapacity
+                || config.depositRefillPerSecond == 0 || config.custodyCap < config.minDepositAmount
+                || config.smallWithdrawalMax >= config.mediumWithdrawalMax
+                || config.smallWithdrawalDelay > config.mediumWithdrawalDelay
+                || config.mediumWithdrawalDelay > config.largeWithdrawalDelay
+        ) revert InvalidFlowConfig(token);
+    }
+
+    function _materializeBucket(BucketState storage bucket, uint128 capacity, uint128 refillPerSecond)
+        internal
+        returns (uint128 available)
+    {
+        uint256 elapsed = block.timestamp - bucket.lastUpdated;
+        uint256 materialized = uint256(bucket.available) + elapsed * refillPerSecond;
+        available = materialized > capacity ? capacity : uint128(materialized);
+        bucket.available = available;
+        bucket.lastUpdated = uint64(block.timestamp);
+    }
+
+    function _previewBucket(BucketState storage bucket, uint128 capacity, uint128 refillPerSecond)
+        internal
+        view
+        returns (BucketState memory preview)
+    {
+        uint256 elapsed = block.timestamp - bucket.lastUpdated;
+        uint256 materialized = uint256(bucket.available) + elapsed * refillPerSecond;
+        preview.available = materialized > capacity ? capacity : uint128(materialized);
+        preview.lastUpdated = uint64(block.timestamp);
+    }
+
+    function _custodyBalance(address token) internal view returns (uint256) {
+        address custodyToken = token == address(0) ? _nativeWithdrawalAsset() : token;
+        return IERC20(custodyToken).balanceOf(address(this));
+    }
+
+    function _effectivePauseFlags(address token) internal view returns (uint8) {
+        return _globalPauseFlags | _tokenPauseFlags[token];
+    }
+
+    function _validatePauseFlags(uint8 flags) internal pure {
+        if ((flags & ~ALL_PAUSE_FLAGS) != 0) revert InvalidPauseFlags(flags);
+    }
+
+    function _requireFullyPaused() internal view {
+        if (_globalPauseFlags != ALL_PAUSE_FLAGS) revert BridgeNotFullyPaused();
+    }
+
+    function _availabilityTimestamp(uint256 shortfall, uint128 refillPerSecond)
+        internal
+        view
+        returns (uint64)
+    {
+        uint256 waitSeconds = (shortfall + refillPerSecond - 1) / refillPerSecond;
+        uint256 timestamp = block.timestamp + waitSeconds;
+        return timestamp > type(uint64).max ? type(uint64).max : uint64(timestamp);
     }
 
     function _addressToBytes32(address a) internal pure returns (bytes32) {

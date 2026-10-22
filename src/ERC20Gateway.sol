@@ -37,6 +37,7 @@ contract ERC20Gateway is Initializable, OwnableUpgradeable {
     error OnlyRouter();
     error ZeroAddress();
     error BridgeNotConfigured();
+    error UnsupportedTokenTransfer();
 
     modifier onlyRouter() {
         IPsyAddressesProviderGateway provider = IPsyAddressesProviderGateway(addressesProvider);
@@ -71,7 +72,12 @@ contract ERC20Gateway is Initializable, OwnableUpgradeable {
         address router = provider.getAddress(provider.ROUTER_ID());
         bytes32 l2TokenContractId = IRouterBridgeView(router).l1ToL2Token(token);
 
+        uint256 beforeBalance = IERC20(token).balanceOf(bridgeAddr);
         IERC20(token).safeTransferFrom(depositor, bridgeAddr, amount);
+        uint256 afterBalance = IERC20(token).balanceOf(bridgeAddr);
+        if (afterBalance < beforeBalance || afterBalance - beforeBalance != amount) {
+            revert UnsupportedTokenTransfer();
+        }
         return IBridgeGateway(bridgeAddr).recordDepositFromGateway(
             token, l2TokenContractId, amount, shieldAddress, noteCommitment
         );

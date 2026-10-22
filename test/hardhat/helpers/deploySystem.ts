@@ -60,6 +60,27 @@ export function hexZeroPad(value: string, length: number): string {
   return (ethers as any).zeroPadValue?.(value, length) ?? ethers.utils.hexZeroPad(value, length);
 }
 
+export function defaultFlowConfig(overrides: Record<string, unknown> = {}) {
+  return {
+    minDepositAmount: 1,
+    depositCapacity: 1_000_000_000_000n,
+    depositRefillPerSecond: 1_000_000,
+    custodyCap: 10_000_000_000_000n,
+    smallWithdrawalMax: 1_000,
+    mediumWithdrawalMax: 10_000,
+    smallWithdrawalDelay: 0,
+    mediumWithdrawalDelay: 3600,
+    largeWithdrawalDelay: 86400,
+    configured: true,
+    ...overrides,
+  };
+}
+
+export async function configureFlowToken(bridge: any, token: string, overrides: Record<string, unknown> = {}) {
+  const expectedHash = await bridge.getTokenFlowConfigHash(token);
+  await bridge.setTokenFlowConfig(token, defaultFlowConfig(overrides), expectedHash);
+}
+
 export async function deployAccessLayer(admin: string, proposer?: string) {
   const proposerAddr = proposer ?? admin;
   const provider = await deployProxy("PsyAddressesProvider", [admin]);
@@ -123,6 +144,7 @@ export async function deployCoreSystem(owner: string, proposer?: string) {
   const ethGateway = await deployProxy("ETHGateway", [owner, providerAddress, wethAddress]);
 
   await wireCoreAddresses({ provider, acl, bridge, stateManager, router, erc20Gateway, ethGateway, verifier });
+  await acl.grantRole(await acl.GUARDIAN_ROLE(), owner);
 
   return {
     provider,

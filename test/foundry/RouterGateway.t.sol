@@ -72,6 +72,24 @@ contract RouterGatewayTest is Test {
         bridge = Bridge(payable(address(proxy)));
     }
 
+    function _configureFlowToken(Bridge bridge, address token) internal {
+        Bridge.TokenFlowConfig memory config = Bridge.TokenFlowConfig({
+            minDepositAmount: 1,
+            depositCapacity: 10 ether,
+            depositRefillPerSecond: 1 ether,
+            custodyCap: 100 ether,
+            smallWithdrawalMax: 1 ether,
+            mediumWithdrawalMax: 10 ether,
+            smallWithdrawalDelay: 0,
+            mediumWithdrawalDelay: 0,
+            largeWithdrawalDelay: 0,
+            configured: true
+        });
+        bytes32 expectedConfigHash = bridge.getTokenFlowConfigHash(token);
+        vm.prank(owner);
+        bridge.setTokenFlowConfig(token, config, expectedConfigHash);
+    }
+
     function _deployAll()
         internal
         returns (StateManager sm, Bridge bridge, Router router, ERC20Gateway erc20g, ETHGateway ethg, MockWETH weth)
@@ -100,6 +118,7 @@ contract RouterGatewayTest is Test {
     function testRouterERC20DepositPath() public {
         (, Bridge bridge, Router router, ERC20Gateway erc20g,,) = _deployAll();
         MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(0x1234)));
         token.mint(user, 1_000);
@@ -115,6 +134,7 @@ contract RouterGatewayTest is Test {
 
     function testRouterETHDepositPath() public {
         (, Bridge bridge, Router router,, ETHGateway ethg, MockWETH weth) = _deployAll();
+        _configureFlowToken(bridge, address(0));
         vm.prank(owner);
         router.setTokenMapping(address(0), bytes32(uint256(0x8888)));
 

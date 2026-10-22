@@ -7,7 +7,7 @@
     "test": "hardhat test",
     "clean": "hardhat clean",
     "test:hardhat": "hardhat test",
-    "test:foundry": "forge test -C .",
+    "test:foundry": "forge test --skip node_modules",
     "deploy:hardhat": "hardhat deploy --network hardhat",
     "deploy:localhost": "hardhat deploy --network localhost",
     "deploy:devnet": "hardhat deploy --network devnet",

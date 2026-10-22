@@ -65,14 +65,10 @@ export async function deployImplementation(implementationName: string): Promise<
   return implementationAddress;
 }
 
-async function usesUpgradeAndCallOnly(proxyAdmin: Contract): Promise<boolean> {
+function hasFunction(contract: Contract, signature: string): boolean {
   try {
-    if (typeof (proxyAdmin.interface as any).getFunction === "function") {
-      (proxyAdmin.interface as any).getFunction("UPGRADE_INTERFACE_VERSION");
-    } else if ((proxyAdmin.interface as any).functions?.["UPGRADE_INTERFACE_VERSION()"] == null) {
-      return false;
-    }
-    return await proxyAdmin.UPGRADE_INTERFACE_VERSION() === "5.0.0";
+    contract.interface.getFunction(signature);
+    return true;
   } catch {
     return false;
   }
@@ -97,16 +93,32 @@ async function assertUpgradeModeCompatible(proxyAdmin: Contract): Promise<void> 
   );
 }
 
-async function encodeUpgrade(proxyAdmin: Contract, proxy: string, implementation: string): Promise<string> {
-  if (await usesUpgradeAndCallOnly(proxyAdmin)) {
-    return proxyAdmin.interface.encodeFunctionData("upgradeAndCall", [proxy, implementation, "0x"]);
+async function encodeUpgrade(
+  proxyAdmin: Contract,
+  proxy: string,
+  implementation: string,
+  upgradeCallData: string,
+): Promise<string> {
+  const supportsUpgrade = hasFunction(proxyAdmin, "upgrade(address,address)");
+  const supportsUpgradeAndCall = hasFunction(proxyAdmin, "upgradeAndCall(address,address,bytes)");
+  if (upgradeCallData !== "0x" || !supportsUpgrade) {
+    if (!supportsUpgradeAndCall) throw new Error("ProxyAdmin does not support atomic upgradeAndCall");
+    return proxyAdmin.interface.encodeFunctionData("upgradeAndCall", [proxy, implementation, upgradeCallData]);
   }
   return proxyAdmin.interface.encodeFunctionData("upgrade", [proxy, implementation]);
 }
 
-async function executeUpgrade(proxyAdmin: Contract, proxy: string, implementation: string): Promise<void> {
-  if (await usesUpgradeAndCallOnly(proxyAdmin)) {
-    await waitForTx(await proxyAdmin.upgradeAndCall(proxy, implementation, "0x", GLOBAL_OVERRIDES));
+async function executeUpgrade(
+  proxyAdmin: Contract,
+  proxy: string,
+  implementation: string,
+  upgradeCallData: string,
+): Promise<void> {
+  const supportsUpgrade = hasFunction(proxyAdmin, "upgrade(address,address)");
+  const supportsUpgradeAndCall = hasFunction(proxyAdmin, "upgradeAndCall(address,address,bytes)");
+  if (upgradeCallData !== "0x" || !supportsUpgrade) {
+    if (!supportsUpgradeAndCall) throw new Error("ProxyAdmin does not support atomic upgradeAndCall");
+    await waitForTx(await proxyAdmin.upgradeAndCall(proxy, implementation, upgradeCallData, GLOBAL_OVERRIDES));
     return;
   }
   await waitForTx(await proxyAdmin.upgrade(proxy, implementation, GLOBAL_OVERRIDES));
@@ -116,6 +128,7 @@ export async function upgradeContract(
   contractName: UpgradeableContractName,
   implementationName = DEFAULT_IMPLEMENTATION[contractName],
   executionTime?: string,
+  upgradeCallData = "0x",
 ): Promise<{ proxy: string; implementation: string; calldata: string }> {
   const proxyAdmin = await getDeployedContract("DefaultProxyAdmin");
   const proxy = await getDeployedContract(`${contractName}_Proxy`);
@@ -123,21 +136,29 @@ export async function upgradeContract(
   const proxyAdminAddress = await getContractAddress(proxyAdmin);
   const implementation = await deployImplementation(implementationName);
   await assertUpgradeModeCompatible(proxyAdmin);
-  const calldata = await encodeUpgrade(proxyAdmin, proxyAddress, implementation);
+  const calldata = await encodeUpgrade(proxyAdmin, proxyAddress, implementation, upgradeCallData);
 
   if (DRY_RUN === DryRunExecutor.Run) {
     await dryRunEncodedData(proxyAdminAddress, calldata, executionTime);
   } else if (DRY_RUN) {
     await dryRunEncodedData(proxyAdminAddress, calldata, executionTime);
   } else {
-    await executeUpgrade(proxyAdmin, proxyAddress, implementation);
+    await executeUpgrade(proxyAdmin, proxyAddress, implementation, upgradeCallData);
   }
 
   return { proxy: proxyAddress, implementation, calldata };
 }
 
-export async function upgradeAllContracts(executionTime?: string): Promise<void> {
+export async function upgradeAllContracts(executionTime: string | undefined, bridgeUpgradeCallData: string): Promise<void> {
+  if (bridgeUpgradeCallData === "0x") {
+    throw new Error("Bridge V3 requires non-empty initializeFlowLimits calldata");
+  }
   for (const name of UPGRADEABLE_CONTRACTS) {
-    await upgradeContract(name, DEFAULT_IMPLEMENTATION[name], executionTime);
+    await upgradeContract(
+      name,
+      DEFAULT_IMPLEMENTATION[name],
+      executionTime,
+      name === "Bridge" ? bridgeUpgradeCallData : "0x",
+    );
   }
 }

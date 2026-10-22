@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { deployCoreSystem } from "./helpers/deploySystem";
+import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
 
@@ -27,6 +27,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
 
     await token.mint(user.address, 1000n);
     await token.connect(user).approve(bridge.address, 250n);
@@ -42,6 +43,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
 
     const amount = 777n;
     const nonce = 42n;
@@ -70,12 +72,15 @@ describe("Bridge", function () {
     const before = await token.balanceOf(user.address);
     await expect(
       bridge.batchClaimWithdrawal(proof, publicInputs, slotData)
-    ).to.emit(bridge, "WithdrawalClaimed");
+    ).to.emit(bridge, "WithdrawalPendingCreated");
 
-    expect(await token.balanceOf(user.address)).to.equal(before + amount);
+    expect(await token.balanceOf(user.address)).to.equal(before);
 
     const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
     expect(await bridge.claimedNullifiers(nullifier)).to.equal(true);
+    expect((await bridge.pendingWithdrawals(nullifier)).amount).to.equal(amount);
+    await bridge.claimPendingWithdrawal(nullifier);
+    expect(await token.balanceOf(user.address)).to.equal(before + amount);
   });
 
   it("rejects withdrawal claim with wrong bridge user id in public inputs", async function () {
@@ -85,6 +90,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
 
     const amount = 777n;
     const nonce = 42n;
@@ -124,6 +130,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
+    await configureFlowToken(bridge, token.address);
 
     const amount = 333n;
     const nonce = 77n;
@@ -149,7 +156,7 @@ describe("Bridge", function () {
       destinationChainIndex: 0,
     });
 
-    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.emit(bridge, "WithdrawalClaimed");
+    await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.emit(bridge, "WithdrawalPendingCreated");
     await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
       bridge,
       "NullifierAlreadyClaimed"
