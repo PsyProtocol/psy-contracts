@@ -66,6 +66,18 @@ contract Bridge is Initializable, OwnableUpgradeable {
     bytes32 internal constant EMPTY_DEPOSIT_ROOT =
         0xd65af5933a094e8329332a714327ba72b1e4dac93c0cde8ee479b9bb36c3fc43;
     bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_BRIDGE_FORCE_SET_STATE_V1");
+    // Frozen item-local failure reason codes surfaced by batchClaimWithdrawal through
+    // WithdrawalClaimItemFailed and its return values. 0 means valid; 11..255 reserved.
+    uint8 public constant CLAIM_REASON_ADDRESS_HIGH_BITS = 1;
+    uint8 public constant CLAIM_REASON_WRONG_DESTINATION_CHAIN = 2;
+    uint8 public constant CLAIM_REASON_ZERO_ADDRESS = 3;
+    uint8 public constant CLAIM_REASON_ZERO_AMOUNT = 4;
+    uint8 public constant CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED = 5;
+    uint8 public constant CLAIM_REASON_TOKEN_NOT_CONFIGURED = 6;
+    uint8 public constant CLAIM_REASON_REGISTRATION_PAUSED = 7;
+    uint8 public constant CLAIM_REASON_AMOUNT_OUT_OF_RANGE = 8;
+    uint8 public constant CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW = 9;
+    uint8 public constant CLAIM_REASON_CLAIMABLE_AT_OVERFLOW = 10;
 
     struct BridgeContractState {
         bytes32 depositRoot;
@@ -152,6 +164,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
         uint256 amount,
         uint64 claimableAt
     );
+    event WithdrawalClaimItemFailed(bytes32 indexed nonce, uint8 indexed slotIndex, uint8 reason);
+    event WithdrawalClaimBatchResult(bytes32 indexed batchCommit, uint8 realCount, uint8 succeededCount, uint8 failedCount);
     event WithdrawalForceClaimed(bytes32 indexed nonce, address indexed executor);
     event WithdrawalTotalInitialized(address indexed token, uint256 total);
     event TokenFlowConfigUpdated(address indexed token, bytes32 indexed oldHash, bytes32 indexed newHash);
@@ -699,11 +713,18 @@ contract Bridge is Initializable, OwnableUpgradeable {
         emit DepositBatchAppended(fromIndex, toIndex, depositRoot, oldFrontier, leafHashes);
     }
 
+    /// @notice Registers up to 32 proven withdrawal slots. Payout is a later claimPendingWithdrawal or forceClaimWithdrawal.
+    /// Whole-proof failures (verifier, public input hash, real count, root, bridge user id,
+    /// padding, batch commit) revert with zero effects. Item-local failures skip the slot with
+    /// no state change (nullifier stays unconsumed, totals untouched) and are reported through
+    /// WithdrawalClaimItemFailed plus the returned compact arrays, indexed by slot position.
+    /// @return failedSlotIndexes slot positions (0..31) of failed items, ascending, failed only.
+    /// @return failureReasons CLAIM_REASON_* codes parallel to failedSlotIndexes.
     function batchClaimWithdrawal(
         uint256[8] calldata proof,
         uint256[WITHDRAWAL_BATCH_CLAIM_PUBLIC_INPUTS_LEN] calldata publicInputs,
         uint256[WITHDRAWAL_BATCH_CLAIM_SLOT_DATA_WORDS] calldata slotData
-    ) external {
+    ) external returns (uint8[] memory failedSlotIndexes, uint8[] memory failureReasons) {
         if (withdrawalClaimVerifier == address(0)) revert VerifierNotSet();
 
         bytes32 msgHash = _computeWithdrawalBatchClaimPublicInputsHash(publicInputs);
@@ -727,44 +748,75 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
         bytes32 proofBatchCommit = _u32x8ToBytes32Concat(publicInputs, 10);
         bytes32 computedBatchCommit = _computeWithdrawalBatchSlotDataCommit(slotData);
+        // The commit check must precede every state mutation: a slot set that was never
+        // committed to by the proof must not register or emit per-item events.
+        if (computedBatchCommit != proofBatchCommit) revert InvalidWithdrawalProof();
 
-        for (uint256 i = 0; i < WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT; ++i) {
+        // Padding slots are proof integrity, not per-item validity: reject before any mutation.
+        for (uint256 i = realCount; i < WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT; ++i) {
             uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
-            uint32 senderUserId = uint32(slotData[slotOffset]);
+            for (uint256 w = 0; w < WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS; ++w) {
+                if (slotData[slotOffset + w] != 0) revert InvalidPublicInputs();
+            }
+        }
+
+        failedSlotIndexes = new uint8[](realCount);
+        failureReasons = new uint8[](realCount);
+        uint256 failedCount;
+        uint8 chainIndex = sm.l1ChainIndex();
+
+        for (uint256 i = 0; i < realCount; ++i) {
+            uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
             bytes32 recipientBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 1);
             bytes32 tokenBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 9);
             bytes32 amountBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 17);
             bytes32 nonce = _u32x8ToBytes32Concat(slotData, slotOffset + 25);
             uint32 destinationChainIndex = uint32(slotData[slotOffset + 33]);
-
-            if (i >= realCount) {
-                if (
-                    senderUserId != 0 ||
-                    recipientBytes32 != bytes32(0) ||
-                    tokenBytes32 != bytes32(0) ||
-                    amountBytes32 != bytes32(0) ||
-                    nonce != bytes32(0) ||
-                    destinationChainIndex != 0
-                ) revert InvalidPublicInputs();
-                continue;
-            }
-
-            if ((uint256(recipientBytes32) >> 160) != 0) revert AddressHighBitsNonZero();
-            if ((uint256(tokenBytes32) >> 160) != 0) revert AddressHighBitsNonZero();
             address recipientAddr = address(uint160(uint256(recipientBytes32)));
             address tokenAddr = address(uint160(uint256(tokenBytes32)));
             uint256 amount = uint256(amountBytes32);
 
-            if (destinationChainIndex != sm.l1ChainIndex()) revert WrongDestinationChain();
-            if (recipientAddr == address(0)) revert ZeroAddress();
-            if (amount == 0) revert ZeroAmount();
+            // Explicit classification only: anything not enumerated below reverts the whole
+            // transaction, so unexpected internal failures are never swallowed per slot.
+            uint8 reason;
+            uint256 nextTotal;
+            uint32 delay;
+            if ((uint256(recipientBytes32) >> 160) != 0 || (uint256(tokenBytes32) >> 160) != 0) {
+                reason = CLAIM_REASON_ADDRESS_HIGH_BITS;
+            } else if (destinationChainIndex != chainIndex) {
+                reason = CLAIM_REASON_WRONG_DESTINATION_CHAIN;
+            } else if (recipientAddr == address(0)) {
+                reason = CLAIM_REASON_ZERO_ADDRESS;
+            } else if (amount == 0) {
+                reason = CLAIM_REASON_ZERO_AMOUNT;
+            } else if (claimedNullifiers[nonce]) {
+                // Covers both prior-transaction claims and duplicates earlier in this batch.
+                reason = CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED;
+            } else {
+                (reason, nextTotal, delay) = _withdrawalRegistrationCheck(tokenAddr, amount);
+            }
 
-            if (claimedNullifiers[nonce]) revert NullifierAlreadyClaimed();
-            _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount);
+            if (reason != 0) {
+                failedSlotIndexes[failedCount] = uint8(i);
+                failureReasons[failedCount] = reason;
+                ++failedCount;
+                emit WithdrawalClaimItemFailed(nonce, uint8(i), reason);
+                continue;
+            }
+
+            _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount, nextTotal, delay);
             claimedNullifiers[nonce] = true;
         }
 
-        if (computedBatchCommit != proofBatchCommit) revert InvalidWithdrawalProof();
+        // Compact the parallel arrays down to the failed entries only.
+        assembly ("memory-safe") {
+            mstore(failedSlotIndexes, failedCount)
+            mstore(failureReasons, failedCount)
+        }
+
+        emit WithdrawalClaimBatchResult(
+            proofBatchCommit, uint8(realCount), uint8(realCount - failedCount), uint8(failedCount)
+        );
     }
 
     function claimPendingWithdrawal(bytes32 nonce) external {
@@ -807,21 +859,24 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
 
 
-    function _registerPendingWithdrawal(bytes32 nonce, address token, address recipient, uint256 amount) internal {
+    /// @notice Non-mutating registration validation shared by the batchClaimWithdrawal skip
+    /// classification and pending-withdrawal registration. Returns reason 0 and the derived
+    /// next total and delay when the withdrawal is acceptable.
+    function _withdrawalRegistrationCheck(address token, uint256 amount)
+        internal view
+        returns (uint8 reason, uint256 nextTotal, uint32 delay)
+    {
         TokenFlowConfig storage config = _tokenFlowConfigs[token];
-        if (!config.configured) revert TokenNotConfigured(token);
+        if (!config.configured) return (CLAIM_REASON_TOKEN_NOT_CONFIGURED, 0, 0);
         if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
-            revert WithdrawalRegistrationPaused(token);
+            return (CLAIM_REASON_REGISTRATION_PAUSED, 0, 0);
         }
-        if (amount == 0 || amount >= GOLDILOCKS_PRIME) revert InvalidWithdrawalAmount(amount);
+        if (amount == 0 || amount >= GOLDILOCKS_PRIME) return (CLAIM_REASON_AMOUNT_OUT_OF_RANGE, 0, 0);
 
         uint256 currentTotal = _totalWithdrawalAmounts[token];
-        if (amount > type(uint256).max - currentTotal) {
-            revert TotalWithdrawalAmountOverflow(token, currentTotal, amount);
-        }
-        uint256 nextTotal = currentTotal + amount;
+        if (amount > type(uint256).max - currentTotal) return (CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW, 0, 0);
+        nextTotal = currentTotal + amount;
 
-        uint32 delay;
         if (amount > config.mediumWithdrawalMax || nextTotal > config.totalWithdrawalCap) {
             delay = config.largeWithdrawalDelay;
         } else if (amount > config.smallWithdrawalMax) {
@@ -829,10 +884,19 @@ contract Bridge is Initializable, OwnableUpgradeable {
         } else {
             delay = config.smallWithdrawalDelay;
         }
-        uint256 claimTime = block.timestamp + delay;
-        if (claimTime > type(uint64).max) revert ClaimableAtOverflow();
+        if (block.timestamp + delay > type(uint64).max) return (CLAIM_REASON_CLAIMABLE_AT_OVERFLOW, 0, 0);
+    }
 
+    function _registerPendingWithdrawal(
+        bytes32 nonce,
+        address token,
+        address recipient,
+        uint256 amount,
+        uint256 nextTotal,
+        uint32 delay
+    ) internal {
         _totalWithdrawalAmounts[token] = nextTotal;
+        uint256 claimTime = block.timestamp + delay;
         pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
         emit WithdrawalPendingCreated(nonce, token, recipient, amount, uint64(claimTime));
     }

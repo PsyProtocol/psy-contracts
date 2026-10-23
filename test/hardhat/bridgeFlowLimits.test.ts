@@ -25,7 +25,10 @@ function mkTopProof(leaf: string, index: number): { proof: string[]; root: strin
   return { proof, root: cur };
 }
 
-async function registerWithdrawal(params: {
+const CLAIM_REASON = { AMOUNT_OUT_OF_RANGE: 8 } as const;
+
+
+async function prepareWithdrawal(params: {
   bridge: any;
   stateManager: any;
   recipient: string;
@@ -33,7 +36,7 @@ async function registerWithdrawal(params: {
   amount: bigint;
   nonce: bigint;
 }) {
-  const { bridge, stateManager, recipient, token, amount, nonce } = params;
+  const { stateManager, recipient, token, amount, nonce } = params;
   const deposit = mkTopProof(await stateManager.withdrawalSubtreeRoot(), 0);
   const withdrawal = mkTopProof(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32), 0);
   const lastCheckpointId = await stateManager.lastFinalizedCheckpointId();
@@ -59,8 +62,25 @@ async function registerWithdrawal(params: {
     nonce,
     destinationChainIndex: 0,
   });
-  await bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData);
-  return ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
+  return {
+    publicInputs: calldata.publicInputs,
+    slotData: calldata.slotData,
+    nonceHex: ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32),
+  };
+}
+
+async function registerWithdrawal(params: {
+  bridge: any;
+  stateManager: any;
+  recipient: string;
+  token: string;
+  amount: bigint;
+  nonce: bigint;
+}) {
+  const { bridge } = params;
+  const { publicInputs, slotData, nonceHex } = await prepareWithdrawal(params);
+  await bridge.batchClaimWithdrawal(new Array(8).fill(0n), publicInputs, slotData);
+  return nonceHex;
 }
 
 describe("Bridge per-token flow limits", function () {
@@ -291,7 +311,7 @@ describe("Bridge per-token flow limits", function () {
     await bridge.setTokenPauseFlags(token, 0);
     expect((await bridge.getPauseFlags(token)).effectiveFlags).to.equal(0);
   });
-  it("rolls lifetime totals and nullifiers back when the batch commit check fails after registration", async function () {
+  it("reverts the whole batch with zero effects when the batch commit check fails before registration", async function () {
     const [owner, recipient] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
@@ -323,7 +343,7 @@ describe("Bridge per-token flow limits", function () {
   });
 
 
-  it("enforces Goldilocks bounds and rolls lifetime totals and nullifiers back on failed registration", async function () {
+  it("skips Goldilocks-bound slots with reason 8 without consuming nullifiers or totals", async function () {
     const GOLDILOCKS_PRIME = 18_446_744_069_414_584_321n;
     const [owner, recipient] = await ethers.getSigners();
     const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
@@ -335,7 +355,6 @@ describe("Bridge per-token flow limits", function () {
       totalWithdrawalCap: 10,
     });
 
-
     await registerWithdrawal({
       bridge, stateManager, recipient: recipient.address, token: token.address,
       amount: GOLDILOCKS_PRIME - 1n, nonce: 0x97n,
@@ -346,10 +365,24 @@ describe("Bridge per-token flow limits", function () {
       [GOLDILOCKS_PRIME + 1n, 0x95n],
       [(1n << 64n) - 1n, 0x96n],
     ] as const) {
-      await expect(registerWithdrawal({
+      const { publicInputs, slotData, nonceHex } = await prepareWithdrawal({
         bridge, stateManager, recipient: recipient.address, token: token.address, amount, nonce,
-      })).to.be.revertedWithCustomError(bridge, "InvalidWithdrawalAmount").withArgs(amount);
-      expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
+      });
+      const [failedSlots, reasons] = await bridge.connect(recipient).callStatic.batchClaimWithdrawal(
+        new Array(8).fill(0n), publicInputs, slotData,
+      );
+      expect(failedSlots.map((v) => Number(v))).to.deep.equal([0]);
+      expect(reasons.map((v) => Number(v))).to.deep.equal([CLAIM_REASON.AMOUNT_OUT_OF_RANGE]);
+
+      const tx = await bridge.batchClaimWithdrawal(new Array(8).fill(0n), publicInputs, slotData);
+      const receipt = await tx.wait();
+      const failed = (receipt.events ?? []).filter((e) => e.event === "WithdrawalClaimItemFailed");
+      expect(failed.length).to.equal(1);
+      expect(failed[0].args?.nonce).to.equal(nonceHex);
+      expect(Number(failed[0].args?.slotIndex)).to.equal(0);
+      expect(Number(failed[0].args?.reason)).to.equal(CLAIM_REASON.AMOUNT_OUT_OF_RANGE);
+
+      expect(await bridge.claimedNullifiers(nonceHex)).to.equal(false);
       expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(GOLDILOCKS_PRIME - 1n);
     }
   });

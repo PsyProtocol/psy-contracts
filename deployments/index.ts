@@ -4,6 +4,9 @@ export type DeployedContracts = {
   network: string
   chainId: string | number
   generatedAt?: string
+  /** Block height at which Bridge_Proxy was deployed (from the hardhat-deploy
+   *  proxy deployment receipt) — the lower bound for registration-history scans. */
+  deploymentBlock?: number
   protocol?: {
     chain?: unknown
     tokens?: Record<string, { l1Address: string; l2TokenContractId: string; decimals: number; symbol: string }>

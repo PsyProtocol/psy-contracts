@@ -11,6 +11,17 @@ function sortKeys<T extends Record<string, unknown>>(obj: T): T {
     Object.entries(obj).sort(([a], [b]) => a.localeCompare(b)),
   ) as T;
 }
+/** Bridge_Proxy.receipt.blockNumber from hardhat-deploy. Not the upgrade execute receipt. */
+export function bridgeProxyDeploymentBlock(deployment: { receipt?: { blockNumber?: unknown } } | undefined): number {
+  const blockNumber = deployment?.receipt?.blockNumber;
+  if (typeof blockNumber !== "number" || !Number.isSafeInteger(blockNumber) || blockNumber <= 0) {
+    throw new Error(
+      `Bridge_Proxy deployment receipt missing a positive safe-integer blockNumber` +
+        (blockNumber === undefined ? "" : ` (got ${String(blockNumber)})`),
+    );
+  }
+  return blockNumber;
+}
 
 const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   const { deployments, network } = hre;
@@ -112,6 +123,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     network: network.name,
     chainId: String(exportedChainId),
     generatedAt: new Date().toISOString(),
+    deploymentBlock: bridgeProxyDeploymentBlock(all.Bridge_Proxy),
     protocol: {
       chain: {
         ...protocolChain,

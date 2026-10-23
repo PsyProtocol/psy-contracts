@@ -144,6 +144,62 @@ automatically remove an existing Blockaid or MetaMask warning.
 - `Bridge.recordDeposit`: disabled; the supported path is Router -> Gateway -> Bridge.recordDepositFromGateway
 - `Bridge.recordDepositFromGateway`: caller must match Router-resolved gateway
 
+## Withdrawal batch claim
+
+`Bridge.batchClaimWithdrawal` registers up to 32 proven withdrawal slots. It does not pay anyone. A slot that passes registers `pendingWithdrawals[nonce]` (`token`, `recipient`, `amount`, `claimableAt = block.timestamp + delay`), emits `WithdrawalPendingCreated(nonce, token, recipient, amount, claimableAt)`, adds the amount to the token's lifetime total, and sets `claimedNullifiers[nonce]`. The recipient is paid later, by a separate transaction: `claimPendingWithdrawal(nonce)` after `claimableAt`, or `forceClaimWithdrawal(nonce)` by `withdrawalForceClaimExecutor`. Settlement deletes the pending entry, transfers the token (or unwraps WETH for the native asset), and emits `WithdrawalClaimed`. `WithdrawalForceClaimed` is emitted only by the force path.
+
+### Whole revert vs per-slot failure
+
+These failures revert the whole transaction with zero effects — no nullifier written, no total changed, no event emitted:
+
+| Condition | Error |
+|---|---|
+| `withdrawalClaimVerifier == address(0)` | `VerifierNotSet` |
+| Groth16 verification fails | the verifier's own revert |
+| `realCount == 0` or `realCount > 32` | `InvalidRealCount` |
+| proof root is neither `withdrawalSubtreeRoot()` nor in `knownWithdrawalSubtreeRoots` | `InvalidWithdrawalProof` |
+| `bridgeUserId != BRIDGE_USER_ID()` | `InvalidPublicInputs` |
+| slot-data commit differs from the proof's `batchCommit` | `InvalidWithdrawalProof` |
+| any padding slot (index `>= realCount`) is nonzero | `InvalidPublicInputs` |
+
+The commit and padding checks run before any state change, so slot data the proof never committed to can neither register nor emit. Anything not in the reason table below also reverts the whole transaction; an unexpected internal failure is never swallowed per slot.
+
+A failure inside the table skips only that slot: the nullifier stays unconsumed, the total is untouched, and the other slots still register. The function returns two parallel arrays holding the failed slots only, compacted and in ascending slot order:
+
+- `failedSlotIndexes` — slot positions `0..realCount-1`
+- `failureReasons` — the `CLAIM_REASON_*` code for each
+
+A mined transaction carries no return data. The receipt is the record, and it always ends with one `WithdrawalClaimBatchResult(batchCommit, realCount, succeededCount, failedCount)` where `succeededCount + failedCount == realCount`. Each failed slot also emits `WithdrawalClaimItemFailed(nonce, slotIndex, reason)`. `slotIndex` is the second indexed topic; `reason` is the non-indexed data word. The same nonce can appear in both a `WithdrawalPendingCreated` and a `WithdrawalClaimItemFailed` when two slots share it, and only `slotIndex` tells them apart.
+
+### Reason codes
+
+`0` means the slot was valid. `11..255` are reserved and never emitted. The ten codes, exactly as named in `src/Bridge.sol`:
+
+| Code | Name | Meaning |
+|---|---|---|
+| 1 | `CLAIM_REASON_ADDRESS_HIGH_BITS` | recipient or token word has bits set above bit 160 |
+| 2 | `CLAIM_REASON_WRONG_DESTINATION_CHAIN` | slot destination chain is not `StateManager.l1ChainIndex()` |
+| 3 | `CLAIM_REASON_ZERO_ADDRESS` | recipient is the zero address |
+| 4 | `CLAIM_REASON_ZERO_AMOUNT` | amount is zero |
+| 5 | `CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED` | `claimedNullifiers[nonce]` is already set |
+| 6 | `CLAIM_REASON_TOKEN_NOT_CONFIGURED` | the token has no flow config |
+| 7 | `CLAIM_REASON_REGISTRATION_PAUSED` | effective pause flags include withdrawal-registration pause |
+| 8 | `CLAIM_REASON_AMOUNT_OUT_OF_RANGE` | amount is zero or `>=` the Goldilocks prime |
+| 9 | `CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW` | `amount + totalWithdrawalAmount(token)` would overflow `uint256` |
+| 10 | `CLAIM_REASON_CLAIMABLE_AT_OVERFLOW` | `block.timestamp + delay` would not fit in `uint64` |
+
+Checked in that order, so the first match wins: a zero amount whose address also has high bits reports `1`, not `4`. Codes 6–10 come from `_withdrawalRegistrationCheck`, which also selects the delay tier (`small`, `medium`, or `large`; the large tier also applies when the next total would pass `totalWithdrawalCap`).
+
+### Reason 5 and repeated nonces
+
+Reason 5 covers both a nonce consumed by an earlier transaction and a duplicate of a slot earlier in the same batch. The first slot registers and emits `WithdrawalPendingCreated`; every later slot with that nonce fails with reason 5 and emits `WithdrawalClaimItemFailed` for its own slot index. Nothing about the first registration changes.
+
+Reason 5 says only that the nonce is consumed. Nonces are not unique across withdrawals, so a consumed nonce is this withdrawal's only when on-chain evidence shows the nonce carries this withdrawal's tuple `(token, recipient, amount)`: the still-pending `pendingWithdrawals(nonce)` entry, or, once that entry has settled away, the historical `WithdrawalPendingCreated` for that nonce. `WithdrawalClaimed` is not an identity source — it records the payout, not the registration, and the pending entry is deleted on settlement. A consumed nonce whose tuple differs, or whose registration cannot be found, is not an already-claimed success.
+
+### Payout is a separate transaction
+
+`claimPendingWithdrawal` reverts `PendingWithdrawalNotFound` when no pending entry exists (`amount == 0`, which also covers an already settled nonce), `PendingClaimsPaused` when the effective flags include pending-claim pause, and `PendingWithdrawalNotClaimable` before `claimableAt`. `forceClaimWithdrawal` skips only the time check and reverts `UnauthorizedWithdrawalForceClaimExecutor` for any other caller. Neither call consumes a nullifier; registration already did. A registration that was skipped, including reasons 6, 7, 9, and 10, leaves the nullifier free, so the same withdrawal can be registered again once the condition clears. Pause flags are `PAUSE_DEPOSITS` (bit 0), `PAUSE_WITHDRAWAL_REGISTRATION` (bit 1), and `PAUSE_PENDING_CLAIMS` (bit 2), combined as `global | per-token`.
+
 
 ## Upgrade / Rescue Runbook
 

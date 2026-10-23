@@ -3,6 +3,7 @@ import { expect } from "chai";
 import type { HardhatRuntimeEnvironment } from "hardhat/types";
 import { networkConfig } from "../../helper-hardhat-config";
 import { loadDeployConfig } from "../../deploy/deploy-config";
+import { bridgeProxyDeploymentBlock } from "../../deploy/008_export_deployed_contracts";
 import { protocolConfig } from "../../protocol-config";
 
 const DEPLOYER = "0x1000000000000000000000000000000000000001";
@@ -47,4 +48,22 @@ describe("multi-chain deployment networks", function () {
       "RPC eth_chainId=31337 does not match protocol-config l1ChainId=84532",
     );
   });
+});
+
+describe("Bridge_Proxy deployment block export", function () {
+  it("uses the original proxy receipt block, not an upgrade execute block", function () {
+    expect(bridgeProxyDeploymentBlock({ receipt: { blockNumber: 54 } })).to.equal(54);
+  });
+
+  for (const [label, deployment] of [
+    ["missing proxy", undefined],
+    ["missing receipt", {}],
+    ["zero", { receipt: { blockNumber: 0 } }],
+    ["fractional", { receipt: { blockNumber: 1.5 } }],
+    ["unsafe", { receipt: { blockNumber: Number.MAX_SAFE_INTEGER + 1 } }],
+  ] as const) {
+    it(`refuses a ${label} Bridge_Proxy receipt`, function () {
+      expect(() => bridgeProxyDeploymentBlock(deployment)).to.throw(/positive safe-integer blockNumber/);
+    });
+  }
 });

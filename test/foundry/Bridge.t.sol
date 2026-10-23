@@ -54,6 +54,9 @@ contract BridgeTest is Test {
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_COUNT = 32;
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS =
         DEPOSIT_BATCH_APPEND_SLOT_WORDS * DEPOSIT_BATCH_APPEND_SLOT_COUNT;
+    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 34;
+    uint256 internal constant GOLDILOCKS_PRIME = 18446744069414584321;
+    uint32 internal constant BRIDGE_USER_ID = 524288;
 
     function _deployAddressesProvider() internal returns (PsyAddressesProvider provider) {
         PsyAddressesProvider impl = new PsyAddressesProvider();
@@ -406,6 +409,106 @@ contract BridgeTest is Test {
         leafIndex;
     }
 
+    struct BatchClaimItem {
+        uint32 senderUserId;
+        address recipient;
+        address token;
+        uint256 amount;
+        bytes32 nonce;
+        uint32 destinationChainIndex;
+    }
+
+    function _buildWithdrawalBatchClaimMulti(
+        bytes32 withdrawalRoot,
+        BatchClaimItem[] memory items
+    ) internal pure returns (uint256[18] memory out, uint256[1088] memory slotData) {
+        uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
+        for (uint256 i = 0; i < 8; ++i) {
+            out[i] = rootWords[i];
+        }
+        out[8] = items.length;
+        out[9] = BRIDGE_USER_ID;
+        for (uint256 i = 0; i < items.length; ++i) {
+            uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
+            slotData[slotOffset] = items[i].senderUserId;
+            uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(items[i].recipient))));
+            uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(items[i].token))));
+            uint256[] memory amountWords = _uint256ToWords(items[i].amount);
+            uint256[] memory nonceWords = _bytes32ToWords(items[i].nonce);
+            for (uint256 j = 0; j < 8; ++j) {
+                slotData[slotOffset + 1 + j] = recipientWords[j];
+                slotData[slotOffset + 9 + j] = tokenWords[j];
+                slotData[slotOffset + 17 + j] = amountWords[j];
+                slotData[slotOffset + 25 + j] = nonceWords[j];
+            }
+            slotData[slotOffset + 33] = items[i].destinationChainIndex;
+        }
+        _patchBatchCommit(out, slotData);
+    }
+
+    function _patchBatchCommit(uint256[18] memory publicInputs, uint256[1088] memory slotData) internal pure {
+        uint256[] memory commitWords = _bytes32ToWords(_computeWithdrawalBatchSlotDataCommit(slotData));
+        for (uint256 j = 0; j < 8; ++j) {
+            publicInputs[10 + j] = commitWords[j];
+        }
+    }
+
+    function _batchCommitBytes32(uint256[18] memory publicInputs) internal pure returns (bytes32 out) {
+        for (uint256 j = 0; j < 8; ++j) {
+            out |= bytes32(publicInputs[10 + j] << ((7 - j) * 32));
+        }
+    }
+
+    function _setupBatchClaimBridge()
+        internal
+        returns (Bridge bridge, StateManager sm, bytes32 withdrawalRoot)
+    {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
+        sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        vm.stopPrank();
+
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        (bytes32[9] memory withdrawalProof, bytes32 root) = _mkTopProof(bytes32(uint256(0x1234)), 0);
+        vm.prank(owner);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
+            root,
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+        withdrawalRoot = withdrawalProof[0];
+    }
+
+    function _setBatchClaimVerifier(Bridge bridge, uint256[18] memory publicInputs) internal {
+        WithdrawalBatchHashVerifier verifier =
+            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
+        vm.prank(owner);
+        bridge.setWithdrawalClaimVerifier(address(verifier));
+    }
+
+    function _singleItem(BatchClaimItem memory item)
+        internal pure returns (BatchClaimItem[] memory items)
+    {
+        items = new BatchClaimItem[](1);
+        items[0] = item;
+    }
+
     function _computeWithdrawalBatchClaimPublicInputsHash(
         uint256[18] memory pi
     ) internal pure returns (bytes32) {
@@ -601,47 +704,67 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(user), amount);
     }
 
-    function testClaimWithdrawalRejectsRecipientHighBits() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier verifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+    function testBatchClaimWithdrawalSkipsHighBitAddressSlotsAndSettlesValidSlot() public {
+        (Bridge bridge, StateManager sm, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
         uint256 amount = 123;
-        bytes32 nonce = bytes32(uint256(77));
+        bytes32 badRecipientNonce = bytes32(uint256(0x71));
+        bytes32 badTokenNonce = bytes32(uint256(0x72));
+        bytes32 goodNonce = bytes32(uint256(0x73));
         token.mint(address(bridge), amount);
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-
-        vm.prank(owner);
-        sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
-
-        uint256[8] memory proof;
+        BatchClaimItem[] memory items = new BatchClaimItem[](3);
+        items[0] = BatchClaimItem(0, user, address(token), amount, badRecipientNonce, 0);
+        items[1] = BatchClaimItem(0, user, address(token), amount, badTokenNonce, 0);
+        items[2] = BatchClaimItem(0, user, address(token), amount, goodNonce, 0);
         (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        // High bits on recipient (slot 0) and token (slot 1) must be smuggled in via raw words.
         slotData[1] = 1;
-        WithdrawalBatchHashVerifier verifierBatch =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifierBatch));
+        slotData[WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS + 9] = 1;
+        _patchBatchCommit(publicInputs, slotData);
+        _setBatchClaimVerifier(bridge, publicInputs);
 
+        uint256 totalBefore = bridge.totalWithdrawalAmount(address(token));
+        uint256[8] memory proof;
+        vm.recordLogs();
         vm.prank(user);
-        vm.expectRevert(Bridge.AddressHighBitsNonZero.selector);
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 2);
+        assertEq(failedSlots[0], 0);
+        assertEq(failedSlots[1], 1);
+        assertEq(reasons.length, 2);
+        assertEq(reasons[0], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
+        assertEq(reasons[1], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
+        assertFalse(bridge.claimedNullifiers(badRecipientNonce));
+        assertFalse(bridge.claimedNullifiers(badTokenNonce));
+        assertTrue(bridge.claimedNullifiers(goodNonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(goodNonce);
+        assertEq(pendingAmount, amount);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), totalBefore + amount);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 4, "two ItemFailed, one PendingCreated, one BatchResult");
+        assertEq(logs[0].emitter, address(bridge));
+        assertEq(logs[0].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[0].topics[1], badRecipientNonce);
+        assertEq(uint256(logs[0].topics[2]), 0);
+        assertEq(uint256(abi.decode(logs[0].data, (bytes32))), bridge.CLAIM_REASON_ADDRESS_HIGH_BITS(), "reason is non-indexed data");
+        assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[1].topics[1], badTokenNonce);
+        assertEq(uint256(logs[1].topics[2]), 1);
+        assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[2].topics[1], goodNonce);
+        assertEq(logs[3].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
+        assertEq(logs[3].topics[1], _batchCommitBytes32(publicInputs));
+        (uint8 realCount, uint8 succeeded, uint8 failed) = abi.decode(logs[3].data, (uint8, uint8, uint8));
+        assertEq(realCount, 3);
+        assertEq(succeeded, 1);
+        assertEq(failed, 2);
+        assertEq(uint256(sm.l1ChainIndex()), 0, "l1ChainIndex must be the single-chain default");
     }
 
     function testClaimWithdrawalAcceptsPreviouslyFinalizedSubtreeRoot() public {
@@ -810,58 +933,363 @@ contract BridgeTest is Test {
     }
 
     function testBatchClaimWithdrawalHonorsRegistrationPauseWithoutConsumingNullifier() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(99));
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x9876)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
-
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
         (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(
-                withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0
-            );
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.startPrank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+        vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 2);
-        vm.stopPrank();
 
         uint256[8] memory proof;
-        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalRegistrationPaused.selector, address(token)));
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_REGISTRATION_PAUSED());
         assertFalse(bridge.claimedNullifiers(nonce));
         (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, 0);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+    }
+
+    function testBatchClaimWithdrawalPriorClaimedNonceSkipsAndContinues() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        bytes32 claimedNonce = bytes32(uint256(0x81));
+        bytes32 freshNonce = bytes32(uint256(0x82));
+
+        BatchClaimItem[] memory first =
+            _singleItem(BatchClaimItem(0, user, address(token), amount, claimedNonce, 0));
+        (uint256[18] memory firstInputs, uint256[1088] memory firstSlotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, first);
+        _setBatchClaimVerifier(bridge, firstInputs);
+        uint256[8] memory proof;
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, firstInputs, firstSlotData);
+        assertTrue(bridge.claimedNullifiers(claimedNonce));
+        (,, uint256 claimedAmount, uint64 claimedClaimableAt) = bridge.pendingWithdrawals(claimedNonce);
+
+        BatchClaimItem[] memory second = new BatchClaimItem[](2);
+        second[0] = BatchClaimItem(0, user, address(token), amount, claimedNonce, 0);
+        second[1] = BatchClaimItem(0, user, address(token), amount, freshNonce, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, second);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        vm.recordLogs();
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED());
+        assertTrue(bridge.claimedNullifiers(claimedNonce));
+        assertTrue(bridge.claimedNullifiers(freshNonce));
+        (,, uint256 pendingAfter, uint64 claimableAfter) = bridge.pendingWithdrawals(claimedNonce);
+        assertEq(pendingAfter, claimedAmount);
+        assertEq(claimableAfter, claimedClaimableAt, "prior pending entry must not be re-registered");
+        (,, uint256 freshAmount,) = bridge.pendingWithdrawals(freshNonce);
+        assertEq(freshAmount, amount);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), claimedAmount + amount);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 3, "ItemFailed, PendingCreated, BatchResult");
+        assertEq(logs[0].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[0].topics[1], claimedNonce);
+        assertEq(uint256(logs[0].topics[2]), 0);
+        assertEq(logs[1].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[1].topics[1], freshNonce);
+        assertEq(logs[2].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
+    }
+
+    function testBatchClaimWithdrawalDuplicateNonceInBatchRegistersOnce() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0x83));
+        bytes32 otherNonce = bytes32(uint256(0x84));
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](3);
+        items[0] = BatchClaimItem(0, user, address(token), amount, nonce, 0);
+        items[1] = BatchClaimItem(0, user, address(token), amount, nonce, 0);
+        items[2] = BatchClaimItem(0, user, address(token), amount, otherNonce, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.recordLogs();
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 1);
+        assertEq(reasons[0], bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED());
+        assertTrue(bridge.claimedNullifiers(nonce));
+        assertTrue(bridge.claimedNullifiers(otherNonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, amount);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 2 * amount);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 4, "PendingCreated, ItemFailed, PendingCreated, BatchResult");
+        assertEq(logs[0].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[0].topics[1], nonce);
+        assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[1].topics[1], nonce, "same nonce may appear in both event kinds");
+        assertEq(uint256(logs[1].topics[2]), 1, "failed slot index, not nonce, disambiguates");
+        assertEq(uint256(abi.decode(logs[1].data, (bytes32))), bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED(), "reason is non-indexed data");
+        assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[2].topics[1], otherNonce);
+        assertEq(logs[3].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
+    }
+
+    function testBatchClaimWithdrawalAllSlotsFailSucceedsWithoutStateChange() public {
+        (Bridge bridge, StateManager sm, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        MockERC20 unconfigured = new MockERC20("Unconfigured", "UNCF");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        uint8 chainIndex = sm.l1ChainIndex();
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](5);
+        items[0] = BatchClaimItem(0, address(0), address(token), amount, bytes32(uint256(0x91)), 0);
+        items[1] = BatchClaimItem(0, user, address(token), 0, bytes32(uint256(0x92)), 0);
+        items[2] = BatchClaimItem(0, user, address(token), amount, bytes32(uint256(0x93)), chainIndex + 1);
+        items[3] = BatchClaimItem(0, user, address(unconfigured), amount, bytes32(uint256(0x94)), 0);
+        items[4] = BatchClaimItem(0, user, address(token), amount, bytes32(uint256(0x95)), 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        slotData[4 * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS + 1] = 1;
+        _patchBatchCommit(publicInputs, slotData);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 5);
+        for (uint256 i = 0; i < 5; ++i) {
+            assertEq(failedSlots[i], i);
+        }
+        assertEq(reasons[0], bridge.CLAIM_REASON_ZERO_ADDRESS());
+        assertEq(reasons[1], bridge.CLAIM_REASON_ZERO_AMOUNT());
+        assertEq(reasons[2], bridge.CLAIM_REASON_WRONG_DESTINATION_CHAIN());
+        assertEq(reasons[3], bridge.CLAIM_REASON_TOKEN_NOT_CONFIGURED());
+        assertEq(reasons[4], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
+        for (uint256 i = 0; i < 5; ++i) {
+            assertFalse(bridge.claimedNullifiers(bytes32(uint256(0x91 + i))));
+        }
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+        assertEq(bridge.totalWithdrawalAmount(address(unconfigured)), 0);
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(bytes32(uint256(0x91)));
+        assertEq(pendingAmount, 0);
+    }
+
+    function testBatchClaimWithdrawalCommitMismatchRevertsWithZeroEffects() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0x96));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+        // Corrupt the committed slot set after the verifier was pinned to the honest hash.
+        slotData[0] = 1;
+
+        uint256[8] memory proof;
+        vm.recordLogs();
+        vm.prank(user);
+        vm.expectRevert(Bridge.InvalidWithdrawalProof.selector);
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        assertEq(vm.getRecordedLogs().length, 0, "no events may survive a whole-proof revert");
+        assertFalse(bridge.claimedNullifiers(nonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, 0);
+    }
+
+    function testBatchClaimWithdrawalAmountOutOfRangeBoundary() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 maxValidAmount = GOLDILOCKS_PRIME - 1;
+        bytes32 okNonce = bytes32(uint256(0x97));
+        bytes32 badNonce = bytes32(uint256(0x98));
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](2);
+        items[0] = BatchClaimItem(0, user, address(token), maxValidAmount, okNonce, 0);
+        items[1] = BatchClaimItem(0, user, address(token), GOLDILOCKS_PRIME, badNonce, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 1);
+        assertEq(reasons[0], bridge.CLAIM_REASON_AMOUNT_OUT_OF_RANGE());
+        assertTrue(bridge.claimedNullifiers(okNonce));
+        assertFalse(bridge.claimedNullifiers(badNonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), maxValidAmount);
+    }
+
+    function testBatchClaimWithdrawalTotalOverflowBoundary() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 10;
+        bytes32 okNonce = bytes32(uint256(0xA1));
+        bytes32 badNonce = bytes32(uint256(0xA2));
+
+        address[] memory configuredTokens = new address[](1);
+        configuredTokens[0] = address(token);
+        uint256[] memory historicalTotals = new uint256[](1);
+        historicalTotals[0] = type(uint256).max - amount;
+        vm.prank(owner);
+        bridge.initializeWithdrawalTotals(
+            configuredTokens, _flowConfigs(1), historicalTotals, _tokenSetHash(configuredTokens), address(this)
+        );
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](2);
+        items[0] = BatchClaimItem(0, user, address(token), amount, okNonce, 0);
+        items[1] = BatchClaimItem(0, user, address(token), amount, badNonce, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 1);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW());
+        assertTrue(bridge.claimedNullifiers(okNonce));
+        assertFalse(bridge.claimedNullifiers(badNonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
+    }
+
+    function testBatchClaimWithdrawalClaimableAtOverflowBoundary() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        Bridge.TokenFlowConfig memory config = _defaultFlowConfig();
+        config.smallWithdrawalMax = 100;
+        config.mediumWithdrawalMax = 200;
+        config.totalWithdrawalCap = 200;
+        config.largeWithdrawalDelay = 1_000;
+        _setFlowConfig(bridge, address(token), config);
+
+        uint256 amount = 250;
+        bytes32 boundaryNonce = bytes32(uint256(0xB1));
+        bytes32 overflowNonce = bytes32(uint256(0xB2));
+
+        BatchClaimItem[] memory boundaryItems =
+            _singleItem(BatchClaimItem(0, user, address(token), amount, boundaryNonce, 0));
+        (uint256[18] memory boundaryInputs, uint256[1088] memory boundarySlotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, boundaryItems);
+        _setBatchClaimVerifier(bridge, boundaryInputs);
+        uint256[8] memory proof;
+        vm.warp(type(uint64).max - config.largeWithdrawalDelay);
+        vm.prank(user);
+        bridge.batchClaimWithdrawal(proof, boundaryInputs, boundarySlotData);
+        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(boundaryNonce);
+        assertEq(uint256(claimableAt), uint256(type(uint64).max), "claim time exactly at uint64 max must be accepted");
+
+        BatchClaimItem[] memory overflowItems =
+            _singleItem(BatchClaimItem(0, user, address(token), amount, overflowNonce, 0));
+        (uint256[18] memory overflowInputs, uint256[1088] memory overflowSlotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, overflowItems);
+        _setBatchClaimVerifier(bridge, overflowInputs);
+        vm.warp(type(uint64).max - config.largeWithdrawalDelay + 1);
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) =
+            bridge.batchClaimWithdrawal(proof, overflowInputs, overflowSlotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_CLAIMABLE_AT_OVERFLOW());
+        assertFalse(bridge.claimedNullifiers(overflowNonce));
+    }
+
+    function testBatchClaimWithdrawalFailedArraysAndLogsMapToInputPositions() public {
+        (Bridge bridge, StateManager sm, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        uint8 chainIndex = sm.l1ChainIndex();
+        bytes32 nonceA = bytes32(uint256(0xC1));
+        bytes32 zeroAmountNonce = bytes32(uint256(0xC2));
+        bytes32 nonceB = bytes32(uint256(0xC3));
+        bytes32 wrongChainNonce = bytes32(uint256(0xC4));
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](4);
+        items[0] = BatchClaimItem(0, user, address(token), amount, nonceA, 0);
+        items[1] = BatchClaimItem(0, user, address(token), 0, zeroAmountNonce, 0);
+        items[2] = BatchClaimItem(0, user, address(token), amount, nonceB, 0);
+        items[3] = BatchClaimItem(0, user, address(token), amount, wrongChainNonce, chainIndex + 1);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.recordLogs();
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 2);
+        assertEq(failedSlots[0], 1);
+        assertEq(failedSlots[1], 3);
+        assertEq(reasons[0], bridge.CLAIM_REASON_ZERO_AMOUNT());
+        assertEq(reasons[1], bridge.CLAIM_REASON_WRONG_DESTINATION_CHAIN());
+        assertTrue(bridge.claimedNullifiers(nonceA));
+        assertTrue(bridge.claimedNullifiers(nonceB));
+        assertFalse(bridge.claimedNullifiers(zeroAmountNonce));
+        assertFalse(bridge.claimedNullifiers(wrongChainNonce));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 5, "per-slot events in input order, summary last");
+        assertEq(logs[0].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[0].topics[1], nonceA);
+        assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[1].topics[1], zeroAmountNonce);
+        assertEq(uint256(logs[1].topics[2]), 1);
+        assertEq(uint256(abi.decode(logs[1].data, (bytes32))), bridge.CLAIM_REASON_ZERO_AMOUNT(), "reason is non-indexed data");
+        assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
+        assertEq(logs[2].topics[1], nonceB);
+        assertEq(logs[3].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
+        assertEq(logs[3].topics[1], wrongChainNonce);
+        assertEq(uint256(logs[3].topics[2]), 3);
+        assertEq(uint256(abi.decode(logs[3].data, (bytes32))), bridge.CLAIM_REASON_WRONG_DESTINATION_CHAIN(), "reason is non-indexed data");
+        assertEq(logs[4].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
+        (uint8 realCount, uint8 succeeded, uint8 failed) = abi.decode(logs[4].data, (uint8, uint8, uint8));
+        assertEq(realCount, 4);
+        assertEq(succeeded, 2);
+        assertEq(failed, 2);
     }
 
     function testPerTokenDepositLimitsIsolationAndDynamicConfigUpdate() public {
@@ -1543,71 +1971,108 @@ contract BridgeTest is Test {
         assertEq(bridge.depositRoot(), bytes32(uint256(456)));
         assertEq(bridge.provedDepositCount(), 1);
     }
-    function testBatchClaimWithdrawalTotalOverflowLeavesTotalMaxAndNoNullifierOrPending() public {
-        PsyAddressesProvider provider = _deployAddressesProvider();
-        PsyACLManager acl = _deployACL();
-        MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
-        StateManager sm = _deployStateManager(provider);
-        Router router = _deployRouter(provider);
-        Bridge bridge = _deployBridge(provider, address(bootstrapVerifier), address(bootstrapVerifier));
-
-        vm.startPrank(owner);
-        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
-        provider.setAddress(provider.ZK_VERIFIER_ID(), address(bootstrapVerifier));
-        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
-        provider.setAddress(provider.ROUTER_ID(), address(router));
-        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
-        vm.stopPrank();
+    function testBatchClaimWithdrawalTotalOverflowSkipsSlotWithoutConsumingNullifier() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
         uint256 amount = 1;
         bytes32 nonce = bytes32(uint256(0xAB));
 
-        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
-        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0x1234)), 0);
-        vm.prank(owner);
-        sm.finalize(
-            _dummyGnarkProof(),
-            depositRoot,
-            _roots(bytes32(uint256(1)), bytes32(uint256(2))),
-            withdrawalRoot,
-            0,
-            1,
-            depositProof,
-            withdrawalProof
-        );
-
         address[] memory configuredTokens = new address[](1);
         configuredTokens[0] = address(token);
         uint256[] memory historicalTotals = new uint256[](1);
         historicalTotals[0] = type(uint256).max;
         vm.prank(owner);
-        bridge.initializeWithdrawalTotals(configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this));
+        bridge.initializeWithdrawalTotals(
+            configuredTokens, _flowConfigs(1), historicalTotals, _tokenSetHash(configuredTokens), address(this)
+        );
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
 
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
         (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
-            _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
-        WithdrawalBatchHashVerifier verifier =
-            new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
-        vm.prank(owner);
-        bridge.setWithdrawalClaimVerifier(address(verifier));
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
 
         uint256[8] memory proof;
         vm.prank(user);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                Bridge.TotalWithdrawalAmountOverflow.selector, address(token), type(uint256).max, amount
-            )
-        );
-        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW());
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
         assertFalse(bridge.claimedNullifiers(nonce));
         (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
         assertEq(pendingAmount, 0);
     }
+
+    function _publicInputsRoot(uint256[18] memory publicInputs) internal pure returns (bytes32 out) {
+        for (uint256 j = 0; j < 8; ++j) {
+            out |= bytes32(publicInputs[j] << ((7 - j) * 32));
+        }
+    }
+
+    function testBatchClaimWithdrawalAcceptsKnownSubtreeRootAndRejectsUnknownRoot() public {
+        (Bridge bridge, StateManager sm, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+        assertTrue(withdrawalRoot != bytes32(0), "fixture subtree root must be nonzero");
+        assertEq(withdrawalRoot, sm.withdrawalSubtreeRoot());
+        assertTrue(sm.knownWithdrawalSubtreeRoots(withdrawalRoot));
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        uint256 amount = 123;
+        bytes32 knownNonce = bytes32(uint256(0xD1));
+        bytes32 unknownNonce = bytes32(uint256(0xD2));
+
+        BatchClaimItem[] memory knownItems = _singleItem(BatchClaimItem(0, user, address(token), amount, knownNonce, 0));
+        (uint256[18] memory knownInputs, uint256[1088] memory knownSlotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, knownItems);
+        assertEq(_publicInputsRoot(knownInputs), withdrawalRoot, "encoded root must be the fixture subtree root");
+        _setBatchClaimVerifier(bridge, knownInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory knownFailed, uint8[] memory knownReasons) =
+            bridge.batchClaimWithdrawal(proof, knownInputs, knownSlotData);
+        assertEq(knownFailed.length, 0);
+        assertEq(knownReasons.length, 0);
+        assertTrue(bridge.claimedNullifiers(knownNonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
+        (address pendingToken, address pendingRecipient, uint256 pendingAmount, uint64 claimableAt) =
+            bridge.pendingWithdrawals(knownNonce);
+        assertEq(pendingToken, address(token));
+        assertEq(pendingRecipient, user);
+        assertEq(pendingAmount, amount);
+        assertGt(uint256(claimableAt), 0);
+
+        bytes32 unknownRoot = keccak256("unknown-withdrawal-subtree");
+        assertFalse(sm.knownWithdrawalSubtreeRoots(unknownRoot));
+        assertTrue(unknownRoot != sm.withdrawalSubtreeRoot());
+        BatchClaimItem[] memory unknownItems =
+            _singleItem(BatchClaimItem(0, user, address(token), amount, unknownNonce, 0));
+        (uint256[18] memory unknownInputs, uint256[1088] memory unknownSlotData) =
+            _buildWithdrawalBatchClaimMulti(unknownRoot, unknownItems);
+        assertEq(_publicInputsRoot(unknownInputs), unknownRoot);
+        _setBatchClaimVerifier(bridge, unknownInputs);
+
+        vm.recordLogs();
+        vm.prank(user);
+        vm.expectRevert(Bridge.InvalidWithdrawalProof.selector);
+        bridge.batchClaimWithdrawal(proof, unknownInputs, unknownSlotData);
+        assertEq(vm.getRecordedLogs().length, 0, "unknown root reverts before registration events");
+        assertTrue(bridge.claimedNullifiers(knownNonce));
+        assertFalse(bridge.claimedNullifiers(unknownNonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
+        (pendingToken, pendingRecipient, pendingAmount, claimableAt) = bridge.pendingWithdrawals(knownNonce);
+        assertEq(pendingToken, address(token));
+        assertEq(pendingRecipient, user);
+        assertEq(pendingAmount, amount);
+        assertGt(uint256(claimableAt), 0);
+        (,, uint256 unknownPending,) = bridge.pendingWithdrawals(unknownNonce);
+        assertEq(unknownPending, 0);
+    }
+
 
     function testForceClaimWithdrawalTransferRevertKeepsPendingTotalAndNullifier() public {
         PsyAddressesProvider provider = _deployAddressesProvider();

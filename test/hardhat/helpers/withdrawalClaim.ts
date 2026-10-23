@@ -32,14 +32,18 @@ function batchSlotDataCommit(slotData: bigint[]): string {
   return ethers.utils.keccak256(Uint8Array.from(bytes));
 }
 
-export function buildWithdrawalBatchClaimSingle(params: {
-  withdrawalRoot: string;
+export interface WithdrawalBatchClaimItem {
+  senderUserId?: number;
   recipient: string;
   token: string;
   amount: bigint;
   nonce: bigint;
   destinationChainIndex: number;
-  senderUserId?: number;
+}
+
+export function buildWithdrawalBatchClaim(params: {
+  withdrawalRoot: string;
+  items: WithdrawalBatchClaimItem[];
   bridgeUserId?: number;
 }): { publicInputs: bigint[]; slotData: bigint[] } {
   const publicInputs = new Array<bigint>(18).fill(0n);
@@ -53,16 +57,50 @@ export function buildWithdrawalBatchClaimSingle(params: {
   };
 
   setWords(publicInputs, 0, bytes32ToU32x8(params.withdrawalRoot));
-  publicInputs[8] = 1n;
+  publicInputs[8] = BigInt(params.items.length);
   publicInputs[9] = BigInt(params.bridgeUserId ?? 524288);
-
-  slotData[0] = BigInt(params.senderUserId ?? 0);
-  setWords(slotData, 1, bytes32ToU32x8(ethers.utils.hexZeroPad(params.recipient, 32)));
-  setWords(slotData, 9, bytes32ToU32x8(ethers.utils.hexZeroPad(params.token, 32)));
-  setWords(slotData, 17, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${params.amount.toString(16)}`, 32)));
-  setWords(slotData, 25, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${params.nonce.toString(16)}`, 32)));
-  slotData[33] = BigInt(params.destinationChainIndex);
-
+  params.items.forEach((item, slot) => {
+    const offset = slot * WITHDRAWAL_BATCH_SLOT_WORDS;
+    slotData[offset] = BigInt(item.senderUserId ?? 0);
+    setWords(slotData, offset + 1, bytes32ToU32x8(ethers.utils.hexZeroPad(item.recipient, 32)));
+    setWords(slotData, offset + 9, bytes32ToU32x8(ethers.utils.hexZeroPad(item.token, 32)));
+    setWords(slotData, offset + 17, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.amount.toString(16)}`, 32)));
+    setWords(slotData, offset + 25, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.nonce.toString(16)}`, 32)));
+    slotData[offset + 33] = BigInt(item.destinationChainIndex);
+  });
   setWords(publicInputs, 10, bytes32ToU32x8(batchSlotDataCommit(slotData)));
   return { publicInputs, slotData };
+}
+
+export function patchBatchCommit(publicInputs: bigint[], slotData: bigint[]): void {
+  const commitWords = bytes32ToU32x8(batchSlotDataCommit(slotData));
+  for (let index = 0; index < 8; index++) {
+    publicInputs[10 + index] = commitWords[index];
+  }
+}
+
+export function buildWithdrawalBatchClaimSingle(params: {
+  withdrawalRoot: string;
+  recipient: string;
+  token: string;
+  amount: bigint;
+  nonce: bigint;
+  destinationChainIndex: number;
+  senderUserId?: number;
+  bridgeUserId?: number;
+}): { publicInputs: bigint[]; slotData: bigint[] } {
+  return buildWithdrawalBatchClaim({
+    withdrawalRoot: params.withdrawalRoot,
+    bridgeUserId: params.bridgeUserId,
+    items: [
+      {
+        senderUserId: params.senderUserId,
+        recipient: params.recipient,
+        token: params.token,
+        amount: params.amount,
+        nonce: params.nonce,
+        destinationChainIndex: params.destinationChainIndex,
+      },
+    ],
+  });
 }
