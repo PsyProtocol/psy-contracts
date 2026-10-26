@@ -68,7 +68,13 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     }
     if (!l1Address) continue;
     const current = (await read("Router", "l1ToL2Token", l1Address)) as string;
-    if (current !== token.l2TokenContractId) {
+    const reverse = (await read("Router", "l2ToL1Token", token.l2TokenContractId)) as string;
+    // Compare case-insensitively: on-chain reads return lowercase hex, while the
+    // config value may contain uppercase characters.
+    // Check both directions: setTokenMapping writes both, but a previously
+    // skipped run (e.g. PSY, whose l2TokenContractId is HashZero and matches the
+    // zero default of l1ToL2Token) can leave l2ToL1Token unset.
+    if (current.toLowerCase() !== token.l2TokenContractId.toLowerCase() || reverse.toLowerCase() !== l1Address.toLowerCase()) {
       await execute("Router", { from: txFrom, log: true }, "setTokenMapping", l1Address, token.l2TokenContractId);
     }
   }

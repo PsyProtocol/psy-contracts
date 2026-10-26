@@ -6,6 +6,26 @@ import { protocolConfig } from "../../protocol-config";
 import { ensureHardhatDeploymentChainId, getContractAddress, waitForContractDeployment } from "./helpers/deploySystem";
 
 describe("protocol-config external contract deployments", function () {
+  it("initializes both token mappings when the PSY L2 contract id is zero", async function () {
+    await ensureHardhatDeploymentChainId();
+    await deployments.fixture(["state_manager", "bridge", "router"]);
+    await gatewaysDeploy(hre);
+
+    const router = await ethers.getContractAt("Router", (await deployments.get("Router")).address);
+    const token = (await deployments.get("PsyToken")).address;
+    const id = protocolConfig.tokens.PSY.l2TokenContractId;
+    expect(id).to.equal(ethers.constants.HashZero);
+    expect(await router.l1ToL2Token(token)).to.equal(id);
+    expect(await router.l2ToL1Token(id)).to.equal(ethers.constants.AddressZero);
+
+    await wireCoreDeploy(hre);
+    expect(await router.l1ToL2Token(token)).to.equal(id);
+    expect(await router.l2ToL1Token(id)).to.equal(token);
+
+    await wireCoreDeploy(hre);
+    expect(await router.l2ToL1Token(id)).to.equal(token);
+  });
+
   it("uses configured WETH and token addresses instead of deploying local mocks", async function () {
     await ensureHardhatDeploymentChainId();
     await deployments.fixture(["state_manager", "bridge", "router"]);
