@@ -31,7 +31,7 @@ describe("Multicall3 claim", function () {
     const T = await ethers.getContractFactory("MockERC20");
     const token = await T.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
     const amount = 99n;
     const nonce = 9n;
     await token.mint(bridge.address, amount);

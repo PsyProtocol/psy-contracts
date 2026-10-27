@@ -18,8 +18,8 @@ describe("Router + Gateways", function () {
     const l2EthTokenId = ethers.utils.hexZeroPad("0x8888", 32);
     await router.connect(owner).setTokenMapping(token.address, l2TokenId);
     await router.connect(owner).setTokenMapping(ethers.constants.AddressZero, l2EthTokenId);
-    await configureFlowToken(bridge, token.address);
-    await configureFlowToken(bridge, ethers.constants.AddressZero);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0 });
+    await configureFlowToken(bridge, ethers.constants.AddressZero, { smallWithdrawalMax: 0 });
 
     await token.mint(user.address, 1000n);
     await token.connect(user).approve(erc20g.address, 300n);

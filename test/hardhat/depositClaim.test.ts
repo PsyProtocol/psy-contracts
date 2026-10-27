@@ -166,8 +166,7 @@ describe("Deposit And Claim", function () {
     await expect(
       bridge.batchClaimWithdrawal(proof, erc20PublicInputs, erc20SlotData)
     ).to.not.be.reverted;
-    expect(await token.balanceOf(user.address)).to.equal(0);
-    await bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32));
+    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32))).amount).to.equal(0);
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
 
     // ETH claim
@@ -196,9 +195,7 @@ describe("Deposit And Claim", function () {
 
     await expect(
       bridge.batchClaimWithdrawal(proof, ethPublicInputs, ethSlotData)
-    ).to.not.changeEtherBalance(user, ethAmount);
-    await expect(
-      bridge.claimPendingWithdrawal(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))
     ).to.changeEtherBalance(user, ethAmount);
+    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))).amount).to.equal(0);
   });
 });

@@ -113,6 +113,10 @@ describe("governance upgrade and rescue", function () {
       10, 20, 3, 40, 5, 60, 7, 8, 9, true,
     ]]);
 
+    const pendingNonce = hexZeroPad("0x88", 32);
+    const pendingDeadline = (await ethers.provider.getBlock("latest")).timestamp + 604800;
+    await upgradeSource.proxy.registerPendingWithdrawal(pendingNonce, tokenAddress, owner.address, 44, pendingDeadline);
+
     const nextConfig = defaultFlowConfig({
       minDepositAmount: 11,
       depositCap: 22,
@@ -157,6 +161,10 @@ describe("governance upgrade and rescue", function () {
     expect(migrated.largeWithdrawalDelay).to.equal(8);
     expect(migrated.configured).to.equal(true);
     expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(66);
+    expect((await upgraded.pendingWithdrawals(pendingNonce)).claimableAt).to.equal(pendingDeadline);
+    expect(await upgraded.withdrawalRequiresGovernance(pendingNonce)).to.equal(true);
+    await expect(upgraded.claimPendingWithdrawal(pendingNonce))
+      .to.be.revertedWithCustomError(upgraded, "WithdrawalGovernanceRequired");
   });
 
   it("queues, executes, and cancels timelock actions", async function () {
@@ -289,7 +297,7 @@ describe("governance upgrade and rescue", function () {
     };
     const untouchedNullifier = hexZeroPad("0xcd", 32);
 
-    expect(await upgradedBridge.getRevision()).to.equal(4);
+    expect(await upgradedBridge.getRevision()).to.equal(5);
     expect((await upgradedBridge.getTokenFlowConfig(depositToken.address)).totalWithdrawalCap).to.equal(777);
     expect(await upgradedBridge.totalWithdrawalAmount(depositToken.address)).to.equal(1234);
     expect(await upgradedBridge.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
@@ -367,7 +375,7 @@ describe("governance upgrade and rescue", function () {
     );
     const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
     if (upgraded.address == null) upgraded.address = bridge.proxy.address;
-    expect(await upgraded.getRevision()).to.equal(4);
+    expect(await upgraded.getRevision()).to.equal(5);
     expect((await upgraded.getTokenFlowConfig(tokenAddress)).totalWithdrawalCap).to.equal(555);
     expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(987);
     expect(await upgraded.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));

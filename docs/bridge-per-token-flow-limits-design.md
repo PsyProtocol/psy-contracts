@@ -32,20 +32,20 @@ Per token (`mapping(address => TokenFlowConfig) _tokenFlowConfigs`):
   tiers. The predecessor bucket model (`ImportedTokenFlowConfig`: capacity + refill-per-second
   deposit buckets) is kept read-only in the pre-governance storage; the governed Bridge replaces
   the deposit bucket with the flat `depositCap`.
-- `totalWithdrawalCap` — per-token lifetime withdrawal ceiling enforced against the cumulative
-  `_totalWithdrawalAmounts[token]`.
-- Delay tiers (`smallWithdrawalDelay <= mediumWithdrawalDelay <= largeWithdrawalDelay`, enforced):
+- `totalWithdrawalCap` — per-token lifetime threshold against cumulative `_totalWithdrawalAmounts[token]`, not a daily allowance or a hard rejection cap. The crossing withdrawal already requires governance.
+- `smallWithdrawalDelay` is retained for storage/ABI compatibility; small withdrawals always pay directly with zero delay. Medium and large delays are configurable (local defaults: one hour and seven days).
 
-| Withdrawal | Delay applied |
+| Withdrawal (large condition takes precedence) | Settlement |
 |------------|---------------|
-| `amount <= smallWithdrawalMax` | `smallWithdrawalDelay` |
-| `smallWithdrawalMax < amount <= mediumWithdrawalMax` | `mediumWithdrawalDelay` |
-| `amount > mediumWithdrawalMax` **or** cumulative total would exceed `totalWithdrawalCap` | `largeWithdrawalDelay` |
+| `amount <= smallWithdrawalMax`, next total at or below cap | Direct payout in `batchClaimWithdrawal`, no pending entry |
+| `smallWithdrawalMax < amount <= mediumWithdrawalMax`, next total at or below cap | Pending; anyone can trigger payout to the original recipient after `mediumWithdrawalDelay` |
+| `amount > mediumWithdrawalMax` **or** next total exceeds `totalWithdrawalCap` | Pending; only `withdrawalForceClaimExecutor` (governance Timelock) can settle after `largeWithdrawalDelay` |
 
-`_registerPendingWithdrawal` computes the tier, stores
-`PendingWithdrawal{token, recipient, amount, claimableAt = block.timestamp + delay}`, and advances
-the lifetime total before any proof/claim path can settle the funds. Claims before `claimableAt`
-revert (`PendingWithdrawalNotClaimable`); `withdrawalForceClaimExecutor` can force-settle.
+The nonce and lifetime total are updated before any external transfer. An append-only shared `withdrawalSettlementLock` prevents callbacks from entering any of the three withdrawal entry points and contaminating batch receipt attribution. Direct payout emits `WithdrawalClaimed`; pending registration emits `WithdrawalPendingCreated`. A failed direct transfer reverts the whole batch, including all nonce and total changes. Pending-claim pause also blocks direct payout.
+
+The stored `_withdrawalSettlementTiers` and `claimableAt` fix the permission and deadline at registration; later policy changes do not downgrade existing governed claims. `withdrawalRequiresGovernance(nonce)` exposes the permission. Ordinary claims reject governed pending entries even after their deadline. `forceClaimWithdrawal` honors the stored deadline and pause flags; it never pays an alternate recipient. On upgrade, existing pending entries without a recorded tier conservatively require governance and retain their stored deadline. No reinitializer or rewriting of existing pending storage is needed.
+
+Local defaults apply the same token-quantity policy to every token and native asset: below 50,000 tokens pays directly; at least 50,000 and below 100,000 uses the medium delay; at least 100,000 requires governance. Because max fields are inclusive, they store `parseUnits("50000", decimals) - 1` and `parseUnits("100000", decimals) - 1`. The historical cumulative cap is `10^12` whole tokens, converted with the asset’s configured decimals. This is not a daily cap or a USD value. With 6 / 9 / 18 decimals, the raw caps are `10^18` / `10^21` / `10^30`, all within the existing uint128 field. Delays remain one hour and seven days. Deposits retain a one-smallest-unit minimum and a 10,000,000-token cap. Non-local deployments still require a reviewed `BRIDGE_FLOW_LIMITS_FILE`; source default changes do not update a live contract. The separate Goldilocks single-withdrawal bound is unchanged.
 
 ## Initialization & migration
 

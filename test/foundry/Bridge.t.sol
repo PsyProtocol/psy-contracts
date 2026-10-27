@@ -102,7 +102,7 @@ contract BridgeTest is Test {
         return Bridge.TokenFlowConfig({
             minDepositAmount: 1,
             depositCap: 1e30,
-            smallWithdrawalMax: 1e18,
+            smallWithdrawalMax: 0,
             mediumWithdrawalMax: 5e18,
             totalWithdrawalCap: 1e24,
             smallWithdrawalDelay: 0,
@@ -843,7 +843,9 @@ contract BridgeTest is Test {
         config.totalWithdrawalCap = 200;
         config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
-        uint256 amount = 250;
+        config.mediumWithdrawalDelay = 3_600;
+        _setFlowConfig(bridge, address(token), config);
+        uint256 amount = 150;
         bytes32 nonce = bytes32(uint256(88));
         token.mint(address(bridge), amount);
 
@@ -1504,32 +1506,31 @@ contract BridgeTest is Test {
         (,, uint256 smallPending, uint64 smallClaimableAt) = bridge.pendingWithdrawals(smallNonce);
         (,, uint256 mediumPending, uint64 mediumClaimableAt) = bridge.pendingWithdrawals(mediumNonce);
         (,, uint256 largePending, uint64 largeClaimableAt) = bridge.pendingWithdrawals(largeNonce);
-        assertEq(smallPending, smallAmount);
+        assertEq(smallPending, 0);
+        assertEq(token.balanceOf(user), smallAmount);
         assertEq(mediumPending, mediumAmount);
         assertEq(largePending, largeAmount);
-        assertEq(smallClaimableAt, block.timestamp, "zero-delay small tier must be immediately claimable");
+        assertEq(smallClaimableAt, 0, "small tier must not create a pending entry");
         assertEq(mediumClaimableAt, block.timestamp, "zero-delay medium tier must be immediately claimable");
         assertEq(largeClaimableAt, block.timestamp + 3_600, "large tier delay must remain enforced");
 
-        vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, smallNonce));
         bridge.claimPendingWithdrawal(smallNonce);
-        assertEq(token.balanceOf(user), smallAmount);
         vm.prank(user);
         bridge.claimPendingWithdrawal(mediumNonce);
         assertEq(token.balanceOf(user), smallAmount + mediumAmount);
 
-        vm.expectRevert(
-            abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, largeNonce, largeClaimableAt)
-        );
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, largeNonce));
         bridge.claimPendingWithdrawal(largeNonce);
 
         vm.warp(largeClaimableAt);
         vm.prank(user);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, largeNonce));
         bridge.claimPendingWithdrawal(largeNonce);
-        assertEq(token.balanceOf(user), smallAmount + mediumAmount + largeAmount);
+        assertEq(token.balanceOf(user), smallAmount + mediumAmount);
     }
 
-    function testForceClaimWithdrawalBeforeDelayIsAdminOnlyPausedSafeAndOneShot() public {
+    function testForceClaimWithdrawalHonorsDelayIsAdminOnlyPausedSafeAndOneShot() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
         PsyACLManager acl = _deployACL();
         MockGnarkVerifier bootstrapVerifier = new MockGnarkVerifier();
@@ -1589,6 +1590,10 @@ contract BridgeTest is Test {
         bridge.forceClaimWithdrawal(nonce);
         vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 0);
+        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(nonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, nonce, claimableAt));
+        bridge.forceClaimWithdrawal(nonce);
+        vm.warp(claimableAt);
         bridge.forceClaimWithdrawal(nonce);
         vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, nonce));
         bridge.forceClaimWithdrawal(nonce);

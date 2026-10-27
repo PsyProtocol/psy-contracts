@@ -47,7 +47,7 @@ interface IGnarkGroth16Verifier {
 
 contract Bridge is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant VERSION = 4;
+    uint256 public constant VERSION = 5;
     uint8 internal constant PAUSE_DEPOSITS = 1 << 0;
     uint8 internal constant PAUSE_WITHDRAWAL_REGISTRATION = 1 << 1;
     uint8 internal constant PAUSE_PENDING_CLAIMS = 1 << 2;
@@ -140,6 +140,9 @@ contract Bridge is Initializable, OwnableUpgradeable {
     address public withdrawalForceClaimExecutor;
     bytes32 public withdrawalTotalsTokenSetHash;
     mapping(address => TokenFlowConfig) private _tokenFlowConfigs;
+    // 0: pending before tiered settlement (governance only); 1: medium; 2: governance.
+    mapping(bytes32 => uint8) private _withdrawalSettlementTiers;
+    bool private _withdrawalSettlementEntered;
 
     event DepositRecorded(
         uint32 indexed index,
@@ -225,6 +228,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error DepositCapExceeded(address token, uint256 custody, uint256 cap);
     error WithdrawalRegistrationPaused(address token);
     error ClaimableAtOverflow();
+    error WithdrawalSettlementReentered();
+    error WithdrawalGovernanceRequired(bytes32 nonce);
     error PendingWithdrawalNotFound(bytes32 nonce);
     error PendingWithdrawalNotClaimable(bytes32 nonce, uint64 claimableAt);
     error PendingClaimsPaused(address token);
@@ -713,7 +718,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         emit DepositBatchAppended(fromIndex, toIndex, depositRoot, oldFrontier, leafHashes);
     }
 
-    /// @notice Registers up to 32 proven withdrawal slots. Payout is a later claimPendingWithdrawal or forceClaimWithdrawal.
+    /// @notice Pays small withdrawals directly; registers medium and governed withdrawals for delayed settlement.
     /// Whole-proof failures (verifier, public input hash, real count, root, bridge user id,
     /// padding, batch commit) revert with zero effects. Item-local failures skip the slot with
     /// no state change (nullifier stays unconsumed, totals untouched) and are reported through
@@ -724,7 +729,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         uint256[8] calldata proof,
         uint256[WITHDRAWAL_BATCH_CLAIM_PUBLIC_INPUTS_LEN] calldata publicInputs,
         uint256[WITHDRAWAL_BATCH_CLAIM_SLOT_DATA_WORDS] calldata slotData
-    ) external returns (uint8[] memory failedSlotIndexes, uint8[] memory failureReasons) {
+    ) external withdrawalSettlementLock returns (uint8[] memory failedSlotIndexes, uint8[] memory failureReasons) {
         if (withdrawalClaimVerifier == address(0)) revert VerifierNotSet();
 
         bytes32 msgHash = _computeWithdrawalBatchClaimPublicInputsHash(publicInputs);
@@ -804,8 +809,20 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 continue;
             }
 
-            _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount, nextTotal, delay);
+            // Consume the nonce and account the total before any external transfer.
             claimedNullifiers[nonce] = true;
+            _totalWithdrawalAmounts[tokenAddr] = nextTotal;
+            TokenFlowConfig storage config = _tokenFlowConfigs[tokenAddr];
+            bool requiresGovernance = amount > config.mediumWithdrawalMax || nextTotal > config.totalWithdrawalCap;
+            if (!requiresGovernance && amount <= config.smallWithdrawalMax) {
+                if ((_effectivePauseFlags(tokenAddr) & PAUSE_PENDING_CLAIMS) != 0) {
+                    revert PendingClaimsPaused(tokenAddr);
+                }
+                _settlePendingWithdrawal(nonce, PendingWithdrawal(tokenAddr, recipientAddr, amount, 0));
+            } else {
+                _withdrawalSettlementTiers[nonce] = requiresGovernance ? 2 : 1;
+                _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount, nextTotal, delay);
+            }
         }
 
         // Compact the parallel arrays down to the failed entries only.
@@ -819,19 +836,34 @@ contract Bridge is Initializable, OwnableUpgradeable {
         );
     }
 
-    function claimPendingWithdrawal(bytes32 nonce) external {
+    modifier withdrawalSettlementLock() {
+        if (_withdrawalSettlementEntered) revert WithdrawalSettlementReentered();
+        _withdrawalSettlementEntered = true;
+        _;
+        _withdrawalSettlementEntered = false;
+    }
+
+    function withdrawalRequiresGovernance(bytes32 nonce) public view returns (bool) {
+        return pendingWithdrawals[nonce].amount != 0 && _withdrawalSettlementTiers[nonce] != 1;
+    }
+
+    function claimPendingWithdrawal(bytes32 nonce) external withdrawalSettlementLock {
         PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
+        if (withdrawalRequiresGovernance(nonce)) revert WithdrawalGovernanceRequired(nonce);
         if (block.timestamp < pending.claimableAt) {
             revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
         }
         _settlePendingWithdrawal(nonce, pending);
     }
 
-    function forceClaimWithdrawal(bytes32 nonce) external {
+    function forceClaimWithdrawal(bytes32 nonce) external withdrawalSettlementLock {
         if (msg.sender != withdrawalForceClaimExecutor) {
             revert UnauthorizedWithdrawalForceClaimExecutor(msg.sender);
         }
         PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
+        if (block.timestamp < pending.claimableAt) {
+            revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
+        }
         _settlePendingWithdrawal(nonce, pending);
         emit WithdrawalForceClaimed(nonce, msg.sender);
     }
@@ -846,6 +878,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
 
     function _settlePendingWithdrawal(bytes32 nonce, PendingWithdrawal memory pending) internal {
         delete pendingWithdrawals[nonce];
+        delete _withdrawalSettlementTiers[nonce];
         if (pending.token == address(0)) {
             IWETHWithdraw(_nativeWithdrawalAsset()).withdraw(pending.amount);
             (bool ok,) = payable(pending.recipient).call{value: pending.amount}("");
@@ -882,7 +915,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         } else if (amount > config.smallWithdrawalMax) {
             delay = config.mediumWithdrawalDelay;
         } else {
-            delay = config.smallWithdrawalDelay;
+            delay = 0;
         }
         if (block.timestamp + delay > type(uint64).max) return (CLAIM_REASON_CLAIMABLE_AT_OVERFLOW, 0, 0);
     }

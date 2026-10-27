@@ -41,7 +41,7 @@ async function setupBatchClaimFixture(amount: bigint) {
   const TokenFactory = await ethers.getContractFactory("MockERC20");
   const token = await TokenFactory.deploy("Mock", "MOCK");
   await token.deployed();
-  await configureFlowToken(bridge, token.address);
+  await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
   await token.mint(bridge.address, amount);
   const depositLeaf = await sm.withdrawalSubtreeRoot();
   const deposit = mkTopProof(depositLeaf, 0);
@@ -62,7 +62,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
 
     await token.mint(user.address, 1000n);
     await token.connect(user).approve(bridge.address, 250n);
@@ -78,7 +78,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
 
     const amount = 777n;
     const nonce = 42n;
@@ -125,7 +125,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
 
     const amount = 777n;
     const nonce = 42n;
@@ -165,7 +165,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
 
     const amount = 333n;
     const nonce = 77n;
@@ -221,7 +221,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
-    await configureFlowToken(bridge, token.address);
+    await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
 
     const amount = 444n;
     const nonce = 78n;
@@ -438,7 +438,7 @@ describe("Bridge", function () {
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const tokenB = await TokenFactory.deploy("Mock B", "MOCKB");
     await tokenB.deployed();
-    await configureFlowToken(bridge, tokenB.address);
+    await configureFlowToken(bridge, tokenB.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
     await tokenB.mint(bridge.address, 1000n);
     const amount = 150n;
     const proof = new Array(8).fill(0n);

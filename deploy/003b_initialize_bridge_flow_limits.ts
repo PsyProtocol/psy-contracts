@@ -5,16 +5,17 @@ import { isLocalAnvilNetwork, protocolConfig, resolveProtocolNetworkName } from 
 import { loadDeployConfig } from "./deploy-config";
 import { loadBridgeFlowLimitManifest, tokenSetHash, type FlowLimitConfig } from "../scripts/upgrade/bridge";
 
-function localFlowLimitConfig(): FlowLimitConfig {
+export function localFlowLimitConfig(decimals: number): FlowLimitConfig {
   return {
+    // Inclusive max fields end one smallest unit below the 50k/100k tier boundaries.
     minDepositAmount: "1",
-    depositCap: "10000000000000000000000000",
-    smallWithdrawalMax: "10000000000000000000",
-    mediumWithdrawalMax: "100000000000000000000",
-    totalWithdrawalCap: "1000000000000000000000",
+    depositCap: ethers.utils.parseUnits("10000000", decimals).toString(),
+    smallWithdrawalMax: ethers.utils.parseUnits("50000", decimals).sub(1).toString(),
+    mediumWithdrawalMax: ethers.utils.parseUnits("100000", decimals).sub(1).toString(),
+    totalWithdrawalCap: ethers.utils.parseUnits("1000000000000", decimals).toString(),
     smallWithdrawalDelay: "0",
-    mediumWithdrawalDelay: "0",
-    largeWithdrawalDelay: "0",
+    mediumWithdrawalDelay: "3600",
+    largeWithdrawalDelay: "604800",
     configured: true,
   };
 }
@@ -42,17 +43,20 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     historicalWithdrawalTotals = manifest.historicalWithdrawalTotals;
   } else if (isLocalAnvilNetwork(network.name)) {
     const protocolNetwork = resolveProtocolNetworkName(network.name);
-    const deployedTokens: string[] = [];
+    tokens = [ethers.constants.AddressZero];
+    const chain = protocolConfig.chains[protocolNetwork];
+    configs = [localFlowLimitConfig(chain.nativeCurrency.decimals)];
     for (const token of Object.values(protocolConfig.tokens)) {
       const deployment = token.deployments[protocolNetwork];
       if (deployment?.l1Address) {
-        deployedTokens.push(ethers.utils.getAddress(deployment.l1Address));
+        tokens.push(ethers.utils.getAddress(deployment.l1Address));
       } else if (deployment?.deployName) {
-        deployedTokens.push((await deployments.get(deployment.deployName)).address);
+        tokens.push((await deployments.get(deployment.deployName)).address);
+      } else {
+        continue;
       }
+      configs.push(localFlowLimitConfig(token.decimals));
     }
-    tokens = [ethers.constants.AddressZero, ...deployedTokens];
-    configs = tokens.map(() => localFlowLimitConfig());
     historicalWithdrawalTotals = tokens.map(() => "0");
   } else {
     throw new Error("BRIDGE_FLOW_LIMITS_FILE is required for a non-local Bridge deployment");

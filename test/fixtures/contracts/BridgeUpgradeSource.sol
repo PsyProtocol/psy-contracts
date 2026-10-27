@@ -59,6 +59,13 @@ contract BridgeUpgradeSource is Initializable, OwnableUpgradeable {
         withdrawalClaimVerifier = withdrawalVerifier;
     }
 
+    function registerPendingWithdrawal(bytes32 nonce, address token, address recipient, uint256 amount, uint64 claimableAt)
+        external onlyOwner
+    {
+        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, claimableAt);
+        claimedNullifiers[nonce] = true;
+    }
+
     function initializeFlowLimits(address[] calldata tokens, TokenFlowConfig[] calldata configs)
         external
         reinitializer(3)
