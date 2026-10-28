@@ -104,11 +104,13 @@ describe("Bridge per-token flow limits", function () {
       await token.connect(user).approve(erc20Gateway.address, 2_000);
     }
 
+    await tokenA.mint(bridge.address, 1_000_000_000);
     await router.connect(user).deposit(tokenA.address, 400, ethers.constants.HashZero, ethers.constants.HashZero);
+    await router.connect(user).deposit(tokenA.address, 101, ethers.constants.HashZero, ethers.constants.HashZero);
     await expect(
-      router.connect(user).deposit(tokenA.address, 101, ethers.constants.HashZero, ethers.constants.HashZero),
+      router.connect(user).deposit(tokenA.address, 501, ethers.constants.HashZero, ethers.constants.HashZero),
     ).to.be.revertedWithCustomError(bridge, "DepositCapExceeded");
-    expect(await tokenA.balanceOf(bridge.address)).to.equal(400);
+    expect(await tokenA.balanceOf(bridge.address)).to.equal(1_000_000_501);
 
     await expect(
       router.connect(user).deposit(tokenB.address, 99, ethers.constants.HashZero, ethers.constants.HashZero),

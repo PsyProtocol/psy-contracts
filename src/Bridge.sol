@@ -225,7 +225,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error TokenNotConfigured(address token);
     error DepositsPaused(address token);
     error DepositBelowMinimum(address token, uint256 amount, uint256 minimum);
-    error DepositCapExceeded(address token, uint256 custody, uint256 cap);
+    error DepositCapExceeded(address token, uint256 amount, uint256 cap);
     error WithdrawalRegistrationPaused(address token);
     error ClaimableAtOverflow();
     error WithdrawalSettlementReentered();
@@ -612,9 +612,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
             revert DepositBelowMinimum(token, amount, config.minDepositAmount);
         }
 
-        uint256 custody = _custodyBalance(token);
-        if (custody > config.depositCap) {
-            revert DepositCapExceeded(token, custody, config.depositCap);
+        if (amount > config.depositCap) {
+            revert DepositCapExceeded(token, amount, config.depositCap);
         }
 
         return _recordDepositLeaf(token, l2TokenContractId, amount, shieldAddress, noteCommitment);
@@ -943,11 +942,6 @@ contract Bridge is Initializable, OwnableUpgradeable {
         ) revert InvalidFlowConfig(token);
     }
 
-
-    function _custodyBalance(address token) internal view returns (uint256) {
-        address custodyToken = token == address(0) ? _nativeWithdrawalAsset() : token;
-        return IERC20(custodyToken).balanceOf(address(this));
-    }
 
     function _effectivePauseFlags(address token) internal view returns (uint8) {
         return _globalPauseFlags | _tokenPauseFlags[token];

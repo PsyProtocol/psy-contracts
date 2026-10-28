@@ -1314,8 +1314,10 @@ contract BridgeTest is Test {
 
         MockERC20(tokenA).mint(address(bridge), 501);
         vm.prank(owner);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.DepositCapExceeded.selector, tokenA, 501, 500));
         bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 100, bytes32(uint256(4)), bytes32(uint256(5)));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.DepositCapExceeded.selector, tokenA, 501, 500));
+        bridge.recordDepositFromGateway(tokenA, bytes32(uint256(1)), 501, bytes32(uint256(8)), bytes32(uint256(9)));
 
         vm.prank(owner);
         bridge.recordDepositFromGateway(tokenB, bytes32(uint256(1)), 400, bytes32(uint256(6)), bytes32(uint256(7)));
@@ -1348,7 +1350,7 @@ contract BridgeTest is Test {
         MockERC20(token).mint(address(bridge), 1_001);
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(Bridge.DepositCapExceeded.selector, token, 1_001, 1_000));
-        bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 100, bytes32(uint256(10)), bytes32(uint256(11)));
+        bridge.recordDepositFromGateway(token, bytes32(uint256(1)), 1_001, bytes32(uint256(10)), bytes32(uint256(11)));
     }
 
     function testInitializeWithdrawalTotalsValidatesInputsAndStoresAnyUint256Baseline() public {
