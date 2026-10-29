@@ -296,8 +296,13 @@ contract StateManager is OwnableUpgradeable {
         if (withdrawalTreeRoot == bytes32(0)) {
             // Keep empty-withdrawal bootstrap open until a non-zero withdrawal root has
             // been finalized. Catch-up finalizes with no withdrawals must not brick.
+            // The empty proof is the all-zero leaf and siblings; any other proof must
+            // still verify against the zero root.
             if (!isFirstFinalize && lastVerifiedWithdrawalTreeRoot != bytes32(0)) {
                 revert WithdrawalBootstrapExpired();
+            }
+            if (!_verifyTopTreeProof(withdrawalTreeRoot, withdrawalMerkleProof, l1ChainIndex)) {
+                revert InvalidWithdrawalMerkleProof();
             }
             return;
         }

@@ -1,5 +1,5 @@
 import { expect } from "chai";
-import { ethers } from "hardhat";
+import { ethers, network } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { buildWithdrawalBatchClaim, buildWithdrawalBatchClaimSingle, patchBatchCommit } from "./helpers/withdrawalClaim";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
@@ -37,11 +37,12 @@ const nonceHex = (nonce: bigint) => ethers.utils.hexZeroPad(`0x${nonce.toString(
 
 async function setupBatchClaimFixture(amount: bigint) {
   const [owner, user] = await ethers.getSigners();
-  const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
+  const { bridge, stateManager: sm, router } = await deployCoreSystem(owner.address, owner.address);
   const TokenFactory = await ethers.getContractFactory("MockERC20");
   const token = await TokenFactory.deploy("Mock", "MOCK");
   await token.deployed();
   await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
+  await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
   await token.mint(bridge.address, amount);
   const depositLeaf = await sm.withdrawalSubtreeRoot();
   const deposit = mkTopProof(depositLeaf, 0);
@@ -51,7 +52,7 @@ async function setupBatchClaimFixture(amount: bigint) {
     ethers.utils.hexZeroPad("0x02", 32),
   ];
   await sm.finalize(DUMMY_GNARK_PROOF, deposit.root, roots, withdrawal.root, 0, 1, deposit.proof, withdrawal.proof);
-  return { owner, user, bridge, sm, token, withdrawalRoot: withdrawal.proof[0] };
+  return { owner, user, bridge, sm, router, token, withdrawalRoot: withdrawal.proof[0] };
 }
 
 describe("Bridge", function () {
@@ -73,12 +74,13 @@ describe("Bridge", function () {
 
   it("claims withdrawal with Groth16 proof inputs and marks nullifier", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, router } = await deployCoreSystem(owner.address, owner.address);
 
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
 
     const amount = 777n;
     const nonce = 42n;
@@ -160,12 +162,13 @@ describe("Bridge", function () {
 
   it("skips an already claimed nullifier with reason 5 and keeps prior state", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, router } = await deployCoreSystem(owner.address, owner.address);
 
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
 
     const amount = 333n;
     const nonce = 77n;
@@ -387,10 +390,12 @@ describe("Bridge", function () {
   });
 
   it("succeeds with every slot failing and leaves no state change", async function () {
-    const { user, bridge, sm, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
+    const [owner] = await ethers.getSigners();
+    const { user, bridge, sm, router, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const unconfigured = await TokenFactory.deploy("Unconfigured", "UNCF");
     await unconfigured.deployed();
+    await router.connect(owner).setTokenMapping(unconfigured.address, ethers.utils.hexZeroPad("0x02", 32));
     const amount = 100n;
     const chainIndex = Number(await sm.l1ChainIndex());
     const proof = new Array(8).fill(0n);
@@ -434,11 +439,13 @@ describe("Bridge", function () {
   });
 
   it("skips paused token slot with reason 7 and settles other token", async function () {
-    const { user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
+    const [owner] = await ethers.getSigners();
+    const { user, bridge, router, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const tokenB = await TokenFactory.deploy("Mock B", "MOCKB");
     await tokenB.deployed();
     await configureFlowToken(bridge, tokenB.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
+    await router.connect(owner).setTokenMapping(tokenB.address, ethers.utils.hexZeroPad("0x02", 32));
     await tokenB.mint(bridge.address, 1000n);
     const amount = 150n;
     const proof = new Array(8).fill(0n);
@@ -542,35 +549,50 @@ describe("Bridge", function () {
     expect(Number(named[4].args?.failedCount)).to.equal(2);
   });
 
-  it("skips amounts at and above the Goldilocks bound with reason 8", async function () {
-    const { user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
-    const amount = GOLDILOCKS_PRIME - 1n;
+  it("registers and pays amounts at and above the Goldilocks bound", async function () {
+    const { user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(GOLDILOCKS_PRIME * 2n + (1n << 100n));
     const proof = new Array(8).fill(0n);
+    const amounts = [GOLDILOCKS_PRIME - 1n, GOLDILOCKS_PRIME, 1n << 100n];
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount, nonce: 71n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount: GOLDILOCKS_PRIME, nonce: 72n, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount: amounts[0], nonce: 71n, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount: amounts[1], nonce: 72n, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount: amounts[2], nonce: 73n, destinationChainIndex: 0 },
       ],
     });
 
     const [failedSlots, reasons] = await bridge.connect(user).callStatic.batchClaimWithdrawal(proof, publicInputs, slotData);
-    expect(failedSlots.map((v) => Number(v))).to.deep.equal([1]);
-    expect(reasons.map((v) => Number(v))).to.deep.equal([REASON.AMOUNT_OUT_OF_RANGE]);
+    expect(failedSlots.map((v) => Number(v))).to.deep.equal([]);
+    expect(reasons.map((v) => Number(v))).to.deep.equal([]);
 
     const amountTx = await bridge.connect(user).batchClaimWithdrawal(proof, publicInputs, slotData);
     const amountReceipt = await amountTx.wait();
     const amountEvents = amountReceipt.events ?? [];
-    const amountFailed = amountEvents.filter((e) => e.event === "WithdrawalClaimItemFailed");
-    expect(amountFailed.length).to.equal(1);
-    expect(amountFailed[0].args?.nonce).to.equal(nonceHex(72n));
-    expect(Number(amountFailed[0].args?.slotIndex)).to.equal(1);
-    expect(Number(amountFailed[0].args?.reason)).to.equal(REASON.AMOUNT_OUT_OF_RANGE);
+    expect(amountEvents.filter((e) => e.event === "WithdrawalClaimItemFailed").length).to.equal(0);
     const amountCreated = amountEvents.filter((e) => e.event === "WithdrawalPendingCreated");
-    expect(amountCreated.length).to.equal(1);
-    expect(amountCreated[0].args?.nonce).to.equal(nonceHex(71n));
-    expect(await bridge.claimedNullifiers(nonceHex(71n))).to.equal(true);
-    expect(await bridge.claimedNullifiers(nonceHex(72n))).to.equal(false);
+    expect(amountCreated.length).to.equal(3);
+
+    // Funded custody above pays every full-uint256 withdrawal once its
+    // classification delay elapses. All three were registered in one block,
+    // so they share one claimable timestamp: warp to it once and settle.
+    let paid = 0n;
+    let maxClaimableAt = 0n;
+    for (const [index, amount] of amounts.entries()) {
+      const nonce = 71n + BigInt(index);
+      expect(await bridge.claimedNullifiers(nonceHex(nonce))).to.equal(true);
+      const [, pendingRecipient, pendingAmount, claimableAt] = await bridge.pendingWithdrawals(nonceHex(nonce));
+      expect(pendingRecipient).to.equal(user.address);
+      expect(pendingAmount).to.equal(amount);
+      if (claimableAt > maxClaimableAt) maxClaimableAt = claimableAt;
+    }
+    await network.provider.send("evm_setNextBlockTimestamp", [Number(maxClaimableAt)]);
+    for (const [index, amount] of amounts.entries()) {
+      const nonce = 71n + BigInt(index);
+      await bridge.connect(user).claimPendingWithdrawal(nonceHex(nonce));
+      paid += amount;
+      expect(await token.balanceOf(user.address)).to.equal(paid);
+    }
   });
 });

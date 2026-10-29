@@ -28,6 +28,11 @@ interface IRouterView {
     function tokenToGateway(address token) external view returns (address);
 }
 
+interface IRouterWithdrawalBinding {
+    function l1ToL2Token(address l1Token) external view returns (bytes32);
+    function l2ToL1Token(bytes32 l2Token) external view returns (address);
+}
+
 interface IETHGatewayView {
     function weth() external view returns (address);
 }
@@ -67,7 +72,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         0xd65af5933a094e8329332a714327ba72b1e4dac93c0cde8ee479b9bb36c3fc43;
     bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_BRIDGE_FORCE_SET_STATE_V1");
     // Frozen item-local failure reason codes surfaced by batchClaimWithdrawal through
-    // WithdrawalClaimItemFailed and its return values. 0 means valid; 11..255 reserved.
+    // WithdrawalClaimItemFailed and its return values. 0 means valid; 12..255 reserved.
     uint8 public constant CLAIM_REASON_ADDRESS_HIGH_BITS = 1;
     uint8 public constant CLAIM_REASON_WRONG_DESTINATION_CHAIN = 2;
     uint8 public constant CLAIM_REASON_ZERO_ADDRESS = 3;
@@ -78,6 +83,9 @@ contract Bridge is Initializable, OwnableUpgradeable {
     uint8 public constant CLAIM_REASON_AMOUNT_OUT_OF_RANGE = 8;
     uint8 public constant CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW = 9;
     uint8 public constant CLAIM_REASON_CLAIMABLE_AT_OVERFLOW = 10;
+    /// The slot's token is not dual-bound in the Router (forward id does not
+    /// resolve back to the token), the same check guardians apply at signing.
+    uint8 public constant CLAIM_REASON_TOKEN_MAPPING_MISMATCH = 11;
 
     struct BridgeContractState {
         bytes32 depositRoot;
@@ -517,6 +525,24 @@ contract Bridge is Initializable, OwnableUpgradeable {
         return IStateManager(provider.getAddress(provider.STATE_MANAGER_ID()));
     }
 
+    function _router() internal view returns (address) {
+        IPsyAddressesProviderView provider = IPsyAddressesProviderView(addressesProvider);
+        return provider.getAddress(provider.ROUTER_ID());
+    }
+
+    /// Router binding of the burned token, mirroring the off-chain guardian
+    /// derivation. The withdrawal slot carries no burning L2 contract id, so
+    /// the forward read supplies it and the reverse read must resolve back to
+    /// the token; bytes32(0) is a real L2 id (PSY), which makes the reverse
+    /// read the actual check. A pair whose forward and reverse words are both
+    /// zero is the Router's empty default, not a binding: an unset native
+    /// (address(0)) token would otherwise report bound.
+    function _unboundTokenMapping(address router, address token) internal view returns (bool) {
+        bytes32 forward = IRouterWithdrawalBinding(router).l1ToL2Token(token);
+        address reverse = IRouterWithdrawalBinding(router).l2ToL1Token(forward);
+        return reverse != token || (forward == bytes32(0) && reverse == address(0));
+    }
+
     function _nativeWithdrawalAsset() internal view returns (address) {
         IPsyAddressesProviderView provider = IPsyAddressesProviderView(addressesProvider);
         address ethGateway = provider.getAddress(provider.ETH_GATEWAY_ID());
@@ -768,6 +794,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         failureReasons = new uint8[](realCount);
         uint256 failedCount;
         uint8 chainIndex = sm.l1ChainIndex();
+        address router = _router();
 
         for (uint256 i = 0; i < realCount; ++i) {
             uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
@@ -796,6 +823,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
             } else if (claimedNullifiers[nonce]) {
                 // Covers both prior-transaction claims and duplicates earlier in this batch.
                 reason = CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED;
+            } else if (_unboundTokenMapping(router, tokenAddr)) {
+                reason = CLAIM_REASON_TOKEN_MAPPING_MISMATCH;
             } else {
                 (reason, nextTotal, delay) = _withdrawalRegistrationCheck(tokenAddr, amount);
             }
@@ -903,7 +932,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         if ((_effectivePauseFlags(token) & PAUSE_WITHDRAWAL_REGISTRATION) != 0) {
             return (CLAIM_REASON_REGISTRATION_PAUSED, 0, 0);
         }
-        if (amount == 0 || amount >= GOLDILOCKS_PRIME) return (CLAIM_REASON_AMOUNT_OUT_OF_RANGE, 0, 0);
+        if (amount == 0) return (CLAIM_REASON_AMOUNT_OUT_OF_RANGE, 0, 0);
 
         uint256 currentTotal = _totalWithdrawalAmounts[token];
         if (amount > type(uint256).max - currentTotal) return (CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW, 0, 0);

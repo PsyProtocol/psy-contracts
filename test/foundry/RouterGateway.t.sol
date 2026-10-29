@@ -8,6 +8,7 @@ import {Router} from "../../src/Router.sol";
 import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
 import {ERC20Gateway} from "../../src/ERC20Gateway.sol";
+import {UnmappedL1Token} from "../../src/Router.sol";
 import {ETHGateway} from "../../src/ETHGateway.sol";
 import {MockERC20} from "../fixtures/contracts/MockERC20.sol";
 import {MockWETH} from "../fixtures/contracts/MockWETH.sol";
@@ -145,5 +146,31 @@ contract RouterGatewayTest is Test {
         assertEq(weth.balanceOf(address(bridge)), 1 ether);
         assertEq(bridge.pendingDepositCount(), 1);
         assertEq(ethg.weth(), address(weth));
+    }
+
+    /// bytes32(0) is the PSY L2 token id, so an unregistered mapping read as zero would credit a deposit to PSY.
+    /// The Router is the single authority: it reverts before any gateway is entered, so no state changes anywhere.
+    function testUnmappedTokenDepositIsRejected() public {
+        (, Bridge bridge, Router router, ERC20Gateway erc20g, ETHGateway ethg, MockWETH weth) = _deployAll();
+        MockERC20 token = new MockERC20("Unmapped", "UMP");
+        _configureFlowToken(bridge, address(token));
+        _configureFlowToken(bridge, address(0));
+        token.mint(user, 1_000);
+        vm.deal(user, 2 ether);
+
+        assertFalse(router.isTokenMapped(address(token)));
+        assertFalse(router.isTokenMapped(address(0)));
+
+        vm.startPrank(user);
+        token.approve(address(erc20g), 500);
+        vm.expectRevert(abi.encodeWithSelector(UnmappedL1Token.selector, address(token)));
+        router.deposit(address(token), 500, bytes32(uint256(42)), bytes32(uint256(1)));
+        vm.expectRevert(abi.encodeWithSelector(UnmappedL1Token.selector, address(0)));
+        router.deposit{value: 1 ether}(address(0), 1 ether, bytes32(uint256(7)), bytes32(uint256(2)));
+        vm.stopPrank();
+
+        assertEq(bridge.pendingDepositCount(), 0);
+        assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(weth.balanceOf(address(bridge)), 0);
     }
 }

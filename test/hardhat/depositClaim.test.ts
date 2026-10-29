@@ -128,7 +128,7 @@ describe("Deposit And Claim", function () {
 
   it("tests ERC20 claim and ETH claim separately", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm, weth } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, weth, router } = await deployCoreSystem(owner.address, owner.address);
 
     const TokenFactory = await ethers.getContractFactory("MockERC20");
     const token = await TokenFactory.deploy("Mock", "MOCK");
@@ -139,6 +139,10 @@ describe("Deposit And Claim", function () {
       mediumWithdrawalMax: 3_000_000_000n,
       totalWithdrawalCap: 4_000_000_000n,
     });
+    const l2Erc20Id = ethers.utils.hexZeroPad("0x1234", 32);
+    const l2EthId = ethers.utils.hexZeroPad("0x8888", 32);
+    await router.connect(owner).setTokenMapping(token.address, l2Erc20Id);
+    await router.connect(owner).setTokenMapping(ethers.constants.AddressZero, l2EthId);
 
     const erc20Amount = 777n;
     const erc20Nonce = 42n;

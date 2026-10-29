@@ -301,6 +301,39 @@ contract BridgeTest is Test {
         bridge.recordDepositFromGateway(address(0x1234), bytes32(uint256(1)), 0, bytes32(uint256(123)), bytes32(uint256(456)));
     }
 
+    function testRecordDepositFromGatewayAccepts256BitAmounts() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        MockGnarkVerifier verifier = new MockGnarkVerifier();
+        StateManager sm = _deployStateManager(provider);
+        Router router = _deployRouter(provider);
+        Bridge bridge = _deployBridge(provider, address(verifier), address(verifier));
+        MockERC20 token = new MockERC20("Bound", "BND");
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
+        provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
+        provider.setAddress(provider.ROUTER_ID(), address(router));
+        provider.setAddress(provider.BRIDGE_ID(), address(bridge));
+        provider.setAddress(provider.ERC20_GATEWAY_ID(), owner);
+        vm.stopPrank();
+
+        _configureFlowToken(bridge, address(token));
+
+        // The L2 token contract carries balances as eight u32 words (full
+        // uint256), so amounts at and above the Goldilocks field order are
+        // accepted.
+        vm.prank(owner);
+        bridge.recordDepositFromGateway(address(token), bytes32(uint256(1)), GOLDILOCKS_PRIME, bytes32(uint256(123)), bytes32(uint256(456)));
+        assertNotEq(bridge.depositLeafHashes(0), bytes32(0));
+
+        // A full-width uint256 amount well beyond 2^64 is accepted too.
+        vm.prank(owner);
+        bridge.recordDepositFromGateway(address(token), bytes32(uint256(1)), 1 << 100, bytes32(uint256(2)), bytes32(uint256(3)));
+        assertNotEq(bridge.depositLeafHashes(1), bytes32(0));
+    }
+
     function _mkTopProof(bytes32 leaf, uint8 index) internal pure returns (bytes32[9] memory p, bytes32 root) {
         p[0] = leaf;
         bytes32 cur = leaf;
@@ -675,6 +708,8 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        vm.prank(owner);
+        router.setTokenMapping(address(token), bytes32(uint256(1)));
 
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(77));
@@ -709,6 +744,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 badRecipientNonce = bytes32(uint256(0x71));
         bytes32 badTokenNonce = bytes32(uint256(0x72));
@@ -785,6 +821,8 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        vm.prank(owner);
+        router.setTokenMapping(address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(77));
         token.mint(address(bridge), amount);
@@ -845,7 +883,8 @@ contract BridgeTest is Test {
         _setFlowConfig(bridge, address(token), config);
         config.mediumWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
-        uint256 amount = 150;
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+        uint256 amount = 250;
         bytes32 nonce = bytes32(uint256(88));
         token.mint(address(bridge), amount);
 
@@ -939,6 +978,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(99));
 
@@ -962,11 +1002,147 @@ contract BridgeTest is Test {
         assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
     }
 
+    function testBatchClaimWithdrawalUnmappedTokenSlotIsClassifiedAndMappedSlotStillPays() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 unmapped = new MockERC20("Unmapped", "UNM");
+        MockERC20 mapped = new MockERC20("Mapped", "MAP");
+        _configureFlowToken(bridge, address(unmapped));
+        _configureFlowToken(bridge, address(mapped));
+        _mapClaimToken(bridge, address(mapped), bytes32(uint256(4)));
+        uint256 amount = 123;
+        bytes32 unmappedNonce = bytes32(uint256(0xE1));
+        bytes32 mappedNonce = bytes32(uint256(0xE2));
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](2);
+        items[0] = BatchClaimItem(0, user, address(unmapped), amount, unmappedNonce, 0);
+        items[1] = BatchClaimItem(0, user, address(mapped), amount, mappedNonce, 0);
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
+        assertFalse(bridge.claimedNullifiers(unmappedNonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(unmappedNonce);
+        assertEq(pendingAmount, 0);
+        assertEq(bridge.totalWithdrawalAmount(address(unmapped)), 0);
+        // The honest mapped pair in the same batch still registers for payout.
+        assertTrue(bridge.claimedNullifiers(mappedNonce));
+        (address pendingToken, address pendingRecipient, uint256 mappedPending,) = bridge.pendingWithdrawals(mappedNonce);
+        assertEq(pendingToken, address(mapped));
+        assertEq(pendingRecipient, user);
+        assertEq(mappedPending, amount);
+        assertEq(bridge.totalWithdrawalAmount(address(mapped)), amount);
+    }
+
+    function testBatchClaimWithdrawalStaleRouterMappingIsRejected() public {
+        // The forward entry still says token -> 4, but 4 already rebinds to
+        // another token: only the forward direction agrees, which is exactly
+        // the stale pair the bidirectional guardian check rejects.
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        MockERC20 other = new MockERC20("Other", "OTH");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
+        _mapClaimToken(bridge, address(other), bytes32(uint256(4)));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xE3));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
+        assertFalse(bridge.claimedNullifiers(nonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, 0);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+    }
+
+    function testBatchClaimWithdrawalBytes32ZeroIdPairIsAccepted() public {
+        // PSY-style pair: the forward word is bytes32(0), so only the reverse
+        // read (bytes32(0) -> token) proves the binding.
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(0));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xE4));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 0);
+        assertEq(reasons.length, 0);
+        assertTrue(bridge.claimedNullifiers(nonce));
+        (address pendingToken,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingToken, address(token));
+        assertEq(pendingAmount, amount);
+        assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
+    }
+
+    function testBatchClaimWithdrawalUnmappedNativeSlotIsClassifiedUnbound() public {
+        // An unset address(0) token reads the Router's empty default in both
+        // directions; the all-zero pair is the default, not a binding, so the
+        // native slot is classified instead of registering a WETH payout.
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        _configureFlowToken(bridge, address(0));
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xE5));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(0), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(failedSlots[0], 0);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
+        assertFalse(bridge.claimedNullifiers(nonce));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertEq(pendingAmount, 0);
+        assertEq(bridge.totalWithdrawalAmount(address(0)), 0);
+    }
+
+    function _mapClaimToken(Bridge bridge, address token, bytes32 l2TokenId) internal {
+        PsyAddressesProvider provider = PsyAddressesProvider(bridge.addressesProvider());
+        Router router = Router(provider.getAddress(provider.ROUTER_ID()));
+        vm.prank(owner);
+        router.setTokenMapping(token, l2TokenId);
+    }
+
     function testBatchClaimWithdrawalPriorClaimedNonceSkipsAndContinues() public {
         (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 claimedNonce = bytes32(uint256(0x81));
         bytes32 freshNonce = bytes32(uint256(0x82));
@@ -1020,6 +1196,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0x83));
         bytes32 otherNonce = bytes32(uint256(0x84));
@@ -1065,6 +1242,8 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         MockERC20 unconfigured = new MockERC20("Unconfigured", "UNCF");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+        _mapClaimToken(bridge, address(unconfigured), bytes32(uint256(2)));
         uint256 amount = 123;
         uint8 chainIndex = sm.l1ChainIndex();
 
@@ -1129,32 +1308,39 @@ contract BridgeTest is Test {
         assertEq(pendingAmount, 0);
     }
 
-    function testBatchClaimWithdrawalAmountOutOfRangeBoundary() public {
+    function testBatchClaimWithdrawalAcceptsFullUint256Amounts() public {
         (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
-        uint256 maxValidAmount = GOLDILOCKS_PRIME - 1;
-        bytes32 okNonce = bytes32(uint256(0x97));
-        bytes32 badNonce = bytes32(uint256(0x98));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+        // Amounts at and above the Goldilocks prime, and beyond 2^64, register
+        // and pay: the L2 withdrawal leaf carries the full uint256.
+        uint256 primeAmount = GOLDILOCKS_PRIME;
+        uint256 largeAmount = 1 << 100;
+        bytes32 primeNonce = bytes32(uint256(0x97));
+        bytes32 largeNonce = bytes32(uint256(0x98));
 
         BatchClaimItem[] memory items = new BatchClaimItem[](2);
-        items[0] = BatchClaimItem(0, user, address(token), maxValidAmount, okNonce, 0);
-        items[1] = BatchClaimItem(0, user, address(token), GOLDILOCKS_PRIME, badNonce, 0);
+        items[0] = BatchClaimItem(0, user, address(token), primeAmount, primeNonce, 0);
+        items[1] = BatchClaimItem(0, user, address(token), largeAmount, largeNonce, 0);
         (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
         uint256[8] memory proof;
         vm.prank(user);
-        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
-        assertEq(failedSlots.length, 1);
-        assertEq(failedSlots[0], 1);
-        assertEq(reasons[0], bridge.CLAIM_REASON_AMOUNT_OUT_OF_RANGE());
-        assertTrue(bridge.claimedNullifiers(okNonce));
-        assertFalse(bridge.claimedNullifiers(badNonce));
-        assertEq(bridge.totalWithdrawalAmount(address(token)), maxValidAmount);
+        assertTrue(bridge.claimedNullifiers(primeNonce));
+        assertTrue(bridge.claimedNullifiers(largeNonce));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), primeAmount + largeAmount);
+        token.mint(address(bridge), primeAmount + largeAmount);
+        // The default config has zero delays, so both payouts settle instantly.
+        bridge.claimPendingWithdrawal(primeNonce);
+        vm.prank(user);
+        bridge.claimPendingWithdrawal(largeNonce);
+        assertEq(token.balanceOf(user), primeAmount + largeAmount);
     }
 
     function testBatchClaimWithdrawalTotalOverflowBoundary() public {
@@ -1162,6 +1348,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 10;
         bytes32 okNonce = bytes32(uint256(0xA1));
         bytes32 badNonce = bytes32(uint256(0xA2));
@@ -1204,6 +1391,7 @@ contract BridgeTest is Test {
         config.totalWithdrawalCap = 200;
         config.largeWithdrawalDelay = 1_000;
         _setFlowConfig(bridge, address(token), config);
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
 
         uint256 amount = 250;
         bytes32 boundaryNonce = bytes32(uint256(0xB1));
@@ -1242,6 +1430,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         uint8 chainIndex = sm.l1ChainIndex();
         bytes32 nonceA = bytes32(uint256(0xC1));
@@ -1453,6 +1642,8 @@ contract BridgeTest is Test {
         config.mediumWithdrawalDelay = 0;
         config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
+        vm.prank(owner);
+        router.setTokenMapping(address(token), bytes32(uint256(1)));
 
         uint256 smallAmount = 50;
         uint256 mediumAmount = 150;
@@ -1553,6 +1744,8 @@ contract BridgeTest is Test {
         config.totalWithdrawalCap = 20;
         config.largeWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
+        vm.prank(owner);
+        router.setTokenMapping(address(token), bytes32(uint256(1)));
         token.mint(address(bridge), 30);
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
@@ -1983,6 +2176,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 1;
         bytes32 nonce = bytes32(uint256(0xAB));
 
@@ -2028,6 +2222,7 @@ contract BridgeTest is Test {
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 knownNonce = bytes32(uint256(0xD1));
         bytes32 unknownNonce = bytes32(uint256(0xD2));
@@ -2097,6 +2292,8 @@ contract BridgeTest is Test {
         vm.stopPrank();
         RevertingTransferToken token = new RevertingTransferToken();
         _configureFlowToken(bridge, address(token));
+        vm.prank(owner);
+        router.setTokenMapping(address(token), bytes32(uint256(1)));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xCC));
 

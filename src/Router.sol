@@ -16,6 +16,8 @@ interface IPsyACLManagerRouter {
     function isRouterAdmin(address account) external view returns (bool);
 }
 
+error UnmappedL1Token(address token);
+
 contract Router is Initializable, OwnableUpgradeable {
     uint256 public constant VERSION = 1;
 
@@ -61,6 +63,13 @@ contract Router is Initializable, OwnableUpgradeable {
         l2ToL1Token[l2Token] = l1Token;
     }
 
+    /// bytes32(0) is a real L2 token id (PSY), so a mapping read needs the reverse check to mean "mapped".
+    function isTokenMapped(address l1Token) public view returns (bool) {
+        if (l1Token == address(0)) return l1ToL2Token[l1Token] != bytes32(0); // mapping defaults self-alias address(0)
+        bytes32 l2Token = l1ToL2Token[l1Token];
+        return l2ToL1Token[l2Token] == l1Token;
+    }
+
     function deposit(address token, uint256 amount, bytes32 shieldAddress, bytes32 noteCommitment)
         external
         payable
@@ -69,6 +78,12 @@ contract Router is Initializable, OwnableUpgradeable {
         IPsyAddressesProviderRouter provider = IPsyAddressesProviderRouter(addressesProvider);
         address ethGateway = provider.getAddress(provider.ETH_GATEWAY_ID());
         address defaultERC20Gateway = provider.getAddress(provider.ERC20_GATEWAY_ID());
+
+        // Single authority for the mapped-token check: revert here, before
+        // any gateway is entered, so an unmapped deposit changes no state.
+        // bytes32(0) is the PSY L2 token id, so an unregistered mapping would
+        // otherwise credit this deposit to PSY.
+        if (!isTokenMapped(token)) revert UnmappedL1Token(token);
 
         if (token == address(0)) {
             if (ethGateway == address(0)) revert GatewayNotConfigured();
