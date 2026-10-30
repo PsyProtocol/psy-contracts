@@ -52,7 +52,7 @@ interface IGnarkGroth16Verifier {
 
 contract Bridge is Initializable, OwnableUpgradeable {
     using SafeERC20 for IERC20;
-    uint256 public constant VERSION = 5;
+    uint256 public constant VERSION = 6;
     uint8 internal constant PAUSE_DEPOSITS = 1 << 0;
     uint8 internal constant PAUSE_WITHDRAWAL_REGISTRATION = 1 << 1;
     uint8 internal constant PAUSE_PENDING_CLAIMS = 1 << 2;
@@ -60,7 +60,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         PAUSE_DEPOSITS | PAUSE_WITHDRAWAL_REGISTRATION | PAUSE_PENDING_CLAIMS;
     uint256 internal constant GOLDILOCKS_PRIME = 18446744069414584321;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_PUBLIC_INPUTS_LEN = 18;
-    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 34;
+    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 35;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT = 32;
     uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_DATA_WORDS =
         WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS * WITHDRAWAL_BATCH_CLAIM_SLOT_COUNT;
@@ -83,8 +83,9 @@ contract Bridge is Initializable, OwnableUpgradeable {
     uint8 public constant CLAIM_REASON_AMOUNT_OUT_OF_RANGE = 8;
     uint8 public constant CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW = 9;
     uint8 public constant CLAIM_REASON_CLAIMABLE_AT_OVERFLOW = 10;
-    /// The slot's token is not dual-bound in the Router (forward id does not
-    /// resolve back to the token), the same check guardians apply at signing.
+    /// The slot's token_contract_id is not the Router binding of the token in
+    /// both directions: l1ToL2Token(token) must equal the slot id and
+    /// l2ToL1Token(id) must equal the token. bytes32(0) is a real L2 id.
     uint8 public constant CLAIM_REASON_TOKEN_MAPPING_MISMATCH = 11;
 
     struct BridgeContractState {
@@ -163,21 +164,21 @@ contract Bridge is Initializable, OwnableUpgradeable {
         bytes32 leafHash
     );
     event WithdrawalClaimed(
-        bytes32 indexed nonce,
+        bytes32 indexed withdrawalId,
         address indexed recipient,
         address indexed token,
         uint256 amount
     );
     event WithdrawalPendingCreated(
-        bytes32 indexed nonce,
+        bytes32 indexed withdrawalId,
         address indexed token,
         address indexed recipient,
         uint256 amount,
         uint64 claimableAt
     );
-    event WithdrawalClaimItemFailed(bytes32 indexed nonce, uint8 indexed slotIndex, uint8 reason);
+    event WithdrawalClaimItemFailed(bytes32 indexed withdrawalId, uint8 indexed slotIndex, uint8 reason);
     event WithdrawalClaimBatchResult(bytes32 indexed batchCommit, uint8 realCount, uint8 succeededCount, uint8 failedCount);
-    event WithdrawalForceClaimed(bytes32 indexed nonce, address indexed executor);
+    event WithdrawalForceClaimed(bytes32 indexed withdrawalId, address indexed executor);
     event WithdrawalTotalInitialized(address indexed token, uint256 total);
     event TokenFlowConfigUpdated(address indexed token, bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenPauseFlagsUpdated(address indexed token, uint8 oldFlags, uint8 newFlags);
@@ -237,9 +238,9 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error WithdrawalRegistrationPaused(address token);
     error ClaimableAtOverflow();
     error WithdrawalSettlementReentered();
-    error WithdrawalGovernanceRequired(bytes32 nonce);
-    error PendingWithdrawalNotFound(bytes32 nonce);
-    error PendingWithdrawalNotClaimable(bytes32 nonce, uint64 claimableAt);
+    error WithdrawalGovernanceRequired(bytes32 withdrawalId);
+    error PendingWithdrawalNotFound(bytes32 withdrawalId);
+    error PendingWithdrawalNotClaimable(bytes32 withdrawalId, uint64 claimableAt);
     error PendingClaimsPaused(address token);
     error InvalidPauseFlags(uint8 flags);
     error BridgeNotFullyPaused();
@@ -530,17 +531,18 @@ contract Bridge is Initializable, OwnableUpgradeable {
         return provider.getAddress(provider.ROUTER_ID());
     }
 
-    /// Router binding of the burned token, mirroring the off-chain guardian
-    /// derivation. The withdrawal slot carries no burning L2 contract id, so
-    /// the forward read supplies it and the reverse read must resolve back to
-    /// the token; bytes32(0) is a real L2 id (PSY), which makes the reverse
-    /// read the actual check. A pair whose forward and reverse words are both
-    /// zero is the Router's empty default, not a binding: an unset native
-    /// (address(0)) token would otherwise report bound.
-    function _unboundTokenMapping(address router, address token) internal view returns (bool) {
+    /// Router binding of the burned token. The slot carries the burning L2
+    /// contract id as its final u32, and both directions must agree with it:
+    /// forward l1ToL2Token(token) equals that id, and reverse l2ToL1Token(id)
+    /// resolves back to the token. bytes32(0) is a real L2 id (PSY), so the
+    /// reverse read is the binding check. A pair whose forward and reverse
+    /// words are both zero is the Router's empty default, not a binding: an
+    /// unset native (address(0)) token with slot id 0 would otherwise report bound.
+    function _unboundTokenMapping(address router, address token, uint32 tokenContractId) internal view returns (bool) {
+        bytes32 slotId = bytes32(uint256(tokenContractId));
         bytes32 forward = IRouterWithdrawalBinding(router).l1ToL2Token(token);
-        address reverse = IRouterWithdrawalBinding(router).l2ToL1Token(forward);
-        return reverse != token || (forward == bytes32(0) && reverse == address(0));
+        address reverse = IRouterWithdrawalBinding(router).l2ToL1Token(slotId);
+        return forward != slotId || reverse != token || (slotId == bytes32(0) && token == address(0));
     }
 
     function _nativeWithdrawalAsset() internal view returns (address) {
@@ -795,14 +797,24 @@ contract Bridge is Initializable, OwnableUpgradeable {
         uint256 failedCount;
         uint8 chainIndex = sm.l1ChainIndex();
         address router = _router();
-
         for (uint256 i = 0; i < realCount; ++i) {
             uint256 slotOffset = i * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
+            uint32 senderUserId = uint32(slotData[slotOffset]);
             bytes32 recipientBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 1);
             bytes32 tokenBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 9);
             bytes32 amountBytes32 = _u32x8ToBytes32Concat(slotData, slotOffset + 17);
             bytes32 nonce = _u32x8ToBytes32Concat(slotData, slotOffset + 25);
             uint32 destinationChainIndex = uint32(slotData[slotOffset + 33]);
+            uint32 tokenContractId = uint32(slotData[slotOffset + 34]);
+            bytes32 withdrawalId = _withdrawalLeafId(
+                senderUserId,
+                recipientBytes32,
+                tokenBytes32,
+                amountBytes32,
+                nonce,
+                destinationChainIndex,
+                tokenContractId
+            );
             address recipientAddr = address(uint160(uint256(recipientBytes32)));
             address tokenAddr = address(uint160(uint256(tokenBytes32)));
             uint256 amount = uint256(amountBytes32);
@@ -820,10 +832,10 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 reason = CLAIM_REASON_ZERO_ADDRESS;
             } else if (amount == 0) {
                 reason = CLAIM_REASON_ZERO_AMOUNT;
-            } else if (claimedNullifiers[nonce]) {
+            } else if (claimedNullifiers[withdrawalId]) {
                 // Covers both prior-transaction claims and duplicates earlier in this batch.
                 reason = CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED;
-            } else if (_unboundTokenMapping(router, tokenAddr)) {
+            } else if (_unboundTokenMapping(router, tokenAddr, tokenContractId)) {
                 reason = CLAIM_REASON_TOKEN_MAPPING_MISMATCH;
             } else {
                 (reason, nextTotal, delay) = _withdrawalRegistrationCheck(tokenAddr, amount);
@@ -833,12 +845,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 failedSlotIndexes[failedCount] = uint8(i);
                 failureReasons[failedCount] = reason;
                 ++failedCount;
-                emit WithdrawalClaimItemFailed(nonce, uint8(i), reason);
+                emit WithdrawalClaimItemFailed(withdrawalId, uint8(i), reason);
                 continue;
             }
 
-            // Consume the nonce and account the total before any external transfer.
-            claimedNullifiers[nonce] = true;
+            // Consume the leaf id and account the total before any external transfer.
+            claimedNullifiers[withdrawalId] = true;
             _totalWithdrawalAmounts[tokenAddr] = nextTotal;
             TokenFlowConfig storage config = _tokenFlowConfigs[tokenAddr];
             bool requiresGovernance = amount > config.mediumWithdrawalMax || nextTotal > config.totalWithdrawalCap;
@@ -846,10 +858,10 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 if ((_effectivePauseFlags(tokenAddr) & PAUSE_PENDING_CLAIMS) != 0) {
                     revert PendingClaimsPaused(tokenAddr);
                 }
-                _settlePendingWithdrawal(nonce, PendingWithdrawal(tokenAddr, recipientAddr, amount, 0));
+                _settlePendingWithdrawal(withdrawalId, PendingWithdrawal(tokenAddr, recipientAddr, amount, 0));
             } else {
-                _withdrawalSettlementTiers[nonce] = requiresGovernance ? 2 : 1;
-                _registerPendingWithdrawal(nonce, tokenAddr, recipientAddr, amount, nextTotal, delay);
+                _withdrawalSettlementTiers[withdrawalId] = requiresGovernance ? 2 : 1;
+                _registerPendingWithdrawal(withdrawalId, tokenAddr, recipientAddr, amount, nextTotal, delay);
             }
         }
 
@@ -871,42 +883,42 @@ contract Bridge is Initializable, OwnableUpgradeable {
         _withdrawalSettlementEntered = false;
     }
 
-    function withdrawalRequiresGovernance(bytes32 nonce) public view returns (bool) {
-        return pendingWithdrawals[nonce].amount != 0 && _withdrawalSettlementTiers[nonce] != 1;
+    function withdrawalRequiresGovernance(bytes32 withdrawalId) public view returns (bool) {
+        return pendingWithdrawals[withdrawalId].amount != 0 && _withdrawalSettlementTiers[withdrawalId] != 1;
     }
 
-    function claimPendingWithdrawal(bytes32 nonce) external withdrawalSettlementLock {
-        PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
-        if (withdrawalRequiresGovernance(nonce)) revert WithdrawalGovernanceRequired(nonce);
+    function claimPendingWithdrawal(bytes32 withdrawalId) external withdrawalSettlementLock {
+        PendingWithdrawal memory pending = _loadPendingWithdrawal(withdrawalId);
+        if (withdrawalRequiresGovernance(withdrawalId)) revert WithdrawalGovernanceRequired(withdrawalId);
         if (block.timestamp < pending.claimableAt) {
-            revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
+            revert PendingWithdrawalNotClaimable(withdrawalId, pending.claimableAt);
         }
-        _settlePendingWithdrawal(nonce, pending);
+        _settlePendingWithdrawal(withdrawalId, pending);
     }
 
-    function forceClaimWithdrawal(bytes32 nonce) external withdrawalSettlementLock {
+    function forceClaimWithdrawal(bytes32 withdrawalId) external withdrawalSettlementLock {
         if (msg.sender != withdrawalForceClaimExecutor) {
             revert UnauthorizedWithdrawalForceClaimExecutor(msg.sender);
         }
-        PendingWithdrawal memory pending = _loadPendingWithdrawal(nonce);
+        PendingWithdrawal memory pending = _loadPendingWithdrawal(withdrawalId);
         if (block.timestamp < pending.claimableAt) {
-            revert PendingWithdrawalNotClaimable(nonce, pending.claimableAt);
+            revert PendingWithdrawalNotClaimable(withdrawalId, pending.claimableAt);
         }
-        _settlePendingWithdrawal(nonce, pending);
-        emit WithdrawalForceClaimed(nonce, msg.sender);
+        _settlePendingWithdrawal(withdrawalId, pending);
+        emit WithdrawalForceClaimed(withdrawalId, msg.sender);
     }
 
-    function _loadPendingWithdrawal(bytes32 nonce) internal view returns (PendingWithdrawal memory pending) {
-        pending = pendingWithdrawals[nonce];
-        if (pending.amount == 0) revert PendingWithdrawalNotFound(nonce);
+    function _loadPendingWithdrawal(bytes32 withdrawalId) internal view returns (PendingWithdrawal memory pending) {
+        pending = pendingWithdrawals[withdrawalId];
+        if (pending.amount == 0) revert PendingWithdrawalNotFound(withdrawalId);
         if ((_effectivePauseFlags(pending.token) & PAUSE_PENDING_CLAIMS) != 0) {
             revert PendingClaimsPaused(pending.token);
         }
     }
 
-    function _settlePendingWithdrawal(bytes32 nonce, PendingWithdrawal memory pending) internal {
-        delete pendingWithdrawals[nonce];
-        delete _withdrawalSettlementTiers[nonce];
+    function _settlePendingWithdrawal(bytes32 withdrawalId, PendingWithdrawal memory pending) internal {
+        delete pendingWithdrawals[withdrawalId];
+        delete _withdrawalSettlementTiers[withdrawalId];
         if (pending.token == address(0)) {
             IWETHWithdraw(_nativeWithdrawalAsset()).withdraw(pending.amount);
             (bool ok,) = payable(pending.recipient).call{value: pending.amount}("");
@@ -914,7 +926,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         } else {
             IERC20(pending.token).safeTransfer(pending.recipient, pending.amount);
         }
-        emit WithdrawalClaimed(nonce, pending.recipient, pending.token, pending.amount);
+        emit WithdrawalClaimed(withdrawalId, pending.recipient, pending.token, pending.amount);
     }
 
 
@@ -949,7 +961,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
     }
 
     function _registerPendingWithdrawal(
-        bytes32 nonce,
+        bytes32 withdrawalId,
         address token,
         address recipient,
         uint256 amount,
@@ -958,8 +970,8 @@ contract Bridge is Initializable, OwnableUpgradeable {
     ) internal {
         _totalWithdrawalAmounts[token] = nextTotal;
         uint256 claimTime = block.timestamp + delay;
-        pendingWithdrawals[nonce] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
-        emit WithdrawalPendingCreated(nonce, token, recipient, amount, uint64(claimTime));
+        pendingWithdrawals[withdrawalId] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
+        emit WithdrawalPendingCreated(withdrawalId, token, recipient, amount, uint64(claimTime));
     }
 
     function _validateFlowConfig(address token, TokenFlowConfig calldata config) internal pure {
@@ -1087,6 +1099,25 @@ contract Bridge is Initializable, OwnableUpgradeable {
             buf[offset + 3] = bytes1(uint8(word));
         }
         return keccak256(buf);
+    }
+
+    /// Keccak of one withdrawal slot: the same 35 big-endian u32 words the
+    /// Poseidon leaf hashes, including the raw nonce and token_contract_id.
+    /// Not a hash of the Poseidon digest. This bytes32 is the claimed, pending,
+    /// and event identity. abi.encodePacked of (u32, bytes32, bytes32, bytes32,
+    /// bytes32, u32, u32) is exactly the 140 big-endian bytes.
+    function _withdrawalLeafId(
+        uint32 senderUserId,
+        bytes32 recipient,
+        bytes32 token,
+        bytes32 amount,
+        bytes32 nonce,
+        uint32 destinationChainIndex,
+        uint32 tokenContractId
+    ) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encodePacked(senderUserId, recipient, token, amount, nonce, destinationChainIndex, tokenContractId)
+        );
     }
 
     function _computeDepositBatchSlotDataCommit(
