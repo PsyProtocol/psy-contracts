@@ -28,6 +28,7 @@ contract Router is Initializable, OwnableUpgradeable {
     error ZeroAddress();
     error GatewayNotConfigured();
     error InvalidMsgValue();
+    error InvalidTokenMapping();
     error OnlyRouterAdmin();
 
     modifier onlyRouterAdmin() {
@@ -66,6 +67,12 @@ contract Router is Initializable, OwnableUpgradeable {
         payable
         returns (uint32 index, bytes32 newRoot)
     {
+        bytes32 l2Token = l1ToL2Token[token];
+        // ID zero is valid for PSY, but a default zero must not admit an unmapped asset.
+        if (l2ToL1Token[l2Token] != token || (token == address(0) && l2Token == bytes32(0))) {
+            revert InvalidTokenMapping();
+        }
+
         IPsyAddressesProviderRouter provider = IPsyAddressesProviderRouter(addressesProvider);
         address ethGateway = provider.getAddress(provider.ETH_GATEWAY_ID());
         address defaultERC20Gateway = provider.getAddress(provider.ERC20_GATEWAY_ID());
