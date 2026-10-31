@@ -173,4 +173,52 @@ contract RouterGatewayTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
         assertEq(weth.balanceOf(address(bridge)), 0);
     }
+
+    /// Unmapped and one-way mapped pairs revert with the single Router error before any gateway or Bridge V6 state is touched.
+    function test_router_rejects_unmapped_pair_with_v6_identity() public {
+        (, Bridge bridge, Router router, ERC20Gateway erc20g,, MockWETH weth) = _deployAll();
+        MockERC20 psy = new MockERC20("PSY", "PSY");
+        MockERC20 usdt = new MockERC20("pUSDT", "pUSDT");
+        MockERC20 unknown = new MockERC20("Unknown", "UNK");
+        address[3] memory tokens = [address(psy), address(usdt), address(unknown)];
+        for (uint256 i = 0; i < tokens.length; i++) {
+            _configureFlowToken(bridge, tokens[i]);
+            MockERC20(tokens[i]).mint(user, 1_000);
+        }
+        _configureFlowToken(bridge, address(0));
+        vm.deal(user, 2 ether);
+
+        vm.startPrank(owner);
+        router.setTokenMapping(address(psy), bytes32(0));
+        router.setTokenMapping(address(usdt), bytes32(uint256(4)));
+        vm.stopPrank();
+
+        // Unmapped ERC20 and unmapped native.
+        _expectUnmappedDeposit(router, erc20g, address(unknown), 0);
+        _expectUnmappedDeposit(router, erc20g, address(0), 1 ether);
+
+        // One-way: usdt keeps its forward mapping, but id 4 now resolves back to psy.
+        vm.prank(owner);
+        router.setTokenMapping(address(psy), bytes32(uint256(4)));
+        _expectUnmappedDeposit(router, erc20g, address(usdt), 0);
+
+        // One-way native: forward id 9 is set, then another token takes id 9.
+        vm.startPrank(owner);
+        router.setTokenMapping(address(0), bytes32(uint256(9)));
+        router.setTokenMapping(address(unknown), bytes32(uint256(9)));
+        vm.stopPrank();
+        _expectUnmappedDeposit(router, erc20g, address(0), 1 ether);
+
+        assertEq(bridge.pendingDepositCount(), 0);
+        assertEq(weth.balanceOf(address(bridge)), 0);
+        assertEq(usdt.balanceOf(user), 1_000);
+    }
+
+    function _expectUnmappedDeposit(Router router, ERC20Gateway erc20g, address token, uint256 value) internal {
+        vm.startPrank(user);
+        if (token != address(0)) MockERC20(token).approve(address(erc20g), 500);
+        vm.expectRevert(abi.encodeWithSelector(UnmappedL1Token.selector, token));
+        router.deposit{value: value}(token, token == address(0) ? value : 500, bytes32(uint256(42)), bytes32(uint256(1)));
+        vm.stopPrank();
+    }
 }

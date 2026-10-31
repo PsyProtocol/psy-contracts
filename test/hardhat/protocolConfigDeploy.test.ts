@@ -12,13 +12,13 @@ describe("protocol-config external contract deployments", function () {
       const config = localFlowLimitConfig(decimals);
       expect(ethers.utils.formatUnits(ethers.BigNumber.from(config.smallWithdrawalMax).add(1), decimals)).to.equal("50000.0");
       expect(ethers.utils.formatUnits(ethers.BigNumber.from(config.mediumWithdrawalMax).add(1), decimals)).to.equal("100000.0");
-      expect(ethers.utils.formatUnits(config.totalWithdrawalCap, decimals)).to.equal("100000000000000000000.0");
+      expect(ethers.utils.formatUnits(config.totalWithdrawalCap, decimals)).to.equal("1000000000000.0");
       expect(ethers.BigNumber.from(config.totalWithdrawalCap).lte(ethers.BigNumber.from(2).pow(128).sub(1))).to.equal(true);
       expect(ethers.utils.formatUnits(config.depositCap, decimals)).to.equal("10000000.0");
     }
-    expect(localFlowLimitConfig(protocolConfig.tokens.USDT.decimals).totalWithdrawalCap).to.equal((10n ** 26n).toString());
-    expect(localFlowLimitConfig(protocolConfig.tokens.PSY.decimals).totalWithdrawalCap).to.equal((10n ** 29n).toString());
-    expect(localFlowLimitConfig(protocolConfig.chains.localhost.nativeCurrency.decimals).totalWithdrawalCap).to.equal((10n ** 38n).toString());
+    expect(localFlowLimitConfig(protocolConfig.tokens.USDT.decimals).totalWithdrawalCap).to.equal((10n ** 18n).toString());
+    expect(localFlowLimitConfig(protocolConfig.tokens.PSY.decimals).totalWithdrawalCap).to.equal((10n ** 21n).toString());
+    expect(localFlowLimitConfig(protocolConfig.chains.localhost.nativeCurrency.decimals).totalWithdrawalCap).to.equal((10n ** 30n).toString());
   });
 
   it("initializes both token mappings when the PSY L2 contract id is zero", async function () {

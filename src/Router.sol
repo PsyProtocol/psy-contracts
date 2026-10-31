@@ -65,8 +65,9 @@ contract Router is Initializable, OwnableUpgradeable {
 
     /// bytes32(0) is a real L2 token id (PSY), so a mapping read needs the reverse check to mean "mapped".
     function isTokenMapped(address l1Token) public view returns (bool) {
-        if (l1Token == address(0)) return l1ToL2Token[l1Token] != bytes32(0); // mapping defaults self-alias address(0)
         bytes32 l2Token = l1ToL2Token[l1Token];
+        // The all-zero pair is the mapping default for address(0), not a registration.
+        if (l1Token == address(0) && l2Token == bytes32(0)) return false;
         return l2ToL1Token[l2Token] == l1Token;
     }
 

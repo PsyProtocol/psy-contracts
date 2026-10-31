@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
+import { buildWithdrawalBatchClaimSingle, mapClaimToken, withdrawalLeafIdOf } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -32,7 +32,7 @@ describe("Multicall3 claim", function () {
     const token = await T.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
-    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
+    await mapClaimToken(router.connect(owner), token.address, 1);
     const amount = 99n;
     const nonce = 9n;
     await token.mint(bridge.address, amount);
@@ -60,7 +60,7 @@ describe("Multicall3 claim", function () {
       publicInputs,
       slotData,
     ]);
-    const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
+    const nullifier = withdrawalLeafIdOf(nonce);
     const settleCallData = bridge.interface.encodeFunctionData("claimPendingWithdrawal", [nullifier]);
     await multicall.aggregate3([
       {

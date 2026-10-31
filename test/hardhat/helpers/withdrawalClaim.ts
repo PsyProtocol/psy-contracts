@@ -1,7 +1,19 @@
 import { ethers } from "hardhat";
 
-const WITHDRAWAL_BATCH_SLOT_WORDS = 34;
+const WITHDRAWAL_BATCH_SLOT_WORDS = 35;
 const WITHDRAWAL_BATCH_SLOT_COUNT = 32;
+
+// Router id per L1 token, as bound by mapClaimToken: slot word 34.
+const slotTokenIds = new Map<string, number>();
+// Keccak claim identity of the most recently built slot for each raw nonce.
+const leafIds = new Map<bigint, string>();
+
+beforeEach(() => leafIds.clear());
+
+export async function mapClaimToken(router: any, token: string, id: number): Promise<void> {
+  await router.setTokenMapping(token, ethers.utils.hexZeroPad(ethers.utils.hexlify(id), 32));
+  slotTokenIds.set(token.toLowerCase(), id);
+}
 
 function bytes32ToU32x8(value: string): bigint[] {
   const bytes = ethers.utils.arrayify(ethers.utils.hexZeroPad(value, 32));
@@ -32,6 +44,32 @@ function batchSlotDataCommit(slotData: bigint[]): string {
   return ethers.utils.keccak256(Uint8Array.from(bytes));
 }
 
+/// The V6 identity recomputed the way the runtime does it (relayer
+/// withdrawal_claim_identity_words): keccak over the 35 slot words, each
+/// big-endian u32, 140 bytes.
+function slotLeafId(slotData: bigint[], slot: number): string {
+  const words = slotData.slice(slot * WITHDRAWAL_BATCH_SLOT_WORDS, (slot + 1) * WITHDRAWAL_BATCH_SLOT_WORDS);
+  return ethers.utils.keccak256(ethers.utils.solidityPack(words.map(() => "uint32"), words.map((word) => word.toString())));
+}
+
+function slotNonce(slotData: bigint[], slot: number): bigint {
+  const base = slot * WITHDRAWAL_BATCH_SLOT_WORDS + 25;
+  return slotData.slice(base, base + 8).reduce((acc, word) => (acc << 32n) | word, 0n);
+}
+
+function recordLeafIds(publicInputs: bigint[], slotData: bigint[]): void {
+  for (let slot = 0; slot < Number(publicInputs[8]); slot++) {
+    leafIds.set(slotNonce(slotData, slot), slotLeafId(slotData, slot));
+  }
+}
+
+/// Throws for an unbuilt nonce so no assertion silently reads a wrong key.
+export function withdrawalLeafIdOf(nonce: bigint): string {
+  const id = leafIds.get(nonce);
+  if (id === undefined) throw new Error(`no slot built for nonce ${nonce}`);
+  return id;
+}
+
 export interface WithdrawalBatchClaimItem {
   senderUserId?: number;
   recipient: string;
@@ -39,6 +77,7 @@ export interface WithdrawalBatchClaimItem {
   amount: bigint;
   nonce: bigint;
   destinationChainIndex: number;
+  tokenContractId?: number;
 }
 
 export function buildWithdrawalBatchClaim(params: {
@@ -67,8 +106,10 @@ export function buildWithdrawalBatchClaim(params: {
     setWords(slotData, offset + 17, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.amount.toString(16)}`, 32)));
     setWords(slotData, offset + 25, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.nonce.toString(16)}`, 32)));
     slotData[offset + 33] = BigInt(item.destinationChainIndex);
+    slotData[offset + 34] = BigInt(item.tokenContractId ?? slotTokenIds.get(item.token.toLowerCase()) ?? 0);
   });
   setWords(publicInputs, 10, bytes32ToU32x8(batchSlotDataCommit(slotData)));
+  recordLeafIds(publicInputs, slotData);
   return { publicInputs, slotData };
 }
 
@@ -77,6 +118,7 @@ export function patchBatchCommit(publicInputs: bigint[], slotData: bigint[]): vo
   for (let index = 0; index < 8; index++) {
     publicInputs[10 + index] = commitWords[index];
   }
+  recordLeafIds(publicInputs, slotData);
 }
 
 export function buildWithdrawalBatchClaimSingle(params: {
@@ -86,6 +128,7 @@ export function buildWithdrawalBatchClaimSingle(params: {
   amount: bigint;
   nonce: bigint;
   destinationChainIndex: number;
+  tokenContractId?: number;
   senderUserId?: number;
   bridgeUserId?: number;
 }): { publicInputs: bigint[]; slotData: bigint[] } {
@@ -100,6 +143,7 @@ export function buildWithdrawalBatchClaimSingle(params: {
         amount: params.amount,
         nonce: params.nonce,
         destinationChainIndex: params.destinationChainIndex,
+        tokenContractId: params.tokenContractId,
       },
     ],
   });

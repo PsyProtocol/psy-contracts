@@ -54,7 +54,9 @@ contract BridgeTest is Test {
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_COUNT = 32;
     uint256 internal constant DEPOSIT_BATCH_APPEND_SLOT_DATA_WORDS =
         DEPOSIT_BATCH_APPEND_SLOT_WORDS * DEPOSIT_BATCH_APPEND_SLOT_COUNT;
-    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 34;
+    uint256 internal constant WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS = 35;
+    mapping(address => uint32) internal _slotTokenIds;
+    mapping(bytes32 => bytes32) internal _leafIds;
     uint256 internal constant GOLDILOCKS_PRIME = 18446744069414584321;
     uint32 internal constant BRIDGE_USER_ID = 524288;
 
@@ -319,7 +321,9 @@ contract BridgeTest is Test {
         provider.setAddress(provider.ERC20_GATEWAY_ID(), owner);
         vm.stopPrank();
 
-        _configureFlowToken(bridge, address(token));
+        Bridge.TokenFlowConfig memory depositConfig = _defaultFlowConfig();
+        depositConfig.depositCap = type(uint128).max;
+        _setFlowConfig(bridge, address(token), depositConfig);
 
         // The L2 token contract carries balances as eight u32 words (full
         // uint256), so amounts at and above the Goldilocks field order are
@@ -416,7 +420,7 @@ contract BridgeTest is Test {
         bytes32 nonce,
         uint32 destinationChainIndex,
         uint32 leafIndex
-    ) internal pure returns (uint256[18] memory out, uint256[1088] memory slotData) {
+    ) internal returns (uint256[18] memory out, uint256[1120] memory slotData) {
         uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
         uint256[] memory recipientWords = _bytes32ToWords(bytes32(uint256(uint160(recipient))));
         uint256[] memory tokenWords = _bytes32ToWords(bytes32(uint256(uint160(token))));
@@ -435,10 +439,8 @@ contract BridgeTest is Test {
             slotData[25 + i] = nonceWords[i];
         }
         slotData[33] = destinationChainIndex;
-        uint256[] memory batchCommitWords = _bytes32ToWords(_computeWithdrawalBatchSlotDataCommit(slotData));
-        for (uint256 i = 0; i < 8; ++i) {
-            out[10 + i] = batchCommitWords[i];
-        }
+        slotData[34] = _slotTokenIds[token];
+        _patchBatchCommit(out, slotData);
         leafIndex;
     }
 
@@ -454,7 +456,7 @@ contract BridgeTest is Test {
     function _buildWithdrawalBatchClaimMulti(
         bytes32 withdrawalRoot,
         BatchClaimItem[] memory items
-    ) internal pure returns (uint256[18] memory out, uint256[1088] memory slotData) {
+    ) internal returns (uint256[18] memory out, uint256[1120] memory slotData) {
         uint256[] memory rootWords = _bytes32ToWords(withdrawalRoot);
         for (uint256 i = 0; i < 8; ++i) {
             out[i] = rootWords[i];
@@ -475,15 +477,51 @@ contract BridgeTest is Test {
                 slotData[slotOffset + 25 + j] = nonceWords[j];
             }
             slotData[slotOffset + 33] = items[i].destinationChainIndex;
+            slotData[slotOffset + 34] = _slotTokenIds[items[i].token];
         }
         _patchBatchCommit(out, slotData);
     }
 
-    function _patchBatchCommit(uint256[18] memory publicInputs, uint256[1088] memory slotData) internal pure {
+    function _patchBatchCommit(uint256[18] memory publicInputs, uint256[1120] memory slotData) internal {
         uint256[] memory commitWords = _bytes32ToWords(_computeWithdrawalBatchSlotDataCommit(slotData));
         for (uint256 j = 0; j < 8; ++j) {
             publicInputs[10 + j] = commitWords[j];
         }
+        for (uint256 i = 0; i < publicInputs[8]; ++i) {
+            bytes32 nonce = _slotNonce(slotData, i);
+            _leafIds[nonce] = _slotLeafId(slotData, i);
+        }
+    }
+
+    /// Recomputes the V6 identity the way the runtime does (relayer
+    /// withdrawal_claim_identity_words): keccak over the 35 slot words, each
+    /// big-endian. Deliberately not abi.encodePacked over typed fields, so it
+    /// cross-checks Bridge._withdrawalLeafId instead of copying it.
+    function _slotLeafId(uint256[1120] memory slotData, uint256 slot) internal pure returns (bytes32) {
+        bytes memory buf = new bytes(WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS * 4);
+        uint256 base = slot * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
+        for (uint256 k = 0; k < WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS; ++k) {
+            uint256 word = slotData[base + k];
+            buf[k * 4] = bytes1(uint8(word >> 24));
+            buf[k * 4 + 1] = bytes1(uint8(word >> 16));
+            buf[k * 4 + 2] = bytes1(uint8(word >> 8));
+            buf[k * 4 + 3] = bytes1(uint8(word));
+        }
+        return keccak256(buf);
+    }
+
+    function _slotNonce(uint256[1120] memory slotData, uint256 slot) internal pure returns (bytes32 nonce) {
+        uint256 base = slot * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS;
+        for (uint256 j = 0; j < 8; ++j) {
+            nonce |= bytes32(slotData[base + 25 + j] << ((7 - j) * 32));
+        }
+    }
+
+    /// The identity of the most recently built slot carrying this raw nonce.
+    /// Reverts for an unbuilt nonce so no assertion silently reads key zero.
+    function _leaf(bytes32 nonce) internal view returns (bytes32 id) {
+        id = _leafIds[nonce];
+        require(id != bytes32(0), "no slot built for this nonce");
     }
 
     function _batchCommitBytes32(uint256[18] memory publicInputs) internal pure returns (bytes32 out) {
@@ -562,10 +600,10 @@ contract BridgeTest is Test {
     }
 
     function _computeWithdrawalBatchSlotDataCommit(
-        uint256[1088] memory slotData
+        uint256[1120] memory slotData
     ) internal pure returns (bytes32) {
-        bytes memory buf = new bytes(1088 * 4);
-        for (uint256 k = 0; k < 1088; ++k) {
+        bytes memory buf = new bytes(1120 * 4);
+        for (uint256 k = 0; k < 1120; ++k) {
             uint256 word = slotData[k];
             uint256 offset = k * 4;
             buf[offset] = bytes1(uint8(word >> 24));
@@ -710,6 +748,7 @@ contract BridgeTest is Test {
         _configureFlowToken(bridge, address(token));
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(1)));
+        _slotTokenIds[address(token)] = 1;
 
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(77));
@@ -723,7 +762,7 @@ contract BridgeTest is Test {
         sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
 
         uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifierBatch =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
@@ -735,7 +774,7 @@ contract BridgeTest is Test {
 
         assertEq(token.balanceOf(user), 0);
         vm.prank(user);
-        bridge.claimPendingWithdrawal(nonce);
+        bridge.claimPendingWithdrawal(_leaf(nonce));
         assertEq(token.balanceOf(user), amount);
     }
 
@@ -755,7 +794,7 @@ contract BridgeTest is Test {
         items[0] = BatchClaimItem(0, user, address(token), amount, badRecipientNonce, 0);
         items[1] = BatchClaimItem(0, user, address(token), amount, badTokenNonce, 0);
         items[2] = BatchClaimItem(0, user, address(token), amount, goodNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         // High bits on recipient (slot 0) and token (slot 1) must be smuggled in via raw words.
         slotData[1] = 1;
@@ -775,10 +814,10 @@ contract BridgeTest is Test {
         assertEq(reasons.length, 2);
         assertEq(reasons[0], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
         assertEq(reasons[1], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
-        assertFalse(bridge.claimedNullifiers(badRecipientNonce));
-        assertFalse(bridge.claimedNullifiers(badTokenNonce));
-        assertTrue(bridge.claimedNullifiers(goodNonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(goodNonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(badRecipientNonce)));
+        assertFalse(bridge.claimedNullifiers(_leaf(badTokenNonce)));
+        assertTrue(bridge.claimedNullifiers(_leaf(goodNonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(goodNonce));
         assertEq(pendingAmount, amount);
         assertEq(bridge.totalWithdrawalAmount(address(token)), totalBefore + amount);
 
@@ -786,14 +825,14 @@ contract BridgeTest is Test {
         assertEq(logs.length, 4, "two ItemFailed, one PendingCreated, one BatchResult");
         assertEq(logs[0].emitter, address(bridge));
         assertEq(logs[0].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[0].topics[1], badRecipientNonce);
+        assertEq(logs[0].topics[1], _leaf(badRecipientNonce));
         assertEq(uint256(logs[0].topics[2]), 0);
         assertEq(uint256(abi.decode(logs[0].data, (bytes32))), bridge.CLAIM_REASON_ADDRESS_HIGH_BITS(), "reason is non-indexed data");
         assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[1].topics[1], badTokenNonce);
+        assertEq(logs[1].topics[1], _leaf(badTokenNonce));
         assertEq(uint256(logs[1].topics[2]), 1);
         assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[2].topics[1], goodNonce);
+        assertEq(logs[2].topics[1], _leaf(goodNonce));
         assertEq(logs[3].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
         assertEq(logs[3].topics[1], _batchCommitBytes32(publicInputs));
         (uint8 realCount, uint8 succeeded, uint8 failed) = abi.decode(logs[3].data, (uint8, uint8, uint8));
@@ -823,6 +862,7 @@ contract BridgeTest is Test {
         _configureFlowToken(bridge, address(token));
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(1)));
+        _slotTokenIds[address(token)] = 1;
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(77));
         token.mint(address(bridge), amount);
@@ -842,7 +882,7 @@ contract BridgeTest is Test {
         sm.finalize(_dummyGnarkProof(), depositRootB, _roots(bytes32(uint256(2)), bytes32(uint256(3))), withdrawalRootB, 0, 2, depositProofB, withdrawalProofB);
 
         uint256[8] memory proof;
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProofA[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifierBatch =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
@@ -854,7 +894,7 @@ contract BridgeTest is Test {
 
         assertEq(token.balanceOf(user), 0);
         vm.prank(user);
-        bridge.claimPendingWithdrawal(nonce);
+        bridge.claimPendingWithdrawal(_leaf(nonce));
         assertEq(token.balanceOf(user), amount);
     }
 
@@ -884,7 +924,7 @@ contract BridgeTest is Test {
         config.mediumWithdrawalDelay = 3_600;
         _setFlowConfig(bridge, address(token), config);
         _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
-        uint256 amount = 250;
+        uint256 amount = 150;
         bytes32 nonce = bytes32(uint256(88));
         token.mint(address(bridge), amount);
 
@@ -895,7 +935,7 @@ contract BridgeTest is Test {
         vm.prank(owner);
         sm.finalize(_dummyGnarkProof(), depositRoot, _roots(bytes32(uint256(1)), bytes32(uint256(2))), withdrawalRoot, 0, 1, depositProof, withdrawalProof);
 
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
@@ -906,36 +946,37 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
-        (,, uint256 pendingAmount, uint64 claimableAt) = bridge.pendingWithdrawals(nonce);
+        (,, uint256 pendingAmount, uint64 claimableAt) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(token.balanceOf(user), 0);
         assertEq(pendingAmount, amount);
         assertEq(claimableAt, block.timestamp + 3_600);
-        assertTrue(bridge.claimedNullifiers(nonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(nonce)));
 
+        config.mediumWithdrawalDelay = 7_200;
         config.largeWithdrawalDelay = 7_200;
         _setFlowConfig(bridge, address(token), config);
-        (,,, uint64 snapshottedClaimableAt) = bridge.pendingWithdrawals(nonce);
+        (,,, uint64 snapshottedClaimableAt) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(snapshottedClaimableAt, claimableAt, "config update must not change an existing ETA");
 
-        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, nonce, claimableAt));
-        bridge.claimPendingWithdrawal(nonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, _leaf(nonce), claimableAt));
+        bridge.claimPendingWithdrawal(_leaf(nonce));
 
         address keeper = address(0xCAFE);
         vm.warp(claimableAt);
         vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 4);
         vm.expectRevert(abi.encodeWithSelector(Bridge.PendingClaimsPaused.selector, address(token)));
-        bridge.claimPendingWithdrawal(nonce);
+        bridge.claimPendingWithdrawal(_leaf(nonce));
         vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 0);
         vm.prank(keeper);
-        bridge.claimPendingWithdrawal(nonce);
+        bridge.claimPendingWithdrawal(_leaf(nonce));
         assertEq(token.balanceOf(user), amount);
-        (,, pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        (,, pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
         assertEq(token.balanceOf(address(bridge)), 0);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, nonce));
-        bridge.claimPendingWithdrawal(nonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, _leaf(nonce)));
+        bridge.claimPendingWithdrawal(_leaf(nonce));
     }
 
     function testBatchClaimWithdrawalRejectsZeroRealCount() public {
@@ -955,7 +996,7 @@ contract BridgeTest is Test {
         vm.stopPrank();
 
         uint256[18] memory publicInputs;
-        uint256[1088] memory slotData;
+        uint256[1120] memory slotData;
         for (uint256 i = 0; i < 8; ++i) {
             publicInputs[i] = _bytes32ToWords(bytes32(uint256(1)))[i];
         }
@@ -983,7 +1024,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(99));
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
         vm.prank(owner);
@@ -996,8 +1037,8 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_REGISTRATION_PAUSED());
-        assertFalse(bridge.claimedNullifiers(nonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
         assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
     }
@@ -1017,7 +1058,7 @@ contract BridgeTest is Test {
         BatchClaimItem[] memory items = new BatchClaimItem[](2);
         items[0] = BatchClaimItem(0, user, address(unmapped), amount, unmappedNonce, 0);
         items[1] = BatchClaimItem(0, user, address(mapped), amount, mappedNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1028,13 +1069,13 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
-        assertFalse(bridge.claimedNullifiers(unmappedNonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(unmappedNonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(unmappedNonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(unmappedNonce));
         assertEq(pendingAmount, 0);
         assertEq(bridge.totalWithdrawalAmount(address(unmapped)), 0);
         // The honest mapped pair in the same batch still registers for payout.
-        assertTrue(bridge.claimedNullifiers(mappedNonce));
-        (address pendingToken, address pendingRecipient, uint256 mappedPending,) = bridge.pendingWithdrawals(mappedNonce);
+        assertTrue(bridge.claimedNullifiers(_leaf(mappedNonce)));
+        (address pendingToken, address pendingRecipient, uint256 mappedPending,) = bridge.pendingWithdrawals(_leaf(mappedNonce));
         assertEq(pendingToken, address(mapped));
         assertEq(pendingRecipient, user);
         assertEq(mappedPending, amount);
@@ -1056,7 +1097,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(0xE3));
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1067,8 +1108,8 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
-        assertFalse(bridge.claimedNullifiers(nonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
         assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
     }
@@ -1085,7 +1126,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(0xE4));
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1095,8 +1136,8 @@ contract BridgeTest is Test {
 
         assertEq(failedSlots.length, 0);
         assertEq(reasons.length, 0);
-        assertTrue(bridge.claimedNullifiers(nonce));
-        (address pendingToken,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertTrue(bridge.claimedNullifiers(_leaf(nonce)));
+        (address pendingToken,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingToken, address(token));
         assertEq(pendingAmount, amount);
         assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
@@ -1113,7 +1154,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(0xE5));
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(0), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1124,10 +1165,159 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
-        assertFalse(bridge.claimedNullifiers(nonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
         assertEq(bridge.totalWithdrawalAmount(address(0)), 0);
+    }
+
+    /// V6: the slot's token_contract_id must equal the Router binding in both
+    /// directions. The token is bound, but to a different id than the slot says.
+    function testBatchClaimWithdrawalSlotIdOtherThanBindingIsClassified() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        MockERC20 other = new MockERC20("Other", "OTH");
+        _configureFlowToken(bridge, address(token));
+        _configureFlowToken(bridge, address(other));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
+        _mapClaimToken(bridge, address(other), bytes32(uint256(5)));
+        // The slot names the other token's id: forward 4 != 5 and reverse(5) != token.
+        _slotTokenIds[address(token)] = 5;
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xE6));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+    }
+
+    /// V6: only the forward read catches this one. The token moved from id 4 to
+    /// id 5 and the Router keeps reverse(4) == token, so a slot naming the old
+    /// id passes the reverse check alone.
+    function testBatchClaimWithdrawalRetiredIdIsRejectedByForwardCheck() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(5)));
+        _slotTokenIds[address(token)] = 4;
+        uint256 amount = 123;
+        bytes32 nonce = bytes32(uint256(0xEA));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots, uint8[] memory reasons) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 1);
+        assertEq(reasons[0], bridge.CLAIM_REASON_TOKEN_MAPPING_MISMATCH());
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
+    }
+
+    /// V6: the identity covers the whole slot, so a repeated nonce on different
+    /// content is two withdrawals, not a reason-5 collision.
+    function testBatchClaimWithdrawalSameNonceDifferentContentRegistersBoth() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+        bytes32 nonce = bytes32(uint256(0xE7));
+
+        BatchClaimItem[] memory items = new BatchClaimItem[](2);
+        items[0] = BatchClaimItem(1, user, address(token), 123, nonce, 0);
+        items[1] = BatchClaimItem(2, user, address(token), 123, nonce, 0);
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        _setBatchClaimVerifier(bridge, publicInputs);
+        bytes32 first = _slotLeafId(slotData, 0);
+        bytes32 second = _slotLeafId(slotData, 1);
+        assertTrue(first != second);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        (uint8[] memory failedSlots,) = bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+
+        assertEq(failedSlots.length, 0);
+        assertTrue(bridge.claimedNullifiers(first));
+        assertTrue(bridge.claimedNullifiers(second));
+        assertFalse(bridge.claimedNullifiers(nonce), "the raw nonce is not a key");
+        assertEq(bridge.totalWithdrawalAmount(address(token)), 246);
+    }
+
+    /// Golden from two external keccak implementations (cast keccak, ethers)
+    /// over the 140-byte big-endian preimage of the 35 words below.
+    function testSlotLeafIdMatchesExternalKeccakGolden() public pure {
+        uint32[35] memory words = [
+            uint32(0x01020304),
+            0, 0, 0, 0x11111111, 0x22222222, 0x33333333, 0x44444444, 0x55555555,
+            0, 0, 0, 0x66666666, 0x77777777, 0x88888888, 0x99999999, 0xaaaaaaaa,
+            0, 0, 0, 0, 0, 0, 1, 0xbbbbbbbb,
+            0xdeadbeef, 0xcafebabe, 0, 1, 2, 3, 4, 5,
+            3,
+            4
+        ];
+        uint256[1120] memory slotData;
+        for (uint256 i = 0; i < 35; ++i) {
+            slotData[i] = words[i];
+        }
+        assertEq(_slotLeafId(slotData, 0), bytes32(0x6fc4cc772284bbf515a2c0db34c067a3f15290a852c2cea07f9bcf979ac4b40e));
+    }
+
+    function testBatchClaimWithdrawalWord34AboveU32RevertsWholeBatch() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), 123, bytes32(uint256(0xE8)), 0));
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        slotData[34] = 1 + (uint256(1) << 32);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        vm.expectRevert(Bridge.InvalidPublicInputs.selector);
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+    }
+
+    function testBatchClaimWithdrawalNonZeroPaddingInWord34Reverts() public {
+        (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
+
+        MockERC20 token = new MockERC20("Mock", "MOCK");
+        _configureFlowToken(bridge, address(token));
+        _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
+
+        BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), 123, bytes32(uint256(0xE9)), 0));
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
+            _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
+        slotData[WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS + 34] = 1;
+        _patchBatchCommit(publicInputs, slotData);
+        _setBatchClaimVerifier(bridge, publicInputs);
+
+        uint256[8] memory proof;
+        vm.prank(user);
+        vm.expectRevert(Bridge.InvalidPublicInputs.selector);
+        bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
     }
 
     function _mapClaimToken(Bridge bridge, address token, bytes32 l2TokenId) internal {
@@ -1135,6 +1325,7 @@ contract BridgeTest is Test {
         Router router = Router(provider.getAddress(provider.ROUTER_ID()));
         vm.prank(owner);
         router.setTokenMapping(token, l2TokenId);
+        _slotTokenIds[token] = uint32(uint256(l2TokenId));
     }
 
     function testBatchClaimWithdrawalPriorClaimedNonceSkipsAndContinues() public {
@@ -1149,19 +1340,19 @@ contract BridgeTest is Test {
 
         BatchClaimItem[] memory first =
             _singleItem(BatchClaimItem(0, user, address(token), amount, claimedNonce, 0));
-        (uint256[18] memory firstInputs, uint256[1088] memory firstSlotData) =
+        (uint256[18] memory firstInputs, uint256[1120] memory firstSlotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, first);
         _setBatchClaimVerifier(bridge, firstInputs);
         uint256[8] memory proof;
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, firstInputs, firstSlotData);
-        assertTrue(bridge.claimedNullifiers(claimedNonce));
-        (,, uint256 claimedAmount, uint64 claimedClaimableAt) = bridge.pendingWithdrawals(claimedNonce);
+        assertTrue(bridge.claimedNullifiers(_leaf(claimedNonce)));
+        (,, uint256 claimedAmount, uint64 claimedClaimableAt) = bridge.pendingWithdrawals(_leaf(claimedNonce));
 
         BatchClaimItem[] memory second = new BatchClaimItem[](2);
         second[0] = BatchClaimItem(0, user, address(token), amount, claimedNonce, 0);
         second[1] = BatchClaimItem(0, user, address(token), amount, freshNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, second);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1172,22 +1363,22 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED());
-        assertTrue(bridge.claimedNullifiers(claimedNonce));
-        assertTrue(bridge.claimedNullifiers(freshNonce));
-        (,, uint256 pendingAfter, uint64 claimableAfter) = bridge.pendingWithdrawals(claimedNonce);
+        assertTrue(bridge.claimedNullifiers(_leaf(claimedNonce)));
+        assertTrue(bridge.claimedNullifiers(_leaf(freshNonce)));
+        (,, uint256 pendingAfter, uint64 claimableAfter) = bridge.pendingWithdrawals(_leaf(claimedNonce));
         assertEq(pendingAfter, claimedAmount);
         assertEq(claimableAfter, claimedClaimableAt, "prior pending entry must not be re-registered");
-        (,, uint256 freshAmount,) = bridge.pendingWithdrawals(freshNonce);
+        (,, uint256 freshAmount,) = bridge.pendingWithdrawals(_leaf(freshNonce));
         assertEq(freshAmount, amount);
         assertEq(bridge.totalWithdrawalAmount(address(token)), claimedAmount + amount);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 3, "ItemFailed, PendingCreated, BatchResult");
         assertEq(logs[0].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[0].topics[1], claimedNonce);
+        assertEq(logs[0].topics[1], _leaf(claimedNonce));
         assertEq(uint256(logs[0].topics[2]), 0);
         assertEq(logs[1].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[1].topics[1], freshNonce);
+        assertEq(logs[1].topics[1], _leaf(freshNonce));
         assertEq(logs[2].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
     }
 
@@ -1205,7 +1396,7 @@ contract BridgeTest is Test {
         items[0] = BatchClaimItem(0, user, address(token), amount, nonce, 0);
         items[1] = BatchClaimItem(0, user, address(token), amount, nonce, 0);
         items[2] = BatchClaimItem(0, user, address(token), amount, otherNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1217,22 +1408,22 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 1);
         assertEq(reasons[0], bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED());
-        assertTrue(bridge.claimedNullifiers(nonce));
-        assertTrue(bridge.claimedNullifiers(otherNonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertTrue(bridge.claimedNullifiers(_leaf(nonce)));
+        assertTrue(bridge.claimedNullifiers(_leaf(otherNonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, amount);
         assertEq(bridge.totalWithdrawalAmount(address(token)), 2 * amount);
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 4, "PendingCreated, ItemFailed, PendingCreated, BatchResult");
         assertEq(logs[0].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[0].topics[1], nonce);
+        assertEq(logs[0].topics[1], _leaf(nonce));
         assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[1].topics[1], nonce, "same nonce may appear in both event kinds");
+        assertEq(logs[1].topics[1], _leaf(nonce), "same nonce may appear in both event kinds");
         assertEq(uint256(logs[1].topics[2]), 1, "failed slot index, not nonce, disambiguates");
         assertEq(uint256(abi.decode(logs[1].data, (bytes32))), bridge.CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED(), "reason is non-indexed data");
         assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[2].topics[1], otherNonce);
+        assertEq(logs[2].topics[1], _leaf(otherNonce));
         assertEq(logs[3].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
     }
 
@@ -1253,7 +1444,7 @@ contract BridgeTest is Test {
         items[2] = BatchClaimItem(0, user, address(token), amount, bytes32(uint256(0x93)), chainIndex + 1);
         items[3] = BatchClaimItem(0, user, address(unconfigured), amount, bytes32(uint256(0x94)), 0);
         items[4] = BatchClaimItem(0, user, address(token), amount, bytes32(uint256(0x95)), 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         slotData[4 * WITHDRAWAL_BATCH_CLAIM_SLOT_WORDS + 1] = 1;
         _patchBatchCommit(publicInputs, slotData);
@@ -1273,11 +1464,11 @@ contract BridgeTest is Test {
         assertEq(reasons[3], bridge.CLAIM_REASON_TOKEN_NOT_CONFIGURED());
         assertEq(reasons[4], bridge.CLAIM_REASON_ADDRESS_HIGH_BITS());
         for (uint256 i = 0; i < 5; ++i) {
-            assertFalse(bridge.claimedNullifiers(bytes32(uint256(0x91 + i))));
+            assertFalse(bridge.claimedNullifiers(_leaf(bytes32(uint256(0x91 + i)))));
         }
         assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
         assertEq(bridge.totalWithdrawalAmount(address(unconfigured)), 0);
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(bytes32(uint256(0x91)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(bytes32(uint256(0x91))));
         assertEq(pendingAmount, 0);
     }
 
@@ -1290,7 +1481,7 @@ contract BridgeTest is Test {
         bytes32 nonce = bytes32(uint256(0x96));
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
         // Corrupt the committed slot set after the verifier was pinned to the honest hash.
@@ -1302,9 +1493,9 @@ contract BridgeTest is Test {
         vm.expectRevert(Bridge.InvalidWithdrawalProof.selector);
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
         assertEq(vm.getRecordedLogs().length, 0, "no events may survive a whole-proof revert");
-        assertFalse(bridge.claimedNullifiers(nonce));
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
         assertEq(bridge.totalWithdrawalAmount(address(token)), 0);
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
     }
 
@@ -1312,7 +1503,10 @@ contract BridgeTest is Test {
         (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
-        _configureFlowToken(bridge, address(token));
+        Bridge.TokenFlowConfig memory amountConfig = _defaultFlowConfig();
+        amountConfig.mediumWithdrawalMax = 1 << 101;
+        amountConfig.totalWithdrawalCap = 1 << 102;
+        _setFlowConfig(bridge, address(token), amountConfig);
         _mapClaimToken(bridge, address(token), bytes32(uint256(1)));
         // Amounts at and above the Goldilocks prime, and beyond 2^64, register
         // and pay: the L2 withdrawal leaf carries the full uint256.
@@ -1324,7 +1518,7 @@ contract BridgeTest is Test {
         BatchClaimItem[] memory items = new BatchClaimItem[](2);
         items[0] = BatchClaimItem(0, user, address(token), primeAmount, primeNonce, 0);
         items[1] = BatchClaimItem(0, user, address(token), largeAmount, largeNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1332,14 +1526,14 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
 
-        assertTrue(bridge.claimedNullifiers(primeNonce));
-        assertTrue(bridge.claimedNullifiers(largeNonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(primeNonce)));
+        assertTrue(bridge.claimedNullifiers(_leaf(largeNonce)));
         assertEq(bridge.totalWithdrawalAmount(address(token)), primeAmount + largeAmount);
         token.mint(address(bridge), primeAmount + largeAmount);
         // The default config has zero delays, so both payouts settle instantly.
-        bridge.claimPendingWithdrawal(primeNonce);
+        bridge.claimPendingWithdrawal(_leaf(primeNonce));
         vm.prank(user);
-        bridge.claimPendingWithdrawal(largeNonce);
+        bridge.claimPendingWithdrawal(_leaf(largeNonce));
         assertEq(token.balanceOf(user), primeAmount + largeAmount);
     }
 
@@ -1365,7 +1559,7 @@ contract BridgeTest is Test {
         BatchClaimItem[] memory items = new BatchClaimItem[](2);
         items[0] = BatchClaimItem(0, user, address(token), amount, okNonce, 0);
         items[1] = BatchClaimItem(0, user, address(token), amount, badNonce, 0);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1376,8 +1570,8 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 1);
         assertEq(reasons[0], bridge.CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW());
-        assertTrue(bridge.claimedNullifiers(okNonce));
-        assertFalse(bridge.claimedNullifiers(badNonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(okNonce)));
+        assertFalse(bridge.claimedNullifiers(_leaf(badNonce)));
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
     }
 
@@ -1399,19 +1593,19 @@ contract BridgeTest is Test {
 
         BatchClaimItem[] memory boundaryItems =
             _singleItem(BatchClaimItem(0, user, address(token), amount, boundaryNonce, 0));
-        (uint256[18] memory boundaryInputs, uint256[1088] memory boundarySlotData) =
+        (uint256[18] memory boundaryInputs, uint256[1120] memory boundarySlotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, boundaryItems);
         _setBatchClaimVerifier(bridge, boundaryInputs);
         uint256[8] memory proof;
         vm.warp(type(uint64).max - config.largeWithdrawalDelay);
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, boundaryInputs, boundarySlotData);
-        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(boundaryNonce);
+        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(_leaf(boundaryNonce));
         assertEq(uint256(claimableAt), uint256(type(uint64).max), "claim time exactly at uint64 max must be accepted");
 
         BatchClaimItem[] memory overflowItems =
             _singleItem(BatchClaimItem(0, user, address(token), amount, overflowNonce, 0));
-        (uint256[18] memory overflowInputs, uint256[1088] memory overflowSlotData) =
+        (uint256[18] memory overflowInputs, uint256[1120] memory overflowSlotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, overflowItems);
         _setBatchClaimVerifier(bridge, overflowInputs);
         vm.warp(type(uint64).max - config.largeWithdrawalDelay + 1);
@@ -1422,7 +1616,7 @@ contract BridgeTest is Test {
         assertEq(failedSlots.length, 1);
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_CLAIMABLE_AT_OVERFLOW());
-        assertFalse(bridge.claimedNullifiers(overflowNonce));
+        assertFalse(bridge.claimedNullifiers(_leaf(overflowNonce)));
     }
 
     function testBatchClaimWithdrawalFailedArraysAndLogsMapToInputPositions() public {
@@ -1443,7 +1637,7 @@ contract BridgeTest is Test {
         items[1] = BatchClaimItem(0, user, address(token), 0, zeroAmountNonce, 0);
         items[2] = BatchClaimItem(0, user, address(token), amount, nonceB, 0);
         items[3] = BatchClaimItem(0, user, address(token), amount, wrongChainNonce, chainIndex + 1);
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -1457,23 +1651,23 @@ contract BridgeTest is Test {
         assertEq(failedSlots[1], 3);
         assertEq(reasons[0], bridge.CLAIM_REASON_ZERO_AMOUNT());
         assertEq(reasons[1], bridge.CLAIM_REASON_WRONG_DESTINATION_CHAIN());
-        assertTrue(bridge.claimedNullifiers(nonceA));
-        assertTrue(bridge.claimedNullifiers(nonceB));
-        assertFalse(bridge.claimedNullifiers(zeroAmountNonce));
-        assertFalse(bridge.claimedNullifiers(wrongChainNonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(nonceA)));
+        assertTrue(bridge.claimedNullifiers(_leaf(nonceB)));
+        assertFalse(bridge.claimedNullifiers(_leaf(zeroAmountNonce)));
+        assertFalse(bridge.claimedNullifiers(_leaf(wrongChainNonce)));
 
         Vm.Log[] memory logs = vm.getRecordedLogs();
         assertEq(logs.length, 5, "per-slot events in input order, summary last");
         assertEq(logs[0].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[0].topics[1], nonceA);
+        assertEq(logs[0].topics[1], _leaf(nonceA));
         assertEq(logs[1].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[1].topics[1], zeroAmountNonce);
+        assertEq(logs[1].topics[1], _leaf(zeroAmountNonce));
         assertEq(uint256(logs[1].topics[2]), 1);
         assertEq(uint256(abi.decode(logs[1].data, (bytes32))), bridge.CLAIM_REASON_ZERO_AMOUNT(), "reason is non-indexed data");
         assertEq(logs[2].topics[0], Bridge.WithdrawalPendingCreated.selector);
-        assertEq(logs[2].topics[1], nonceB);
+        assertEq(logs[2].topics[1], _leaf(nonceB));
         assertEq(logs[3].topics[0], Bridge.WithdrawalClaimItemFailed.selector);
-        assertEq(logs[3].topics[1], wrongChainNonce);
+        assertEq(logs[3].topics[1], _leaf(wrongChainNonce));
         assertEq(uint256(logs[3].topics[2]), 3);
         assertEq(uint256(abi.decode(logs[3].data, (bytes32))), bridge.CLAIM_REASON_WRONG_DESTINATION_CHAIN(), "reason is non-indexed data");
         assertEq(logs[4].topics[0], Bridge.WithdrawalClaimBatchResult.selector);
@@ -1644,6 +1838,7 @@ contract BridgeTest is Test {
         _setFlowConfig(bridge, address(token), config);
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(1)));
+        _slotTokenIds[address(token)] = 1;
 
         uint256 smallAmount = 50;
         uint256 mediumAmount = 150;
@@ -1669,7 +1864,7 @@ contract BridgeTest is Test {
         );
 
         uint256[8] memory proof;
-        (uint256[18] memory smallInputs, uint256[1088] memory smallSlotData) =
+        (uint256[18] memory smallInputs, uint256[1120] memory smallSlotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), smallAmount, smallNonce, 0, 0);
         WithdrawalBatchHashVerifier smallVerifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(smallInputs));
@@ -1678,7 +1873,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, smallInputs, smallSlotData);
 
-        (uint256[18] memory mediumInputs, uint256[1088] memory mediumSlotData) =
+        (uint256[18] memory mediumInputs, uint256[1120] memory mediumSlotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), mediumAmount, mediumNonce, 0, 0);
         WithdrawalBatchHashVerifier mediumVerifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(mediumInputs));
@@ -1687,7 +1882,7 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, mediumInputs, mediumSlotData);
 
-        (uint256[18] memory largeInputs, uint256[1088] memory largeSlotData) =
+        (uint256[18] memory largeInputs, uint256[1120] memory largeSlotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), largeAmount, largeNonce, 0, 0);
         WithdrawalBatchHashVerifier largeVerifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(largeInputs));
@@ -1696,9 +1891,9 @@ contract BridgeTest is Test {
         vm.prank(user);
         bridge.batchClaimWithdrawal(proof, largeInputs, largeSlotData);
 
-        (,, uint256 smallPending, uint64 smallClaimableAt) = bridge.pendingWithdrawals(smallNonce);
-        (,, uint256 mediumPending, uint64 mediumClaimableAt) = bridge.pendingWithdrawals(mediumNonce);
-        (,, uint256 largePending, uint64 largeClaimableAt) = bridge.pendingWithdrawals(largeNonce);
+        (,, uint256 smallPending, uint64 smallClaimableAt) = bridge.pendingWithdrawals(_leaf(smallNonce));
+        (,, uint256 mediumPending, uint64 mediumClaimableAt) = bridge.pendingWithdrawals(_leaf(mediumNonce));
+        (,, uint256 largePending, uint64 largeClaimableAt) = bridge.pendingWithdrawals(_leaf(largeNonce));
         assertEq(smallPending, 0);
         assertEq(token.balanceOf(user), smallAmount);
         assertEq(mediumPending, mediumAmount);
@@ -1707,19 +1902,19 @@ contract BridgeTest is Test {
         assertEq(mediumClaimableAt, block.timestamp, "zero-delay medium tier must be immediately claimable");
         assertEq(largeClaimableAt, block.timestamp + 3_600, "large tier delay must remain enforced");
 
-        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, smallNonce));
-        bridge.claimPendingWithdrawal(smallNonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, _leaf(smallNonce)));
+        bridge.claimPendingWithdrawal(_leaf(smallNonce));
         vm.prank(user);
-        bridge.claimPendingWithdrawal(mediumNonce);
+        bridge.claimPendingWithdrawal(_leaf(mediumNonce));
         assertEq(token.balanceOf(user), smallAmount + mediumAmount);
 
-        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, largeNonce));
-        bridge.claimPendingWithdrawal(largeNonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, _leaf(largeNonce)));
+        bridge.claimPendingWithdrawal(_leaf(largeNonce));
 
         vm.warp(largeClaimableAt);
         vm.prank(user);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, largeNonce));
-        bridge.claimPendingWithdrawal(largeNonce);
+        vm.expectRevert(abi.encodeWithSelector(Bridge.WithdrawalGovernanceRequired.selector, _leaf(largeNonce)));
+        bridge.claimPendingWithdrawal(_leaf(largeNonce));
         assertEq(token.balanceOf(user), smallAmount + mediumAmount);
     }
 
@@ -1746,6 +1941,7 @@ contract BridgeTest is Test {
         _setFlowConfig(bridge, address(token), config);
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(1)));
+        _slotTokenIds[address(token)] = 1;
         token.mint(address(bridge), 30);
 
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
@@ -1757,7 +1953,7 @@ contract BridgeTest is Test {
             withdrawalRoot, 0, 1, depositProof, withdrawalProof
         );
         bytes32 nonce = bytes32(uint256(0xFB));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), 30, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
@@ -1775,23 +1971,23 @@ contract BridgeTest is Test {
 
         vm.prank(user);
         vm.expectRevert(abi.encodeWithSelector(Bridge.UnauthorizedWithdrawalForceClaimExecutor.selector, user));
-        bridge.forceClaimWithdrawal(nonce);
+        bridge.forceClaimWithdrawal(_leaf(nonce));
         vm.prank(owner);
         vm.expectRevert(abi.encodeWithSelector(Bridge.UnauthorizedWithdrawalForceClaimExecutor.selector, owner));
-        bridge.forceClaimWithdrawal(nonce);
+        bridge.forceClaimWithdrawal(_leaf(nonce));
         vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 4);
         vm.expectRevert(abi.encodeWithSelector(Bridge.PendingClaimsPaused.selector, address(token)));
-        bridge.forceClaimWithdrawal(nonce);
+        bridge.forceClaimWithdrawal(_leaf(nonce));
         vm.prank(owner);
         bridge.setTokenPauseFlags(address(token), 0);
-        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(nonce);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, nonce, claimableAt));
-        bridge.forceClaimWithdrawal(nonce);
+        (,,, uint64 claimableAt) = bridge.pendingWithdrawals(_leaf(nonce));
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotClaimable.selector, _leaf(nonce), claimableAt));
+        bridge.forceClaimWithdrawal(_leaf(nonce));
         vm.warp(claimableAt);
-        bridge.forceClaimWithdrawal(nonce);
-        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, nonce));
-        bridge.forceClaimWithdrawal(nonce);
+        bridge.forceClaimWithdrawal(_leaf(nonce));
+        vm.expectRevert(abi.encodeWithSelector(Bridge.PendingWithdrawalNotFound.selector, _leaf(nonce)));
+        bridge.forceClaimWithdrawal(_leaf(nonce));
         assertEq(token.balanceOf(user), 30);
     }
 
@@ -2191,7 +2387,7 @@ contract BridgeTest is Test {
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
 
         BatchClaimItem[] memory items = _singleItem(BatchClaimItem(0, user, address(token), amount, nonce, 0));
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, items);
         _setBatchClaimVerifier(bridge, publicInputs);
 
@@ -2203,8 +2399,8 @@ contract BridgeTest is Test {
         assertEq(failedSlots[0], 0);
         assertEq(reasons[0], bridge.CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW());
         assertEq(bridge.totalWithdrawalAmount(address(token)), type(uint256).max);
-        assertFalse(bridge.claimedNullifiers(nonce));
-        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(nonce);
+        assertFalse(bridge.claimedNullifiers(_leaf(nonce)));
+        (,, uint256 pendingAmount,) = bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, 0);
     }
 
@@ -2228,7 +2424,7 @@ contract BridgeTest is Test {
         bytes32 unknownNonce = bytes32(uint256(0xD2));
 
         BatchClaimItem[] memory knownItems = _singleItem(BatchClaimItem(0, user, address(token), amount, knownNonce, 0));
-        (uint256[18] memory knownInputs, uint256[1088] memory knownSlotData) =
+        (uint256[18] memory knownInputs, uint256[1120] memory knownSlotData) =
             _buildWithdrawalBatchClaimMulti(withdrawalRoot, knownItems);
         assertEq(_publicInputsRoot(knownInputs), withdrawalRoot, "encoded root must be the fixture subtree root");
         _setBatchClaimVerifier(bridge, knownInputs);
@@ -2239,10 +2435,10 @@ contract BridgeTest is Test {
             bridge.batchClaimWithdrawal(proof, knownInputs, knownSlotData);
         assertEq(knownFailed.length, 0);
         assertEq(knownReasons.length, 0);
-        assertTrue(bridge.claimedNullifiers(knownNonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(knownNonce)));
         assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
         (address pendingToken, address pendingRecipient, uint256 pendingAmount, uint64 claimableAt) =
-            bridge.pendingWithdrawals(knownNonce);
+            bridge.pendingWithdrawals(_leaf(knownNonce));
         assertEq(pendingToken, address(token));
         assertEq(pendingRecipient, user);
         assertEq(pendingAmount, amount);
@@ -2253,7 +2449,7 @@ contract BridgeTest is Test {
         assertTrue(unknownRoot != sm.withdrawalSubtreeRoot());
         BatchClaimItem[] memory unknownItems =
             _singleItem(BatchClaimItem(0, user, address(token), amount, unknownNonce, 0));
-        (uint256[18] memory unknownInputs, uint256[1088] memory unknownSlotData) =
+        (uint256[18] memory unknownInputs, uint256[1120] memory unknownSlotData) =
             _buildWithdrawalBatchClaimMulti(unknownRoot, unknownItems);
         assertEq(_publicInputsRoot(unknownInputs), unknownRoot);
         _setBatchClaimVerifier(bridge, unknownInputs);
@@ -2263,15 +2459,15 @@ contract BridgeTest is Test {
         vm.expectRevert(Bridge.InvalidWithdrawalProof.selector);
         bridge.batchClaimWithdrawal(proof, unknownInputs, unknownSlotData);
         assertEq(vm.getRecordedLogs().length, 0, "unknown root reverts before registration events");
-        assertTrue(bridge.claimedNullifiers(knownNonce));
-        assertFalse(bridge.claimedNullifiers(unknownNonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(knownNonce)));
+        assertFalse(bridge.claimedNullifiers(_leaf(unknownNonce)));
         assertEq(bridge.totalWithdrawalAmount(address(token)), amount);
-        (pendingToken, pendingRecipient, pendingAmount, claimableAt) = bridge.pendingWithdrawals(knownNonce);
+        (pendingToken, pendingRecipient, pendingAmount, claimableAt) = bridge.pendingWithdrawals(_leaf(knownNonce));
         assertEq(pendingToken, address(token));
         assertEq(pendingRecipient, user);
         assertEq(pendingAmount, amount);
         assertGt(uint256(claimableAt), 0);
-        (,, uint256 unknownPending,) = bridge.pendingWithdrawals(unknownNonce);
+        (,, uint256 unknownPending,) = bridge.pendingWithdrawals(_leaf(unknownNonce));
         assertEq(unknownPending, 0);
     }
 
@@ -2294,6 +2490,7 @@ contract BridgeTest is Test {
         _configureFlowToken(bridge, address(token));
         vm.prank(owner);
         router.setTokenMapping(address(token), bytes32(uint256(1)));
+        _slotTokenIds[address(token)] = 1;
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xCC));
 
@@ -2312,7 +2509,7 @@ contract BridgeTest is Test {
             withdrawalProof
         );
 
-        (uint256[18] memory publicInputs, uint256[1088] memory slotData) =
+        (uint256[18] memory publicInputs, uint256[1120] memory slotData) =
             _buildWithdrawalBatchClaimPublicInputsSingle(withdrawalProof[0], 0, user, address(token), amount, nonce, 0, 0);
         WithdrawalBatchHashVerifier verifier =
             new WithdrawalBatchHashVerifier(_computeWithdrawalBatchClaimPublicInputsHash(publicInputs));
@@ -2329,22 +2526,22 @@ contract BridgeTest is Test {
         bridge.initializeWithdrawalTotals(configuredTokens, _flowConfigs(configuredTokens.length), historicalTotals, _tokenSetHash(configuredTokens), address(this));
 
         (address pendingToken, address pendingRecipient, uint256 pendingAmount, uint64 pendingClaimableAt) =
-            bridge.pendingWithdrawals(nonce);
+            bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(pendingAmount, amount);
         assertEq(pendingRecipient, user);
-        assertTrue(bridge.claimedNullifiers(nonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(nonce)));
         uint256 totalBefore = bridge.totalWithdrawalAmount(address(token));
 
         vm.expectRevert(abi.encodeWithSignature("Error(string)", "transfer rejected"));
-        bridge.forceClaimWithdrawal(nonce);
+        bridge.forceClaimWithdrawal(_leaf(nonce));
 
         (address tokenAfter, address recipientAfter, uint256 amountAfter, uint64 claimableAtAfter) =
-            bridge.pendingWithdrawals(nonce);
+            bridge.pendingWithdrawals(_leaf(nonce));
         assertEq(tokenAfter, pendingToken);
         assertEq(recipientAfter, pendingRecipient);
         assertEq(amountAfter, pendingAmount);
         assertEq(claimableAtAfter, pendingClaimableAt);
         assertEq(bridge.totalWithdrawalAmount(address(token)), totalBefore);
-        assertTrue(bridge.claimedNullifiers(nonce));
+        assertTrue(bridge.claimedNullifiers(_leaf(nonce)));
     }
 }

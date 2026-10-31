@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
+import { buildWithdrawalBatchClaimSingle, mapClaimToken, withdrawalLeafIdOf } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -139,10 +139,8 @@ describe("Deposit And Claim", function () {
       mediumWithdrawalMax: 3_000_000_000n,
       totalWithdrawalCap: 4_000_000_000n,
     });
-    const l2Erc20Id = ethers.utils.hexZeroPad("0x1234", 32);
-    const l2EthId = ethers.utils.hexZeroPad("0x8888", 32);
-    await router.connect(owner).setTokenMapping(token.address, l2Erc20Id);
-    await router.connect(owner).setTokenMapping(ethers.constants.AddressZero, l2EthId);
+    await mapClaimToken(router.connect(owner), token.address, 0x1234);
+    await mapClaimToken(router.connect(owner), ethers.constants.AddressZero, 0x8888);
 
     const erc20Amount = 777n;
     const erc20Nonce = 42n;
@@ -170,7 +168,7 @@ describe("Deposit And Claim", function () {
     await expect(
       bridge.batchClaimWithdrawal(proof, erc20PublicInputs, erc20SlotData)
     ).to.not.be.reverted;
-    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32))).amount).to.equal(0);
+    expect((await bridge.pendingWithdrawals(withdrawalLeafIdOf(erc20Nonce))).amount).to.equal(0);
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
 
     // ETH claim
@@ -200,6 +198,6 @@ describe("Deposit And Claim", function () {
     await expect(
       bridge.batchClaimWithdrawal(proof, ethPublicInputs, ethSlotData)
     ).to.changeEtherBalance(user, ethAmount);
-    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))).amount).to.equal(0);
+    expect((await bridge.pendingWithdrawals(withdrawalLeafIdOf(ethNonce))).amount).to.equal(0);
   });
 });

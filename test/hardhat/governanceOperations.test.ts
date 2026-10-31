@@ -89,7 +89,7 @@ describe("governance operation tooling", function () {
     const { bridge } = await deployCoreSystem(owner.address, owner.address);
     const claim = buildForceWithdrawalClaim(bridge, "0x1234");
     const decoded = bridge.interface.decodeFunctionData("forceClaimWithdrawal", claim.data);
-    expect(decoded.nonce).to.equal(ethers.utils.hexZeroPad("0x1234", 32));
+    expect(decoded.withdrawalId).to.equal(ethers.utils.hexZeroPad("0x1234", 32));
     expect(decodeGovernanceTransaction(claim.target, claim.data).functionName)
       .to.equal("forceClaimWithdrawal");
   });

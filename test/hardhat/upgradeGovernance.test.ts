@@ -297,7 +297,7 @@ describe("governance upgrade and rescue", function () {
     };
     const untouchedNullifier = hexZeroPad("0xcd", 32);
 
-    expect(await upgradedBridge.getRevision()).to.equal(5);
+    expect(await upgradedBridge.getRevision()).to.equal(6);
     expect((await upgradedBridge.getTokenFlowConfig(depositToken.address)).totalWithdrawalCap).to.equal(777);
     expect(await upgradedBridge.totalWithdrawalAmount(depositToken.address)).to.equal(1234);
     expect(await upgradedBridge.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
@@ -375,7 +375,7 @@ describe("governance upgrade and rescue", function () {
     );
     const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
     if (upgraded.address == null) upgraded.address = bridge.proxy.address;
-    expect(await upgraded.getRevision()).to.equal(5);
+    expect(await upgraded.getRevision()).to.equal(6);
     expect((await upgraded.getTokenFlowConfig(tokenAddress)).totalWithdrawalCap).to.equal(555);
     expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(987);
     expect(await upgraded.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
