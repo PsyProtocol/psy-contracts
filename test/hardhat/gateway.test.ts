@@ -22,7 +22,7 @@ function mkTopProof(leaf: string, index: number): { proof: string[]; root: strin
 describe("Multicall3 claim", function () {
   it("batches claimWithdrawal calls to bridge", async function () {
     const [owner, user] = await ethers.getSigners();
-    const { bridge, stateManager: sm } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager: sm, router } = await deployCoreSystem(owner.address, owner.address);
 
     const M = await ethers.getContractFactory("Multicall3");
     const multicall = await M.deploy();
@@ -32,6 +32,7 @@ describe("Multicall3 claim", function () {
     const token = await T.deploy("Mock", "MOCK");
     await token.deployed();
     await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 0, mediumWithdrawalDelay: 0 });
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     const amount = 99n;
     const nonce = 9n;
     await token.mint(bridge.address, amount);

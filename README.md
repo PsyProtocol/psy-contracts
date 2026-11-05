@@ -23,6 +23,7 @@ Dual-stack contract workspace supporting both Foundry and Hardhat.
 - Solidity version pinned to `0.8.24`
 - Optimizer enabled (`runs=200`)
 - Hardhat source path points to `src/` to share the same contracts with Foundry
+- `StateManager.finalize` with a zero withdrawal root stays open for empty catch-up finalizes until a non-zero withdrawal root has been finalized (`WithdrawalBootstrapExpired` after that). The empty proof is the all-zero leaf and siblings. Any other proof is checked with the existing top-tree verifier and reverts `InvalidWithdrawalMerkleProof` when it does not hash to the zero root.
 
 ## Token reward claim
 
@@ -173,7 +174,7 @@ A mined transaction carries no return data. The receipt is the record, and it al
 
 ### Reason codes
 
-`0` means the slot was valid. `11..255` are reserved and never emitted. The ten codes, exactly as named in `src/Bridge.sol`:
+`0` means the slot was valid. `12..255` are reserved and never emitted. The eleven codes, exactly as named in `src/Bridge.sol`:
 
 | Code | Name | Meaning |
 |---|---|---|
@@ -184,11 +185,12 @@ A mined transaction carries no return data. The receipt is the record, and it al
 | 5 | `CLAIM_REASON_NULLIFIER_ALREADY_CLAIMED` | `claimedNullifiers[nonce]` is already set |
 | 6 | `CLAIM_REASON_TOKEN_NOT_CONFIGURED` | the token has no flow config |
 | 7 | `CLAIM_REASON_REGISTRATION_PAUSED` | effective pause flags include withdrawal-registration pause |
-| 8 | `CLAIM_REASON_AMOUNT_OUT_OF_RANGE` | amount is zero or `>=` the Goldilocks prime |
+| 8 | `CLAIM_REASON_AMOUNT_OUT_OF_RANGE` | amount is zero |
 | 9 | `CLAIM_REASON_TOTAL_AMOUNT_OVERFLOW` | `amount + totalWithdrawalAmount(token)` would overflow `uint256` |
 | 10 | `CLAIM_REASON_CLAIMABLE_AT_OVERFLOW` | `block.timestamp + delay` would not fit in `uint64` |
+| 11 | `CLAIM_REASON_TOKEN_MAPPING_MISMATCH` | the Router does not dual-bind the slot's token: `l2ToL1Token(l1ToL2Token(token))` is not the token |
 
-Checked in that order, so the first match wins: a zero amount whose address also has high bits reports `1`, not `4`. Codes 6–10 come from `_withdrawalRegistrationCheck`, which also selects the delay tier (`small`, `medium`, or `large`; the large tier also applies when the next total would pass `totalWithdrawalCap`).
+Checked in that order, so the first match wins: a zero amount whose address also has high bits reports `1`, not `4`. Code 11 comes from the Router dual read between the nullifier check and `_withdrawalRegistrationCheck`; the withdrawal slot carries no burning L2 contract id, so the forward read supplies it and the reverse read must resolve back to the token (`bytes32(0)` is a real L2 id, which makes the reverse read the check). Codes 6–10 come from `_withdrawalRegistrationCheck`, which also selects the delay tier (`small`, `medium`, or `large`; the large tier also applies when the next total would pass `totalWithdrawalCap`).
 
 ### Reason 5 and repeated nonces
 

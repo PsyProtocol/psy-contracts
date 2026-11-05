@@ -247,7 +247,6 @@ contract StateManagerFinalizeTest is Test {
         bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
         (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
         bytes32[9] memory withdrawalProof;
-        withdrawalProof[3] = bytes32(uint256(0xB00757));
 
         vm.prank(proposer);
         sm.finalize(
@@ -263,6 +262,74 @@ contract StateManagerFinalizeTest is Test {
 
         assertEq(sm.lastFinalizedCheckpointId(), 1);
     }
+
+    function testFirstFinalizeRejectsNonZeroLeafUnderZeroWithdrawalRoot() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        StateManager sm = _deployStateManager(provider);
+
+        bytes32[2] memory checkpointRoots = _roots(bytes32(0), bytes32(uint256(1)));
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        bytes32[9] memory withdrawalProof;
+        withdrawalProof[0] = bytes32(uint256(0xB007));
+        ExpectedFinalizeHashVerifier verifier = new ExpectedFinalizeHashVerifier(
+            _expectedFinalizeHash(checkpointRoots, depositRoot, bytes32(0), 1, 1)
+        );
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
+        vm.stopPrank();
+
+        vm.prank(proposer);
+        vm.expectRevert(StateManager.InvalidWithdrawalMerkleProof.selector);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            checkpointRoots,
+            bytes32(0),
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+    }
+
+    function testFirstFinalizeRejectsAlteredSiblingUnderZeroWithdrawalRoot() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        StateManager sm = _deployStateManager(provider);
+
+        bytes32[2] memory checkpointRoots = _roots(bytes32(0), bytes32(uint256(1)));
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(depositLeaf, 0);
+        bytes32[9] memory withdrawalProof;
+        withdrawalProof[3] = bytes32(uint256(0xB00757));
+        ExpectedFinalizeHashVerifier verifier = new ExpectedFinalizeHashVerifier(
+            _expectedFinalizeHash(checkpointRoots, depositRoot, bytes32(0), 1, 1)
+        );
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        provider.setAddress(provider.ZK_VERIFIER_ID(), address(verifier));
+        vm.stopPrank();
+
+        vm.prank(proposer);
+        vm.expectRevert(StateManager.InvalidWithdrawalMerkleProof.selector);
+        sm.finalize(
+            _dummyGnarkProof(),
+            depositRoot,
+            checkpointRoots,
+            bytes32(0),
+            0,
+            1,
+            depositProof,
+            withdrawalProof
+        );
+    }
+
+
 
     function testZeroWithdrawalBootstrapExpiresAfterNonZeroRoot() public {
         PsyAddressesProvider provider = _deployAddressesProvider();
