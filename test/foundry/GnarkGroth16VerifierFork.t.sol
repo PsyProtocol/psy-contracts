@@ -13,21 +13,21 @@ contract GnarkGroth16VerifierForkTest is Test {
 
     function _publicInputs() internal pure returns (uint256[2] memory input) {
         input = [
-            uint256(0x000000000000000000000000000000007b931f4f448a3e3fcae8408f56cec0d5),
-            uint256(0x00000000000000000000000000000000a60ab4615d7a0d9770b60f3d7bc998d5)
+            uint256(0x000000000000000000000000000000006030bafd0fe5bb433f7ab7322de25d45),
+            uint256(0x000000000000000000000000000000001a6b7d2ac2240435041e039b8cf34adf)
         ];
     }
 
     function _uncompressedProofFromOutProofJson() internal pure returns (uint256[8] memory proof) {
         proof = [
-            uint256(0x1cbfcb5b4767ea73eebd161f03d037b08c8ae5ad41c2b2be97169c1c924bd2e4),
-            uint256(0x03775867cffa7a5d1096a401fbc7078feeaca19e9ee0315654c3b57d0e31c12a),
-            uint256(0x128b930ca7bfc5fd2aa52b621eb47cf356cab4d085d1e18001511b0a8912b36b),
-            uint256(0x17dae318d55e41714c9f2f5b8f6c24ec887e3ecb9be8032685329bd3494e1d59),
-            uint256(0x04b4cfd9bd0e46841df482202d35a980f720d2055b7bea5f9bd5a623b598a0e1),
-            uint256(0x2f41a19d630b4004afc3a60102a8743f396ab1a3c33ec40fccf6c7a663610afc),
-            uint256(0x135fd400e1f8c4217196c4db47a4a28485f0f3cc539bf7863b2b07709a666781),
-            uint256(0x120340f3d5d51c4814dd0ac0fce3305d8636bb404983688861fbb53b7bc0aad8)
+            uint256(0x152c2d58a91ec8b9692d1938abfbea034c96fbe17c05404d7da348043a8326a5),
+            uint256(0x302eed4c01e36e0e496348b7270b442981cc966b6f72f08d87655c24c6bd46d3),
+            uint256(0x1721203cfcaea29d6fdfdacba2abb26a13bf9b36ddc7874dac895d7e2a1f54d6),
+            uint256(0x00611933bc6782e1d782da1f934093995faffbd6634056effab56f45a58d8ba3),
+            uint256(0x257f38bbcc736e216cc387e3d63ce1a9bc6dcffcb125a0074e9226cf36af32dc),
+            uint256(0x23f526458585cbc0eadc1b952331e0042b207e5b9aedcfc448e84d7438c1d0db),
+            uint256(0x2d6eb29ae13b7415f0e016470148d9cd7344f9a4987b3b9387390c5be7031728),
+            uint256(0x108f77ac6b890a9a03deff7a8b49a903310d55cb22201acbe841dc9e69c2e522)
         ];
     }
 
