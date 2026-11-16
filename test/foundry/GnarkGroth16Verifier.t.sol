@@ -13,21 +13,21 @@ contract GnarkGroth16VerifierTest is Test {
 
     function _publicInputs() internal pure returns (uint256[2] memory input) {
         input = [
-            uint256(0x000000000000000000000000000000006030bafd0fe5bb433f7ab7322de25d45),
-            uint256(0x000000000000000000000000000000001a6b7d2ac2240435041e039b8cf34adf)
+            uint256(0x00000000000000000000000000000000692127e3a69c4a65c414864a64d7c993),
+            uint256(0x00000000000000000000000000000000d4d7d0aa1ae15aa422e62bf1868fb9d3)
         ];
     }
 
     function _uncompressedProofFromOutProofJson() internal pure returns (uint256[8] memory proof) {
         proof = [
-            uint256(0x152c2d58a91ec8b9692d1938abfbea034c96fbe17c05404d7da348043a8326a5),
-            uint256(0x302eed4c01e36e0e496348b7270b442981cc966b6f72f08d87655c24c6bd46d3),
-            uint256(0x1721203cfcaea29d6fdfdacba2abb26a13bf9b36ddc7874dac895d7e2a1f54d6),
-            uint256(0x00611933bc6782e1d782da1f934093995faffbd6634056effab56f45a58d8ba3),
-            uint256(0x257f38bbcc736e216cc387e3d63ce1a9bc6dcffcb125a0074e9226cf36af32dc),
-            uint256(0x23f526458585cbc0eadc1b952331e0042b207e5b9aedcfc448e84d7438c1d0db),
-            uint256(0x2d6eb29ae13b7415f0e016470148d9cd7344f9a4987b3b9387390c5be7031728),
-            uint256(0x108f77ac6b890a9a03deff7a8b49a903310d55cb22201acbe841dc9e69c2e522)
+            uint256(0x3122be64caeb9d237a379f2536405b3a8a82d381c1dfe393a5988feefb6a6d),
+            uint256(0x2bb9ce3c716fa3cf8dd6bfdae58a18c3ee259f06b39eb20eadc04114378a52d1),
+            uint256(0x1d1471e711c884cbf5a56c9ce1f6479fd49c0c90d79c47630ec068e5402ef72c),
+            uint256(0x1d222c08d3c8770afd8f8f51b4231d5bbc79d9b0f00985c1433eea2f9c06587),
+            uint256(0x29c43359862ed08296d81052ed866e23d8125502b791bc59166d1e6aafd705c5),
+            uint256(0x108c7e71e79cbb4c5a6e088b9d882841638c9284c9cd9ffe7caf8b3c637a11d9),
+            uint256(0x27871f7b214707109badd510aac0de18e76cd8b1a19e4d9e4761e35a2a0d18e9),
+            uint256(0x1be73309e8803430c1b204e3903c39d457f05379cca15fe934776f3c9c5d6106)
         ];
     }
 
