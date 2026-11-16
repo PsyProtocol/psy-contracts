@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
+import { buildWithdrawalBatchClaimSingle, withdrawalIdOf } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -165,12 +165,15 @@ describe("Deposit And Claim", function () {
       amount: erc20Amount,
       nonce: erc20Nonce,
       destinationChainIndex: 0,
+      tokenContractId: BigInt(l2Erc20Id),
     });
 
     await expect(
       bridge.batchClaimWithdrawal(proof, erc20PublicInputs, erc20SlotData)
     ).to.not.be.reverted;
-    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${erc20Nonce.toString(16)}`, 32))).amount).to.equal(0);
+    const erc20WithdrawalId = withdrawalIdOf({ recipient: user.address, token: token.address,
+      amount: erc20Amount, nonce: erc20Nonce, destinationChainIndex: 0, tokenContractId: BigInt(l2Erc20Id) });
+    expect((await bridge.pendingWithdrawals(erc20WithdrawalId)).amount).to.equal(0);
     expect(await token.balanceOf(user.address)).to.equal(erc20Amount);
 
     // ETH claim
@@ -195,11 +198,14 @@ describe("Deposit And Claim", function () {
       amount: ethAmount,
       nonce: ethNonce,
       destinationChainIndex: 0,
+      tokenContractId: BigInt(l2EthId),
     });
 
     await expect(
       bridge.batchClaimWithdrawal(proof, ethPublicInputs, ethSlotData)
     ).to.changeEtherBalance(user, ethAmount);
-    expect((await bridge.pendingWithdrawals(ethers.utils.hexZeroPad(`0x${ethNonce.toString(16)}`, 32))).amount).to.equal(0);
+    const ethWithdrawalId = withdrawalIdOf({ recipient: user.address, token: ethers.constants.AddressZero,
+      amount: ethAmount, nonce: ethNonce, destinationChainIndex: 0, tokenContractId: BigInt(l2EthId) });
+    expect((await bridge.pendingWithdrawals(ethWithdrawalId)).amount).to.equal(0);
   });
 });

@@ -162,9 +162,10 @@ describe("governance upgrade and rescue", function () {
     expect(migrated.configured).to.equal(true);
     expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(66);
     expect((await upgraded.pendingWithdrawals(pendingNonce)).claimableAt).to.equal(pendingDeadline);
+    expect((await upgraded.pendingWithdrawals(pendingNonce)).sourceRoot).to.equal(ethers.constants.HashZero);
     expect(await upgraded.withdrawalRequiresGovernance(pendingNonce)).to.equal(true);
     await expect(upgraded.claimPendingWithdrawal(pendingNonce))
-      .to.be.revertedWithCustomError(upgraded, "WithdrawalGovernanceRequired");
+      .to.be.revertedWithCustomError(upgraded, "UnknownWithdrawalSourceRoot");
   });
 
   it("queues, executes, and cancels timelock actions", async function () {
@@ -202,7 +203,7 @@ describe("governance upgrade and rescue", function () {
     ).to.emit(timelock, "CancelledAction");
   });
 
-  it("upgrades StateManager and Bridge in place and force-sets non-mapping state without touching mappings", async function () {
+  it("upgrades StateManager and Bridge in place, force-sets non-mapping state, clears the rolled-back deposit leaf tail, and retains other mappings", async function () {
     const [owner, proposer, other] = await ethers.getSigners();
     const { acl, state, bridge, router, erc20Gateway } = await deploySystemWithTransparentBridge(owner.address, proposer.address);
     await acl.grantRole(await acl.STATE_MANAGER_ADMIN_ROLE(), owner.address);
@@ -230,7 +231,6 @@ describe("governance upgrade and rescue", function () {
     };
     const untouchedStateMappingKey = hexZeroPad("0xab", 32);
 
-    expect(await upgradedState.getRevision()).to.equal(2);
     expect(await upgradedState.addressesProvider()).to.equal(await state.proxy.addressesProvider());
     await expect(
       upgradedState.connect(other).forceSetState(expectedState, targetState),
@@ -279,7 +279,6 @@ describe("governance upgrade and rescue", function () {
     await depositToken.mint(owner.address, 1);
     await depositToken.approve(erc20Gateway.proxy.address, 1);
     await router.proxy.deposit(depositToken.address, 1, hexZeroPad("0x23", 32), hexZeroPad("0x24", 32));
-    const depositLeafHash = await upgradedBridge.depositLeafHashes(0);
 
     const expectedBridge = {
       depositRoot: await upgradedBridge.depositRoot(),
@@ -297,7 +296,6 @@ describe("governance upgrade and rescue", function () {
     };
     const untouchedNullifier = hexZeroPad("0xcd", 32);
 
-    expect(await upgradedBridge.getRevision()).to.equal(5);
     expect((await upgradedBridge.getTokenFlowConfig(depositToken.address)).totalWithdrawalCap).to.equal(777);
     expect(await upgradedBridge.totalWithdrawalAmount(depositToken.address)).to.equal(1234);
     expect(await upgradedBridge.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));
@@ -310,7 +308,7 @@ describe("governance upgrade and rescue", function () {
     expect(await upgradedBridge.provedDepositCount()).to.equal(targetBridge.provedDepositCount);
     expect(await upgradedBridge.pendingDepositCount()).to.equal(targetBridge.pendingDepositCount);
     expect(await upgradedBridge.getDepositFrontier()).to.deep.equal(targetBridge.depositFrontier);
-    expect(await upgradedBridge.depositLeafHashes(0)).to.equal(depositLeafHash);
+    expect(await upgradedBridge.depositLeafHashes(0)).to.equal(ethers.constants.HashZero);
     expect(await upgradedBridge.claimedNullifiers(untouchedNullifier)).to.equal(false);
     await expect(upgradedBridge.forceSetState(expectedBridge, targetBridge)).to.not.emit(upgradedBridge, "ForceSetState");
   });
@@ -375,7 +373,6 @@ describe("governance upgrade and rescue", function () {
     );
     const upgraded = implementationFactory.attach(bridge.proxy.address) as any;
     if (upgraded.address == null) upgraded.address = bridge.proxy.address;
-    expect(await upgraded.getRevision()).to.equal(5);
     expect((await upgraded.getTokenFlowConfig(tokenAddress)).totalWithdrawalCap).to.equal(555);
     expect(await upgraded.totalWithdrawalAmount(tokenAddress)).to.equal(987);
     expect(await upgraded.withdrawalForceClaimExecutor()).to.equal(await getContractAddress(forceClaimExecutor));

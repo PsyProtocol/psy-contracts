@@ -173,4 +173,268 @@ contract RouterGatewayTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
         assertEq(weth.balanceOf(address(bridge)), 0);
     }
+
+    /// An L2 id already held by native cannot be given to an ERC20. The
+    /// rejected call changes neither direction, and native deposits still use it.
+    function testSharedL2IdIsRejectedAndStateUnchanged() public {
+        (, Bridge bridge, Router router, ERC20Gateway erc20g,, MockWETH weth) = _deployAll();
+        MockERC20 token = new MockERC20("Reassigned", "RSN");
+        bytes32 sharedId = bytes32(uint256(0x8888));
+        _configureFlowToken(bridge, address(0));
+        _configureFlowToken(bridge, address(token));
+        token.mint(user, 1_000);
+        vm.deal(user, 2 ether);
+
+        vm.prank(owner);
+        router.setTokenMapping(address(0), sharedId);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, sharedId, address(0)));
+        router.setTokenMapping(address(token), sharedId);
+
+        assertEq(router.l1ToL2Token(address(0)), sharedId);
+        assertEq(router.l2ToL1Token(sharedId), address(0));
+        assertEq(router.l1ToL2Token(address(token)), bytes32(0));
+        assertTrue(router.isTokenMapped(address(0)));
+        assertFalse(router.isTokenMapped(address(token)));
+
+        vm.startPrank(user);
+        vm.expectRevert(abi.encodeWithSelector(UnmappedL1Token.selector, address(token)));
+        router.deposit(address(token), 500, bytes32(uint256(42)), bytes32(uint256(1)));
+        router.deposit{value: 1 ether}(address(0), 1 ether, bytes32(uint256(7)), bytes32(uint256(2)));
+        vm.stopPrank();
+
+        assertEq(bridge.pendingDepositCount(), 1);
+        assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(weth.balanceOf(address(bridge)), 1 ether);
+    }
+
+    function testErc20CannotTakeAnotherErc20L2Id() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 first = new MockERC20("First", "FST");
+        MockERC20 second = new MockERC20("Second", "SND");
+        bytes32 sharedId = bytes32(uint256(0x1234));
+
+        vm.prank(owner);
+        router.setTokenMapping(address(first), sharedId);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, sharedId, address(first)));
+        router.setTokenMapping(address(second), sharedId);
+
+        assertEq(router.l1ToL2Token(address(first)), sharedId);
+        assertEq(router.l2ToL1Token(sharedId), address(first));
+        assertEq(router.l1ToL2Token(address(second)), bytes32(0));
+        assertFalse(router.isL2TokenOccupied(bytes32(0)));
+    }
+
+    function testNativeCannotTakeAnErc20L2Id() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 token = new MockERC20("Held", "HLD");
+        bytes32 sharedId = bytes32(uint256(0x1234));
+
+        vm.prank(owner);
+        router.setTokenMapping(address(token), sharedId);
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, sharedId, address(token)));
+        router.setTokenMapping(address(0), sharedId);
+
+        assertEq(router.l1ToL2Token(address(token)), sharedId);
+        assertEq(router.l2ToL1Token(sharedId), address(token));
+        assertEq(router.l1ToL2Token(address(0)), bytes32(0));
+        assertFalse(router.isTokenMapped(address(0)));
+    }
+
+    function testFirstNonzeroNativeMappingSucceeds() public {
+        (,, Router router,,,) = _deployAll();
+        bytes32 nativeId = bytes32(uint256(0x8888));
+
+        vm.prank(owner);
+        router.setTokenMapping(address(0), nativeId);
+
+        assertEq(router.l1ToL2Token(address(0)), nativeId);
+        assertEq(router.l2ToL1Token(nativeId), address(0));
+        assertTrue(router.isL2TokenOccupied(nativeId));
+        assertTrue(router.isTokenMapped(address(0)));
+        assertFalse(router.isL2TokenOccupied(bytes32(0)));
+    }
+
+    /// Id 0 is PSY's. The first native mapping must not reserve it.
+    function testNativeMappingLeavesPsyZeroIdFree() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 psy = new MockERC20("Psy", "PSY");
+        MockERC20 other = new MockERC20("Other", "OTH");
+        bytes32 nativeId = bytes32(uint256(0x8888));
+
+        vm.startPrank(owner);
+        router.setTokenMapping(address(0), nativeId);
+        router.setTokenMapping(address(psy), bytes32(0));
+        vm.stopPrank();
+
+        assertEq(router.l1ToL2Token(address(0)), nativeId);
+        assertEq(router.l2ToL1Token(nativeId), address(0));
+        assertTrue(router.isL2TokenOccupied(nativeId));
+        assertEq(router.l1ToL2Token(address(psy)), bytes32(0));
+        assertEq(router.l2ToL1Token(bytes32(0)), address(psy));
+        assertTrue(router.isL2TokenOccupied(bytes32(0)));
+        assertTrue(router.isTokenMapped(address(psy)));
+        assertTrue(router.isTokenMapped(address(0)));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, bytes32(0), address(psy)));
+        router.setTokenMapping(address(other), bytes32(0));
+
+        assertEq(router.l2ToL1Token(bytes32(0)), address(psy));
+        assertFalse(router.isTokenMapped(address(other)));
+    }
+
+    function testNativeZeroIdIsRejected() public {
+        (,, Router router,,,) = _deployAll();
+
+        vm.prank(owner);
+        vm.expectRevert(Router.NativeL2TokenZero.selector);
+        router.setTokenMapping(address(0), bytes32(0));
+
+        assertEq(router.l1ToL2Token(address(0)), bytes32(0));
+        assertEq(router.l2ToL1Token(bytes32(0)), address(0));
+        assertFalse(router.isL2TokenOccupied(bytes32(0)));
+        assertFalse(router.isTokenMapped(address(0)));
+    }
+
+    function testSamePairIsANoOpWithoutOccupancyWrites() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 token = new MockERC20("Same", "SAME");
+        bytes32 tokenId = bytes32(uint256(0x1234));
+        bytes32 nativeId = bytes32(uint256(0x8888));
+
+        vm.startPrank(owner);
+        router.setTokenMapping(address(token), tokenId);
+        router.setTokenMapping(address(0), nativeId);
+
+        vm.record();
+        router.setTokenMapping(address(token), tokenId);
+        router.setTokenMapping(address(0), nativeId);
+        vm.stopPrank();
+
+        (, bytes32[] memory writes) = vm.accesses(address(router));
+        assertEq(writes.length, 0);
+        assertEq(router.l1ToL2Token(address(token)), tokenId);
+        assertEq(router.l1ToL2Token(address(0)), nativeId);
+        assertTrue(router.isL2TokenOccupied(tokenId));
+        assertTrue(router.isL2TokenOccupied(nativeId));
+    }
+
+    function testLegacyMappingsAreReadWithoutBackfill() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 token = new MockERC20("Legacy", "LGC");
+        MockERC20 challenger = new MockERC20("Challenger", "CHG");
+        bytes32 legacyId = bytes32(uint256(0x1234));
+        bytes32 nativeId = bytes32(uint256(0x8888));
+
+        vm.store(address(router), keccak256(abi.encode(address(token), uint256(2))), legacyId);
+        vm.store(address(router), keccak256(abi.encode(legacyId, uint256(3))), bytes32(uint256(uint160(address(token)))));
+        vm.store(address(router), keccak256(abi.encode(address(0), uint256(2))), nativeId);
+        assertFalse(router.isL2TokenOccupied(legacyId));
+        assertFalse(router.isL2TokenOccupied(nativeId));
+
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, legacyId, address(token)));
+        router.setTokenMapping(address(challenger), legacyId);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, nativeId, address(0)));
+        router.setTokenMapping(address(challenger), nativeId);
+
+        vm.record();
+        router.setTokenMapping(address(token), legacyId);
+        router.setTokenMapping(address(0), nativeId);
+        vm.stopPrank();
+
+        (, bytes32[] memory writes) = vm.accesses(address(router));
+        assertEq(writes.length, 0);
+        assertFalse(router.isL2TokenOccupied(legacyId));
+        assertFalse(router.isL2TokenOccupied(nativeId));
+        assertEq(router.l2ToL1Token(legacyId), address(token));
+        assertEq(router.l2ToL1Token(nativeId), address(0));
+    }
+
+    /// A pre-upgrade native pair has no occupancy flag. Moving it to a free id
+    /// reserves the old id; its reverse word stays address(0).
+    function testLegacyNativeRemapReservesOldId() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 other = new MockERC20("Other", "OTH");
+        bytes32 legacyNativeId = bytes32(uint256(0x8888));
+        bytes32 newNativeId = bytes32(uint256(0x9999));
+
+        vm.store(address(router), keccak256(abi.encode(address(0), uint256(2))), legacyNativeId);
+        assertTrue(router.isTokenMapped(address(0)));
+        assertFalse(router.isL2TokenOccupied(legacyNativeId));
+        assertEq(router.l2ToL1Token(legacyNativeId), address(0));
+
+        vm.prank(owner);
+        router.setTokenMapping(address(0), newNativeId);
+
+        assertEq(router.l1ToL2Token(address(0)), newNativeId);
+        assertEq(router.l2ToL1Token(newNativeId), address(0));
+        assertTrue(router.isL2TokenOccupied(newNativeId));
+        assertTrue(router.isL2TokenOccupied(legacyNativeId));
+        assertEq(router.l2ToL1Token(legacyNativeId), address(0));
+
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, legacyNativeId, address(0)));
+        router.setTokenMapping(address(other), legacyNativeId);
+
+        assertEq(router.l1ToL2Token(address(other)), bytes32(0));
+        assertEq(router.l1ToL2Token(address(0)), newNativeId);
+        assertTrue(router.isL2TokenOccupied(legacyNativeId));
+    }
+
+    function testRemapLeavesPreviousL2IdOccupied() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 token = new MockERC20("Moving", "MOV");
+        MockERC20 other = new MockERC20("Other", "OTH");
+        bytes32 firstId = bytes32(uint256(0x1111));
+        bytes32 secondId = bytes32(uint256(0x2222));
+        bytes32 firstNativeId = bytes32(uint256(0x8888));
+        bytes32 secondNativeId = bytes32(uint256(0x9999));
+
+        vm.startPrank(owner);
+        router.setTokenMapping(address(token), firstId);
+        router.setTokenMapping(address(token), secondId);
+        router.setTokenMapping(address(0), firstNativeId);
+        router.setTokenMapping(address(0), secondNativeId);
+        vm.stopPrank();
+
+        assertEq(router.l1ToL2Token(address(token)), secondId);
+        assertEq(router.l2ToL1Token(firstId), address(token));
+        assertTrue(router.isL2TokenOccupied(firstId));
+        assertEq(router.l1ToL2Token(address(0)), secondNativeId);
+        assertEq(router.l2ToL1Token(firstNativeId), address(0));
+        assertTrue(router.isL2TokenOccupied(firstNativeId));
+
+        vm.startPrank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, firstId, address(token)));
+        router.setTokenMapping(address(other), firstId);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenOccupied.selector, firstNativeId, address(0)));
+        router.setTokenMapping(address(other), firstNativeId);
+        router.setTokenMapping(address(0), firstNativeId);
+        vm.stopPrank();
+
+        assertEq(router.l1ToL2Token(address(0)), firstNativeId);
+        assertTrue(router.isL2TokenOccupied(secondNativeId));
+        assertEq(router.l2ToL1Token(secondNativeId), address(0));
+    }
+
+    /// PSY owns id 0. That binding must not make an unset native deposit look mapped.
+    function testPsyZeroIdDoesNotMapNative() public {
+        (, Bridge bridge, Router router,,,) = _deployAll();
+        MockERC20 psy = new MockERC20("Psy", "PSY");
+        _configureFlowToken(bridge, address(0));
+
+        vm.prank(owner);
+        router.setTokenMapping(address(psy), bytes32(0));
+
+        assertTrue(router.isTokenMapped(address(psy)));
+        assertTrue(router.isL2TokenOccupied(bytes32(0)));
+        assertFalse(router.isTokenMapped(address(0)));
+    }
 }

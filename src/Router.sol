@@ -26,11 +26,17 @@ contract Router is Initializable, OwnableUpgradeable {
     mapping(address => address) public tokenToGateway;
     mapping(address => bytes32) public l1ToL2Token;
     mapping(bytes32 => address) public l2ToL1Token;
+    /// Appended after the existing reverse map. A true flag reserves the L2 id
+    /// even when its reverse word is address(0) (native ETH). Pre-upgrade pairs
+    /// stay false; setTokenMapping reads them without writing them back.
+    mapping(bytes32 => bool) public isL2TokenOccupied;
 
     error ZeroAddress();
     error GatewayNotConfigured();
     error InvalidMsgValue();
     error OnlyRouterAdmin();
+    error NativeL2TokenZero();
+    error L2TokenOccupied(bytes32 l2Token, address occupant);
 
     modifier onlyRouterAdmin() {
         IPsyAddressesProviderRouter provider = IPsyAddressesProviderRouter(addressesProvider);
@@ -58,15 +64,42 @@ contract Router is Initializable, OwnableUpgradeable {
         tokenToGateway[token] = gateway;
     }
 
+    /// Occupancy is independent of the reverse word: native's reverse is
+    /// address(0), and bytes32(0) is PSY's real id. A different L1 already
+    /// holding `l2Token` reverts. The same pair is a no-op. A successful remap
+    /// leaves the previous nonzero native id reserved and does not clear either direction.
     function setTokenMapping(address l1Token, bytes32 l2Token) external onlyRouterAdmin {
+        if (l1Token == address(0) && l2Token == bytes32(0)) revert NativeL2TokenZero();
+        if (isTokenMapped(l1Token) && l1ToL2Token[l1Token] == l2Token) return;
+        (bool occupied, address occupant) = _l2Occupant(l2Token);
+        if (occupied && occupant != l1Token) revert L2TokenOccupied(l2Token, occupant);
+
+        if (l1Token == address(0)) {
+            bytes32 previous = l1ToL2Token[address(0)];
+            if (previous != bytes32(0)) isL2TokenOccupied[previous] = true;
+        }
         l1ToL2Token[l1Token] = l2Token;
         l2ToL1Token[l2Token] = l1Token;
+        isL2TokenOccupied[l2Token] = true;
+    }
+
+    /// Recorded occupancy wins, including a native holder of address(0).
+    /// An unrecorded id is held by a nonzero reverse owner, or by native when
+    /// this nonzero id is already native's forward. Id 0 is never inferred
+    /// from native. The bool is required: address(0) is both "free" and native.
+    function _l2Occupant(bytes32 l2Token) internal view returns (bool occupied, address holder) {
+        if (isL2TokenOccupied[l2Token]) return (true, l2ToL1Token[l2Token]);
+        address recorded = l2ToL1Token[l2Token];
+        if (recorded != address(0)) return (true, recorded);
+        if (l2Token != bytes32(0) && l1ToL2Token[address(0)] == l2Token) return (true, address(0));
+        return (false, address(0));
     }
 
     /// bytes32(0) is a real L2 token id (PSY), so a mapping read needs the reverse check to mean "mapped".
+    /// Native's unset forward is also zero, so it is mapped only when that forward is nonzero and reverses to native.
     function isTokenMapped(address l1Token) public view returns (bool) {
-        if (l1Token == address(0)) return l1ToL2Token[l1Token] != bytes32(0); // mapping defaults self-alias address(0)
         bytes32 l2Token = l1ToL2Token[l1Token];
+        if (l1Token == address(0)) return l2Token != bytes32(0) && l2ToL1Token[l2Token] == address(0);
         return l2ToL1Token[l2Token] == l1Token;
     }
 

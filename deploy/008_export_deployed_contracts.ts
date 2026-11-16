@@ -46,7 +46,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
   // ── Read verification metadata from verifiable.json ────────────
   let verificationMeta: Record<string, any> = {};
   try {
-    const vPath = path.join(process.cwd(), "deployments", network.name, "verifiable.json");
+    const vPath = path.join(hre.config.paths.deployments, network.name, "verifiable.json");
     verificationMeta = JSON.parse(await fsp.readFile(vPath, "utf8"));
   } catch {
     // verifiable.json not found — not required
@@ -143,7 +143,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
     verify: sortKeys(verificationMeta),
   };
 
-  const outputPath = path.join(process.cwd(), "deployments", network.name, "deployed-contracts.json");
+  const outputPath = path.join(hre.config.paths.deployments, network.name, "deployed-contracts.json");
   await fsp.mkdir(path.dirname(outputPath), { recursive: true });
   await fsp.writeFile(outputPath, JSON.stringify(out, null, 2) + "\n", "utf8");
   log(`wrote deployed contracts summary: ${outputPath}`);

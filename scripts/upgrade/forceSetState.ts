@@ -108,19 +108,6 @@ export async function revokeKnownSubtreeRoots(
   return { target: stateManager.address, data, args };
 }
 
-export async function setCheckpointTreeRootsClean(clean: boolean, executionTime?: string) {
-  if (typeof clean !== "boolean") throw new Error("clean must be a boolean");
-  const stateManager = await getDeployedContract("StateManager");
-  const args = [clean] as const;
-  const data = stateManager.interface.encodeFunctionData("setCheckpointTreeRootsClean", args);
-  if (DRY_RUN) {
-    await dryRunEncodedData(stateManager.address, data, executionTime);
-  } else {
-    await waitForTx(await stateManager.setCheckpointTreeRootsClean(...args, GLOBAL_OVERRIDES));
-  }
-  return { target: stateManager.address, data, args };
-}
-
 if (require.main === module) {
   forceSetState(process.env.TIMELOCK_EXECUTION_TIME).catch((err: unknown) => {
     console.error(err);

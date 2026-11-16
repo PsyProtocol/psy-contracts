@@ -98,15 +98,6 @@ task("state-manager:revoke-known-subtree-roots", "Encode or execute named subtre
     await revokeKnownSubtreeRoots(args.depositRootsJson, args.withdrawalRootsJson, args.executionTime);
   });
 
-task("state-manager:set-checkpoint-tree-roots-clean", "Encode or execute the checkpoint-tree-root clean flag")
-  .addParam("clean", "Whether checkpoint-tree-root cleanup is complete", undefined, types.boolean)
-  .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
-  .setAction(async (args: { clean: boolean; executionTime?: string }) => {
-    // Hardhat config loads tasks before its runtime exists; helpers import that runtime.
-    const { setCheckpointTreeRootsClean } = await import("../scripts/upgrade/forceSetState");
-    await setCheckpointTreeRootsClean(args.clean, args.executionTime);
-  });
-
 task("bridge:force-set-state", "Encode or execute Bridge.forceSetState")
   .addOptionalParam("executionTime", "Timelock execution timestamp", undefined, types.string)
   .setAction(async (args: { executionTime?: string }) => {

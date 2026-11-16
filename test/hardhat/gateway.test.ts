@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ethers } from "hardhat";
 import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
+import { buildWithdrawalBatchClaimSingle, withdrawalIdOf } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -54,14 +54,16 @@ describe("Multicall3 claim", function () {
       amount,
       nonce,
       destinationChainIndex: 0,
+      tokenContractId: 1,
     });
     const claimCallData = bridge.interface.encodeFunctionData("batchClaimWithdrawal", [
       proof,
       publicInputs,
       slotData,
     ]);
-    const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
-    const settleCallData = bridge.interface.encodeFunctionData("claimPendingWithdrawal", [nullifier]);
+    const withdrawalId = withdrawalIdOf({ recipient: user.address, token: token.address,
+      amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
+    const settleCallData = bridge.interface.encodeFunctionData("claimPendingWithdrawal", [withdrawalId]);
     await multicall.aggregate3([
       {
         target: bridge.address,

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "forge-std/Test.sol";
+import {OwnableUpgradeable} from "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 import {StateManager} from "../../src/StateManager.sol";
 import {PsyAddressesProvider} from "../../src/PsyAddressesProvider.sol";
 import {PsyACLManager} from "../../src/PsyACLManager.sol";
@@ -18,6 +19,12 @@ contract ExpectedFinalizeHashVerifier {
     function verifyProof(uint256[8] calldata, uint256[2] calldata publicInputs) external view {
         bytes32 actualHash = bytes32((uint256(publicInputs[0]) << 128) | uint256(publicInputs[1]));
         require(actualHash == expectedHash, "unexpected hash");
+    }
+}
+
+contract RejectingFinalizeVerifier {
+    function verifyProof(uint256[8] calldata, uint256[2] calldata) external pure {
+        revert("groth16 must not run");
     }
 }
 
@@ -90,6 +97,24 @@ contract StateManagerFinalizeTest is Test {
                 numCheckpointsAggregated
             )
         );
+    }
+
+    function _finalizePublicInputs(
+        bytes32[2] memory checkpointRoots,
+        bytes32 depositTreeRoot,
+        bytes32 withdrawalTreeRoot,
+        uint64 terminalCheckpointId,
+        uint64 numCheckpointsAggregated
+    ) internal pure returns (uint256[2] memory input) {
+        bytes32 msgHash = _expectedFinalizeHash(
+            checkpointRoots,
+            depositTreeRoot,
+            withdrawalTreeRoot,
+            terminalCheckpointId,
+            numCheckpointsAggregated
+        );
+        input[0] = uint256(uint128(uint256(msgHash) >> 128));
+        input[1] = uint256(uint128(uint256(msgHash)));
     }
 
     function _deployAddressesProvider() internal returns (PsyAddressesProvider provider) {
@@ -430,4 +455,64 @@ contract StateManagerFinalizeTest is Test {
             withdrawalProof
         );
     }
+
+    function testSetZkVerifierSwitchesFinalizeVerifier() public {
+        PsyAddressesProvider provider = _deployAddressesProvider();
+        PsyACLManager acl = _deployACL();
+        RejectingFinalizeVerifier oldVerifier = new RejectingFinalizeVerifier();
+        StateManager sm = _deployStateManager(provider);
+        bytes32[2] memory checkpointRoots = _roots(bytes32(uint256(5)), bytes32(uint256(6)));
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _mkTopProof(sm.withdrawalSubtreeRoot(), 0);
+        (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _mkTopProof(bytes32(uint256(0xCC)), 0);
+        uint64 terminalCheckpointId = 12;
+        ExpectedFinalizeHashVerifier newVerifier = new ExpectedFinalizeHashVerifier(
+            _expectedFinalizeHash(checkpointRoots, depositRoot, withdrawalRoot, terminalCheckpointId, terminalCheckpointId)
+        );
+        bytes memory proof = _dummyGnarkProof();
+        uint256[8] memory proofWords = abi.decode(proof, (uint256[8]));
+        uint256[2] memory publicInputs = _finalizePublicInputs(
+            checkpointRoots,
+            depositRoot,
+            withdrawalRoot,
+            terminalCheckpointId,
+            terminalCheckpointId
+        );
+
+        vm.prank(proposer);
+        vm.expectRevert(abi.encodeWithSelector(OwnableUpgradeable.OwnableUnauthorizedAccount.selector, proposer));
+        provider.setZkVerifier(address(newVerifier));
+        vm.prank(owner);
+        vm.expectRevert(PsyAddressesProvider.ZeroAddress.selector);
+        provider.setZkVerifier(address(0));
+
+        vm.startPrank(owner);
+        provider.setAddress(provider.ACL_MANAGER_ID(), address(acl));
+        vm.expectEmit(true, true, true, true, address(provider));
+        emit PsyAddressesProvider.AddressSet(provider.ZK_VERIFIER_ID(), address(0), address(oldVerifier));
+        provider.setZkVerifier(address(oldVerifier));
+        vm.stopPrank();
+        assertEq(provider.getAddress(provider.ZK_VERIFIER_ID()), address(oldVerifier));
+
+        vm.expectCall(address(oldVerifier), abi.encodeCall(RejectingFinalizeVerifier.verifyProof, (proofWords, publicInputs)), 1);
+        vm.prank(proposer);
+        vm.expectRevert(StateManager.InvalidProof.selector);
+        sm.finalize(proof, depositRoot, checkpointRoots, withdrawalRoot, 0, terminalCheckpointId, depositProof, withdrawalProof);
+        assertEq(sm.lastFinalizedCheckpointId(), 0);
+
+        vm.expectEmit(true, true, true, true, address(provider));
+        emit PsyAddressesProvider.AddressSet(provider.ZK_VERIFIER_ID(), address(oldVerifier), address(newVerifier));
+        vm.prank(owner);
+        provider.setZkVerifier(address(newVerifier));
+        assertEq(provider.getAddress(provider.ZK_VERIFIER_ID()), address(newVerifier));
+
+        vm.expectCall(
+            address(newVerifier),
+            abi.encodeCall(ExpectedFinalizeHashVerifier.verifyProof, (proofWords, publicInputs)),
+            1
+        );
+        vm.prank(proposer);
+        sm.finalize(proof, depositRoot, checkpointRoots, withdrawalRoot, 0, terminalCheckpointId, depositProof, withdrawalProof);
+        assertEq(sm.lastFinalizedCheckpointId(), terminalCheckpointId);
+    }
+
 }

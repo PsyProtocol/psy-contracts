@@ -119,7 +119,6 @@ maybeDescribe("fork governance upgrade and bridge rescue", function () {
       lastFinalizedCheckpointId: 0,
       lastVerifiedCheckpointRoot: hexZeroPad("0x01", 32),
     });
-    expect(await upgradedState.getRevision()).to.equal(2);
     expect(await upgradedState.checkpointTreeRootCheckpointId(hexZeroPad("0x01", 32))).to.equal(0n);
     expect(await upgradedState.lastFinalizedCheckpointId()).to.equal(0);
 

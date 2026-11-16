@@ -20,7 +20,7 @@ interface IZKVerifierProof {
 }
 
 contract StateManager is OwnableUpgradeable {
-    uint256 public constant VERSION = 2;
+    uint256 public constant VERSION = 3;
     uint64 public constant BRIDGE_USER_ID = 524288;
     bytes32 internal constant FORCE_SET_STATE_HASH_DOMAIN = keccak256("PSY_STATE_MANAGER_FORCE_SET_STATE_V1");
 
@@ -44,7 +44,6 @@ contract StateManager is OwnableUpgradeable {
     mapping(bytes32 => bool) public knownDepositSubtreeRoots;
     mapping(bytes32 => bool) public knownWithdrawalSubtreeRoots;
     mapping(bytes32 checkpointTreeRoot => uint64 checkpointId) public checkpointTreeRootCheckpointId;
-    bool public checkpointTreeRootsClean;
     event Finalized(
         uint64 indexed newLastFinalizedCheckpointId,
         bytes32 indexed newLastVerifiedCheckpointRoot,
@@ -74,10 +73,10 @@ contract StateManager is OwnableUpgradeable {
 
     error UnauthorizedStateManagerAdmin();
     error InvalidForceSetState();
-    error CheckpointTreeRootCleanupRequired();
     error InvalidCheckpointTreeRoot();
     error CheckpointTreeRootAlreadyRegistered();
     error UnexpectedCurrentState(bytes32 expectedStateHash, bytes32 actualStateHash);
+    error UnknownDepositSubtreeRoot();
     modifier onlyBridge() {
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         if (msg.sender != provider.getAddress(provider.BRIDGE_ID())) revert OnlyBridge();
@@ -114,7 +113,6 @@ contract StateManager is OwnableUpgradeable {
         l1ChainIndex = l1ChainIndex_;
         knownDepositSubtreeRoots[bytes32(0)] = true;
         knownWithdrawalSubtreeRoots[bytes32(0)] = true;
-        checkpointTreeRootsClean = true;
     }
 
     function getRevision() external pure virtual returns (uint256) {
@@ -150,7 +148,6 @@ contract StateManager is OwnableUpgradeable {
         lastVerifiedDepositTreeRoot = target.lastVerifiedDepositTreeRoot;
         lastVerifiedWithdrawalTreeRoot = target.lastVerifiedWithdrawalTreeRoot;
         withdrawalSubtreeRoot = target.withdrawalSubtreeRoot;
-        checkpointTreeRootsClean = false;
 
         emit ForceSetState(
             actualStateHash,
@@ -168,10 +165,6 @@ contract StateManager is OwnableUpgradeable {
             if (roots[i] == bytes32(0)) revert InvalidCheckpointTreeRoot();
             delete checkpointTreeRootCheckpointId[roots[i]];
         }
-    }
-
-    function setCheckpointTreeRootsClean(bool clean) external onlyStateManagerAdmin {
-        checkpointTreeRootsClean = clean;
     }
 
     function revokeKnownSubtreeRoots(
@@ -209,7 +202,7 @@ contract StateManager is OwnableUpgradeable {
         bytes32[9] calldata depositMerkleProof,
         bytes32[9] calldata withdrawalMerkleProof
     ) external onlyProposer {
-        if (!checkpointTreeRootsClean) revert CheckpointTreeRootCleanupRequired();
+        if (!knownDepositSubtreeRoots[depositMerkleProof[0]]) revert UnknownDepositSubtreeRoot();
         if (checkpointTreeRootCheckpointId[checkpointRoots[1]] != 0) revert CheckpointTreeRootAlreadyRegistered();
         IPsyAddressesProviderSM provider = IPsyAddressesProviderSM(addressesProvider);
         address zkVerifier = provider.getAddress(provider.ZK_VERIFIER_ID());
@@ -242,7 +235,6 @@ contract StateManager is OwnableUpgradeable {
             numCheckpointsAggregated
         );
 
-        knownDepositSubtreeRoots[depositMerkleProof[0]] = true;
         knownWithdrawalSubtreeRoots[withdrawalMerkleProof[0]] = true;
         lastVerifiedCheckpointRoot = checkpointRoots[1];
         checkpointTreeRootCheckpointId[checkpointRoots[1]] = newCheckpointId;
@@ -258,6 +250,10 @@ contract StateManager is OwnableUpgradeable {
             withdrawalTreeRoot
         );
     }
+    function registerDepositSubtreeRoot(bytes32 root) external onlyBridge {
+        knownDepositSubtreeRoots[root] = true;
+    }
+
 
     function _verifyTopTreeProof(bytes32 expectedRoot, bytes32[9] calldata proof, uint8 index) internal pure returns (bool) {
         if (expectedRoot == bytes32(0)) {

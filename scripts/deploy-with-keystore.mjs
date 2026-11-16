@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import { Wallet } from "ethers";
 
-const contractsDir = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const contractsDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function fail(message) {
   console.error(message);
@@ -28,19 +31,13 @@ if (directPrivateKey) {
     fail("Missing WALLET_PASSWORD.");
   }
   try {
-    privateKey = execFileSync(
-      "cast",
-      ["wallet", "private-key", "--keystore", keystorePath, "--password", walletPassword],
-      {
-        cwd: contractsDir,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    ).trim();
+    privateKey = Wallet.fromEncryptedJsonSync(
+      readFileSync(path.resolve(contractsDir, keystorePath), "utf8"),
+      walletPassword,
+    ).privateKey;
     fromKeystore = true;
-  } catch (error) {
-    const stderr = error instanceof Error && "stderr" in error ? String(error.stderr || "") : "";
-    fail(`Failed to unlock deploy keystore: ${stderr.trim() || String(error)}`);
+  } catch {
+    fail("Failed to unlock deploy keystore.");
   }
 }
 
@@ -57,7 +54,7 @@ delete env.PRIVATE_KEY;
 delete env.PSY_RELAYER_PRIVKEY;
 
 const args = process.argv.slice(2);
-const child = spawnSync("npx", ["hardhat", ...args], {
+const child = spawnSync("npx", ["--no-install", "hardhat", ...args], {
   cwd: contractsDir,
   env,
   stdio: "inherit",

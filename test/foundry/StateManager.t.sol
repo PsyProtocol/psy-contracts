@@ -86,7 +86,6 @@ contract StateManagerTest is Test {
         assertFalse(sm.knownWithdrawalSubtreeRoots(withdrawals[1]));
         assertTrue(sm.knownDepositSubtreeRoots(bytes32(0)));
         assertTrue(sm.knownWithdrawalSubtreeRoots(bytes32(0)));
-        assertTrue(sm.checkpointTreeRootsClean());
         vm.prank(owner);
         sm.revokeKnownSubtreeRoots(deposits, withdrawals);
         vm.prank(owner);

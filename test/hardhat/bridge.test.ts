@@ -1,7 +1,7 @@
 import { expect } from "chai";
 import { ethers, network } from "hardhat";
-import { configureFlowToken, deployCoreSystem } from "./helpers/deploySystem";
-import { buildWithdrawalBatchClaim, buildWithdrawalBatchClaimSingle, patchBatchCommit } from "./helpers/withdrawalClaim";
+import { configureFlowToken, deployCoreSystem, tokenSetHash } from "./helpers/deploySystem";
+import { buildWithdrawalBatchClaim, buildWithdrawalBatchClaimSingle, patchBatchCommit, withdrawalIdOf } from "./helpers/withdrawalClaim";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
@@ -33,7 +33,6 @@ const REASON = {
   CLAIMABLE_AT_OVERFLOW: 10,
 } as const;
 
-const nonceHex = (nonce: bigint) => ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
 
 async function setupBatchClaimFixture(amount: bigint) {
   const [owner, user] = await ethers.getSigners();
@@ -104,6 +103,7 @@ describe("Bridge", function () {
       amount,
       nonce,
       destinationChainIndex: 0,
+      tokenContractId: 1,
     });
 
     const before = await token.balanceOf(user.address);
@@ -113,7 +113,7 @@ describe("Bridge", function () {
 
     expect(await token.balanceOf(user.address)).to.equal(before);
 
-    const nullifier = ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32);
+    const nullifier = withdrawalIdOf({ recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
     expect(await bridge.claimedNullifiers(nullifier)).to.equal(true);
     expect((await bridge.pendingWithdrawals(nullifier)).amount).to.equal(amount);
     await bridge.claimPendingWithdrawal(nullifier);
@@ -151,6 +151,7 @@ describe("Bridge", function () {
       amount,
       nonce,
       destinationChainIndex: 0,
+      tokenContractId: 0,
       bridgeUserId: 1,
     });
 
@@ -192,7 +193,9 @@ describe("Bridge", function () {
       amount,
       nonce,
       destinationChainIndex: 0,
+      tokenContractId: 1,
     });
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
 
     await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.emit(bridge, "WithdrawalPendingCreated");
     const totalsBefore = await bridge.totalWithdrawalAmount(token.address);
@@ -205,13 +208,13 @@ describe("Bridge", function () {
     const receipt = await tx.wait();
     const failedEvents = (receipt.events ?? []).filter((e) => e.event === "WithdrawalClaimItemFailed");
     expect(failedEvents.length).to.equal(1);
-    expect(failedEvents[0].args?.nonce).to.equal(nonceHex(nonce));
+    expect(failedEvents[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(nonce));
     expect(Number(failedEvents[0].args?.slotIndex)).to.equal(0);
     expect(Number(failedEvents[0].args?.reason)).to.equal(REASON.NULLIFIER_ALREADY_CLAIMED);
     const createdEvents = (receipt.events ?? []).filter((e) => e.event === "WithdrawalPendingCreated");
     expect(createdEvents.length).to.equal(0, "the claimed nonce must not re-register");
 
-    const nullifier = nonceHex(nonce);
+    const nullifier = withdrawalIdForNonce(nonce);
     expect(await bridge.claimedNullifiers(nullifier)).to.equal(true);
     expect((await bridge.pendingWithdrawals(nullifier)).amount).to.equal(amount);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(totalsBefore);
@@ -249,7 +252,9 @@ describe("Bridge", function () {
       amount,
       nonce,
       destinationChainIndex,
+      tokenContractId: 0,
     });
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount, nonce, destinationChainIndex, tokenContractId: 0 });
 
     const [failedSlots, reasons] = await bridge.callStatic.batchClaimWithdrawal(proof, publicInputs, slotData);
     expect(failedSlots.map((v) => Number(v))).to.deep.equal([0]);
@@ -257,9 +262,9 @@ describe("Bridge", function () {
 
     await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData))
       .to.emit(bridge, "WithdrawalClaimItemFailed")
-      .withArgs(nonceHex(nonce), 0, REASON.WRONG_DESTINATION_CHAIN);
-    expect(await bridge.claimedNullifiers(nonceHex(nonce))).to.equal(false);
-    expect((await bridge.pendingWithdrawals(nonceHex(nonce))).amount).to.equal(0);
+      .withArgs(withdrawalIdForNonce(nonce), 0, REASON.WRONG_DESTINATION_CHAIN);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(nonce))).to.equal(false);
+    expect((await bridge.pendingWithdrawals(withdrawalIdForNonce(nonce))).amount).to.equal(0);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
   });
 
@@ -293,6 +298,7 @@ describe("Bridge", function () {
       amount,
       nonce,
       destinationChainIndex: 0,
+      tokenContractId: 0,
     });
 
     await expect(bridge.batchClaimWithdrawal(proof, publicInputs, slotData)).to.be.revertedWithCustomError(
@@ -314,20 +320,21 @@ describe("Bridge", function () {
     const claimedNonce = 11n;
     const freshNonce = 12n;
     const proof = new Array(8).fill(0n);
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
 
     const first = buildWithdrawalBatchClaim({
       withdrawalRoot,
-      items: [{ recipient: user.address, token: token.address, amount, nonce: claimedNonce, destinationChainIndex: 0 }],
+      items: [{ recipient: user.address, token: token.address, amount, nonce: claimedNonce, destinationChainIndex: 0, tokenContractId: 1 }],
     });
     await bridge.batchClaimWithdrawal(proof, first.publicInputs, first.slotData);
-    const claimedPending = await bridge.pendingWithdrawals(nonceHex(claimedNonce));
+    const claimedPending = await bridge.pendingWithdrawals(withdrawalIdForNonce(claimedNonce));
     const totalsBefore = await bridge.totalWithdrawalAmount(token.address);
 
     const second = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount, nonce: claimedNonce, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: freshNonce, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount, nonce: claimedNonce, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount, nonce: freshNonce, destinationChainIndex: 0, tokenContractId: 1 },
       ],
     });
     const [failedSlots, reasons] = await bridge.connect(user).callStatic.batchClaimWithdrawal(proof, second.publicInputs, second.slotData);
@@ -339,15 +346,15 @@ describe("Bridge", function () {
     const events = receipt.events ?? [];
     const failed = events.filter((e) => e.event === "WithdrawalClaimItemFailed");
     expect(failed.length).to.equal(1);
-    expect(failed[0].args?.nonce).to.equal(nonceHex(claimedNonce));
+    expect(failed[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(claimedNonce));
     expect(Number(failed[0].args?.slotIndex)).to.equal(0);
     const created = events.filter((e) => e.event === "WithdrawalPendingCreated");
     expect(created.length).to.equal(1);
-    expect(created[0].args?.nonce).to.equal(nonceHex(freshNonce));
+    expect(created[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(freshNonce));
 
-    expect(await bridge.claimedNullifiers(nonceHex(claimedNonce))).to.equal(true);
-    expect(await bridge.claimedNullifiers(nonceHex(freshNonce))).to.equal(true);
-    const claimedAfter = await bridge.pendingWithdrawals(nonceHex(claimedNonce));
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(claimedNonce))).to.equal(true);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(freshNonce))).to.equal(true);
+    const claimedAfter = await bridge.pendingWithdrawals(withdrawalIdForNonce(claimedNonce));
     expect(claimedAfter.amount).to.equal(claimedPending.amount);
     expect(claimedAfter.claimableAt).to.equal(claimedPending.claimableAt);
     expect(Number(await bridge.totalWithdrawalAmount(token.address))).to.equal(Number(totalsBefore) + Number(amount));
@@ -359,13 +366,14 @@ describe("Bridge", function () {
     const nonce = 21n;
     const otherNonce = 22n;
     const proof = new Array(8).fill(0n);
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: otherNonce, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount, nonce: otherNonce, destinationChainIndex: 0, tokenContractId: 1 },
       ],
     });
 
@@ -378,14 +386,14 @@ describe("Bridge", function () {
     const events = receipt.events ?? [];
     const created = events.filter((e) => e.event === "WithdrawalPendingCreated");
     expect(created.length).to.equal(2, "one per distinct nonce");
-    expect(created.map((e) => e.args?.nonce)).to.deep.equal([nonceHex(nonce), nonceHex(otherNonce)]);
+    expect(created.map((e) => e.args?.withdrawalId)).to.deep.equal([withdrawalIdForNonce(nonce), withdrawalIdForNonce(otherNonce)]);
     const failed = events.filter((e) => e.event === "WithdrawalClaimItemFailed");
     expect(failed.length).to.equal(1);
-    expect(failed[0].args?.nonce).to.equal(nonceHex(nonce), "same nonce may appear in both event kinds");
+    expect(failed[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(nonce), "same nonce may appear in both event kinds");
     expect(Number(failed[0].args?.slotIndex)).to.equal(1, "slot index disambiguates the duplicate");
 
-    expect(await bridge.claimedNullifiers(nonceHex(nonce))).to.equal(true);
-    expect(await bridge.claimedNullifiers(nonceHex(otherNonce))).to.equal(true);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(nonce))).to.equal(true);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(otherNonce))).to.equal(true);
     expect(Number(await bridge.totalWithdrawalAmount(token.address))).to.equal(Number(amount) * 2);
   });
 
@@ -400,17 +408,14 @@ describe("Bridge", function () {
     const chainIndex = Number(await sm.l1ChainIndex());
     const proof = new Array(8).fill(0n);
 
-    const { publicInputs, slotData } = buildWithdrawalBatchClaim({
-      withdrawalRoot,
-      items: [
-        { recipient: ethers.constants.AddressZero, token: token.address, amount, nonce: 31n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount: 0n, nonce: 32n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: 33n, destinationChainIndex: chainIndex + 1 },
-        { recipient: user.address, token: unconfigured.address, amount, nonce: 34n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: 35n, destinationChainIndex: 0 },
-      ],
-    });
-    slotData[4 * 34 + 1] = 1n;
+    const items = [
+      { recipient: ethers.constants.AddressZero, token: token.address, amount, nonce: 31n, destinationChainIndex: 0, tokenContractId: 1 },
+      { recipient: user.address, token: token.address, amount: 0n, nonce: 32n, destinationChainIndex: 0, tokenContractId: 1 },
+      { recipient: user.address, token: token.address, amount, nonce: 33n, destinationChainIndex: chainIndex + 1, tokenContractId: 1 },
+      { recipient: user.address, token: unconfigured.address, amount, nonce: 34n, destinationChainIndex: 0, tokenContractId: 2 },
+      { recipient: ethers.utils.hexZeroPad(user.address, 32).replace(/^0x00000000/, "0x00000001"), token: token.address, amount, nonce: 35n, destinationChainIndex: 0, tokenContractId: 1 },
+    ];
+    const { publicInputs, slotData } = buildWithdrawalBatchClaim({ withdrawalRoot, items });
     patchBatchCommit(publicInputs, slotData);
 
     const [failedSlots, reasons] = await bridge.connect(user).callStatic.batchClaimWithdrawal(proof, publicInputs, slotData);
@@ -430,12 +435,12 @@ describe("Bridge", function () {
     expect(Number(summary?.args?.succeededCount)).to.equal(0);
     expect(Number(summary?.args?.failedCount)).to.equal(5);
 
-    for (let index = 31; index <= 35; index++) {
-      expect(await bridge.claimedNullifiers(nonceHex(BigInt(index)))).to.equal(false);
+    for (const item of items) {
+      expect(await bridge.claimedNullifiers(withdrawalIdOf(item))).to.equal(false);
     }
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
     expect(await bridge.totalWithdrawalAmount(unconfigured.address)).to.equal(0);
-    expect((await bridge.pendingWithdrawals(nonceHex(31n))).amount).to.equal(0);
+    expect((await bridge.pendingWithdrawals(withdrawalIdOf(items[0]))).amount).to.equal(0);
   });
 
   it("skips paused token slot with reason 7 and settles other token", async function () {
@@ -449,14 +454,15 @@ describe("Bridge", function () {
     await tokenB.mint(bridge.address, 1000n);
     const amount = 150n;
     const proof = new Array(8).fill(0n);
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: nonce === 42n ? tokenB.address : token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: nonce === 42n ? 2 : 1 });
 
     await bridge.setTokenPauseFlags(token.address, 2);
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount, nonce: 41n, destinationChainIndex: 0 },
-        { recipient: user.address, token: tokenB.address, amount, nonce: 42n, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount, nonce: 41n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: tokenB.address, amount, nonce: 42n, destinationChainIndex: 0, tokenContractId: 2 },
       ],
     });
 
@@ -469,16 +475,16 @@ describe("Bridge", function () {
     const pausedEvents = pausedReceipt.events ?? [];
     const pausedFailed = pausedEvents.filter((e) => e.event === "WithdrawalClaimItemFailed");
     expect(pausedFailed.length).to.equal(1);
-    expect(pausedFailed[0].args?.nonce).to.equal(nonceHex(41n));
+    expect(pausedFailed[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(41n));
     expect(Number(pausedFailed[0].args?.slotIndex)).to.equal(0);
     expect(Number(pausedFailed[0].args?.reason)).to.equal(REASON.REGISTRATION_PAUSED);
     const created = pausedEvents.filter((e) => e.event === "WithdrawalPendingCreated");
     expect(created.length).to.equal(1);
-    expect(created[0].args?.nonce).to.equal(nonceHex(42n));
+    expect(created[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(42n));
 
-    expect(await bridge.claimedNullifiers(nonceHex(41n))).to.equal(false);
-    expect(await bridge.claimedNullifiers(nonceHex(42n))).to.equal(true);
-    expect((await bridge.pendingWithdrawals(nonceHex(42n))).token).to.equal(tokenB.address);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(41n))).to.equal(false);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(42n))).to.equal(true);
+    expect((await bridge.pendingWithdrawals(withdrawalIdForNonce(42n))).token).to.equal(tokenB.address);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
     expect(await bridge.totalWithdrawalAmount(tokenB.address)).to.equal(amount);
   });
@@ -487,10 +493,11 @@ describe("Bridge", function () {
     const { user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(1000n);
     const amount = 100n;
     const proof = new Array(8).fill(0n);
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ senderUserId: 1, recipient: user.address, token: token.address, amount, nonce, destinationChainIndex: 0, tokenContractId: 1 });
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
-      items: [{ recipient: user.address, token: token.address, amount, nonce: 51n, destinationChainIndex: 0 }],
+      items: [{ recipient: user.address, token: token.address, amount, nonce: 51n, destinationChainIndex: 0, tokenContractId: 1 }],
     });
     slotData[0] = slotData[0] + 1n;
 
@@ -498,8 +505,8 @@ describe("Bridge", function () {
       bridge,
       "InvalidWithdrawalProof"
     );
-    expect(await bridge.claimedNullifiers(nonceHex(51n))).to.equal(false);
-    expect((await bridge.pendingWithdrawals(nonceHex(51n))).amount).to.equal(0);
+    expect(await bridge.claimedNullifiers(withdrawalIdForNonce(51n))).to.equal(false);
+    expect((await bridge.pendingWithdrawals(withdrawalIdForNonce(51n))).amount).to.equal(0);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
   });
 
@@ -508,14 +515,15 @@ describe("Bridge", function () {
     const amount = 120n;
     const chainIndex = Number(await sm.l1ChainIndex());
     const proof = new Array(8).fill(0n);
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount: nonce === 62n ? 0n : amount, nonce, destinationChainIndex: nonce === 64n ? chainIndex + 1 : 0, tokenContractId: 1 });
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount, nonce: 61n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount: 0n, nonce: 62n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: 63n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount, nonce: 64n, destinationChainIndex: chainIndex + 1 },
+        { recipient: user.address, token: token.address, amount, nonce: 61n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount: 0n, nonce: 62n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount, nonce: 63n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount, nonce: 64n, destinationChainIndex: chainIndex + 1, tokenContractId: 1 },
       ],
     });
 
@@ -535,12 +543,12 @@ describe("Bridge", function () {
       "WithdrawalClaimItemFailed",
       "WithdrawalClaimBatchResult",
     ]);
-    expect(named[0].args?.nonce).to.equal(nonceHex(61n));
-    expect(named[1].args?.nonce).to.equal(nonceHex(62n));
+    expect(named[0].args?.withdrawalId).to.equal(withdrawalIdForNonce(61n));
+    expect(named[1].args?.withdrawalId).to.equal(withdrawalIdForNonce(62n));
     expect(Number(named[1].args?.slotIndex)).to.equal(1);
     expect(Number(named[1].args?.reason)).to.equal(REASON.ZERO_AMOUNT);
-    expect(named[2].args?.nonce).to.equal(nonceHex(63n));
-    expect(named[3].args?.nonce).to.equal(nonceHex(64n));
+    expect(named[2].args?.withdrawalId).to.equal(withdrawalIdForNonce(63n));
+    expect(named[3].args?.withdrawalId).to.equal(withdrawalIdForNonce(64n));
     expect(Number(named[3].args?.slotIndex)).to.equal(3);
     expect(Number(named[3].args?.reason)).to.equal(REASON.WRONG_DESTINATION_CHAIN);
     expect(named[4].args?.batchCommit).to.equal(commitHexOf(publicInputs));
@@ -550,16 +558,22 @@ describe("Bridge", function () {
   });
 
   it("registers and pays amounts at and above the Goldilocks bound", async function () {
-    const { user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(GOLDILOCKS_PRIME * 2n + (1n << 100n));
+    const { owner, user, bridge, token, withdrawalRoot } = await setupBatchClaimFixture(GOLDILOCKS_PRIME * 2n + (1n << 100n));
     const proof = new Array(8).fill(0n);
     const amounts = [GOLDILOCKS_PRIME - 1n, GOLDILOCKS_PRIME, 1n << 100n];
+    const withdrawalIdForNonce = (nonce: bigint) => withdrawalIdOf({ recipient: user.address, token: token.address, amount: amounts[Number(nonce - 71n)], nonce, destinationChainIndex: 0, tokenContractId: 1 });
+    const timelock = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(owner.address, 1, 100, 1, 100);
+    await timelock.deployed();
+    await bridge.initializeWithdrawalTotals(
+      [token.address], [await bridge.getTokenFlowConfig(token.address)], [0], tokenSetHash([token.address]), timelock.address,
+    );
 
     const { publicInputs, slotData } = buildWithdrawalBatchClaim({
       withdrawalRoot,
       items: [
-        { recipient: user.address, token: token.address, amount: amounts[0], nonce: 71n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount: amounts[1], nonce: 72n, destinationChainIndex: 0 },
-        { recipient: user.address, token: token.address, amount: amounts[2], nonce: 73n, destinationChainIndex: 0 },
+        { recipient: user.address, token: token.address, amount: amounts[0], nonce: 71n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount: amounts[1], nonce: 72n, destinationChainIndex: 0, tokenContractId: 1 },
+        { recipient: user.address, token: token.address, amount: amounts[2], nonce: 73n, destinationChainIndex: 0, tokenContractId: 1 },
       ],
     });
 
@@ -574,23 +588,25 @@ describe("Bridge", function () {
     const amountCreated = amountEvents.filter((e) => e.event === "WithdrawalPendingCreated");
     expect(amountCreated.length).to.equal(3);
 
-    // Funded custody above pays every full-uint256 withdrawal once its
-    // classification delay elapses. All three were registered in one block,
-    // so they share one claimable timestamp: warp to it once and settle.
+    // Funded custody pays every full-uint256 withdrawal through governance
+    // after its stored classification delay elapses.
     let paid = 0n;
     let maxClaimableAt = 0n;
     for (const [index, amount] of amounts.entries()) {
       const nonce = 71n + BigInt(index);
-      expect(await bridge.claimedNullifiers(nonceHex(nonce))).to.equal(true);
-      const [, pendingRecipient, pendingAmount, claimableAt] = await bridge.pendingWithdrawals(nonceHex(nonce));
+      expect(await bridge.claimedNullifiers(withdrawalIdForNonce(nonce))).to.equal(true);
+      const [, pendingRecipient, pendingAmount, claimableAt] = await bridge.pendingWithdrawals(withdrawalIdForNonce(nonce));
       expect(pendingRecipient).to.equal(user.address);
       expect(pendingAmount).to.equal(amount);
       if (claimableAt > maxClaimableAt) maxClaimableAt = claimableAt;
     }
-    await network.provider.send("evm_setNextBlockTimestamp", [Number(maxClaimableAt)]);
     for (const [index, amount] of amounts.entries()) {
       const nonce = 71n + BigInt(index);
-      await bridge.connect(user).claimPendingWithdrawal(nonceHex(nonce));
+      const data = bridge.interface.encodeFunctionData("forceClaimWithdrawal", [withdrawalIdForNonce(nonce)]);
+      const executionTime = Math.max(Number(maxClaimableAt), (await ethers.provider.getBlock("latest")).timestamp + 2);
+      await timelock.queueTransaction(bridge.address, 0, "", data, executionTime);
+      await network.provider.send("evm_setNextBlockTimestamp", [executionTime]);
+      await timelock.executeTransaction(bridge.address, 0, "", data, executionTime);
       paid += amount;
       expect(await token.balanceOf(user.address)).to.equal(paid);
     }

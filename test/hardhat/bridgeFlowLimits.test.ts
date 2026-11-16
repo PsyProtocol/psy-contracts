@@ -8,7 +8,7 @@ import {
   tokenSetHash,
 } from "./helpers/deploySystem";
 import { DUMMY_GNARK_PROOF } from "./helpers/mockProof";
-import { buildWithdrawalBatchClaim, buildWithdrawalBatchClaimSingle } from "./helpers/withdrawalClaim";
+import { buildWithdrawalBatchClaim, buildWithdrawalBatchClaimSingle, withdrawalIdOf } from "./helpers/withdrawalClaim";
 
 function mkTopProof(leaf: string, index: number): { proof: string[]; root: string } {
   const proof = new Array(9).fill(ethers.constants.HashZero);
@@ -36,6 +36,7 @@ async function prepareWithdrawal(params: {
   token: string;
   amount: bigint;
   nonce: bigint;
+  tokenContractId: number;
 }) {
   const { stateManager, recipient, token, amount, nonce } = params;
   const deposit = mkTopProof(await stateManager.withdrawalSubtreeRoot(), 0);
@@ -62,11 +63,12 @@ async function prepareWithdrawal(params: {
     amount,
     nonce,
     destinationChainIndex: 0,
+    tokenContractId: params.tokenContractId,
   });
   return {
     publicInputs: calldata.publicInputs,
     slotData: calldata.slotData,
-    nonceHex: ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32),
+    withdrawalId: withdrawalIdOf({ recipient, token, amount, nonce, destinationChainIndex: 0, tokenContractId: params.tokenContractId }),
   };
 }
 
@@ -77,11 +79,12 @@ async function registerWithdrawal(params: {
   token: string;
   amount: bigint;
   nonce: bigint;
+  tokenContractId: number;
 }) {
   const { bridge } = params;
-  const { publicInputs, slotData, nonceHex } = await prepareWithdrawal(params);
+  const { publicInputs, slotData, withdrawalId } = await prepareWithdrawal(params);
   await bridge.batchClaimWithdrawal(new Array(8).fill(0n), publicInputs, slotData);
-  return nonceHex;
+  return withdrawalId;
 }
 
 describe("Bridge per-token flow limits", function () {
@@ -94,8 +97,8 @@ describe("Bridge per-token flow limits", function () {
     await tokenA.deployed();
     await tokenB.deployed();
 
-    for (const token of [tokenA, tokenB]) {
-      await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    for (const [index, token] of [tokenA, tokenB].entries()) {
+      await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(ethers.utils.hexlify(index + 1), 32));
       await configureFlowToken(bridge, token.address, {
         minDepositAmount: 100,
         depositCap: 500,
@@ -141,7 +144,7 @@ describe("Bridge per-token flow limits", function () {
     const factory = await ethers.getContractFactory("MockFeeOnTransferERC20");
     const token = await factory.deploy();
     await token.deployed();
-    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     await configureFlowToken(bridge, token.address);
     await token.mint(user.address, 1_000);
     await token.connect(user).approve(erc20Gateway.address, 1_000);
@@ -155,15 +158,16 @@ describe("Bridge per-token flow limits", function () {
 
   it("uses exact 50k/100k default boundaries and keeps the 10^12-token cap within uint128", async function () {
     const [owner, recipient] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager, router } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
+    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     await configureFlowToken(bridge, token.address, localFlowLimitConfig(6));
     const quantities = [49_999_999_999n, 50_000_000_000n, 99_999_999_999n, 100_000_000_000n];
     await token.mint(bridge.address, quantities[0]);
     for (let index = 0; index < quantities.length; index++) {
       const nonce = await registerWithdrawal({ bridge, stateManager, recipient: recipient.address,
-        token: token.address, amount: quantities[index], nonce: BigInt(0xe1 + index) });
+        token: token.address, tokenContractId: 1, amount: quantities[index], nonce: BigInt(0xe1 + index) });
       const pending = await bridge.pendingWithdrawals(nonce);
       expect(pending.amount).to.equal(index === 0 ? 0 : quantities[index]);
       expect(await bridge.withdrawalRequiresGovernance(nonce)).to.equal(index === 3);
@@ -178,26 +182,27 @@ describe("Bridge per-token flow limits", function () {
 
   it("pays small withdrawals directly and unlocks medium claims only after their stored delay", async function () {
     const [owner, recipient] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager, router } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
+    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     await configureFlowToken(bridge, token.address, {
       smallWithdrawalMax: 50_000, mediumWithdrawalMax: 100_000, totalWithdrawalCap: 1_000_000,
       mediumWithdrawalDelay: 3600, largeWithdrawalDelay: 604800,
     });
     await token.mint(bridge.address, 200_001);
     const small = await registerWithdrawal({ bridge, stateManager, recipient: recipient.address,
-      token: token.address, amount: 50_000n, nonce: 0xb1n });
+      token: token.address, tokenContractId: 1, amount: 50_000n, nonce: 0xb1n });
     expect(await token.balanceOf(recipient.address)).to.equal(50_000);
     expect((await bridge.pendingWithdrawals(small)).amount).to.equal(0);
     expect(await bridge.claimedNullifiers(small)).to.equal(true);
     const prepared = buildWithdrawalBatchClaimSingle({ withdrawalRoot: await stateManager.withdrawalSubtreeRoot(),
-      recipient: recipient.address, token: token.address, amount: 50_000n, nonce: 0xb1n, destinationChainIndex: 0 });
+      recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 50_000n, nonce: 0xb1n, destinationChainIndex: 0 });
     await expect(bridge.batchClaimWithdrawal(new Array(8).fill(0n), prepared.publicInputs, prepared.slotData))
       .to.emit(bridge, "WithdrawalClaimItemFailed").withArgs(small, 0, 5);
     expect(await token.balanceOf(recipient.address)).to.equal(50_000);
     const medium = await registerWithdrawal({ bridge, stateManager, recipient: recipient.address,
-      token: token.address, amount: 50_001n, nonce: 0xb2n });
+      token: token.address, tokenContractId: 1, amount: 50_001n, nonce: 0xb2n });
     const pending = await bridge.pendingWithdrawals(medium);
     expect(pending.claimableAt).to.equal((await ethers.provider.getBlock("latest")).timestamp + 3600);
     expect(await bridge.withdrawalRequiresGovernance(medium)).to.equal(false);
@@ -211,21 +216,22 @@ describe("Bridge per-token flow limits", function () {
 
   it("applies the cap to each slot in order and governs the crossing slot and every later slot", async function () {
     const [owner, recipient] = await ethers.getSigners();
-    const { bridge, stateManager } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager, router } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
+    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     await configureFlowToken(bridge, token.address, { smallWithdrawalMax: 100, mediumWithdrawalMax: 200,
       totalWithdrawalCap: 100, mediumWithdrawalDelay: 3600, largeWithdrawalDelay: 604800 });
     await token.mint(bridge.address, 121);
-    await prepareWithdrawal({ bridge, stateManager, recipient: recipient.address, token: token.address, amount: 60n, nonce: 0xc1n });
+    await prepareWithdrawal({ bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 60n, nonce: 0xc1n });
     const batch = buildWithdrawalBatchClaim({ withdrawalRoot: await stateManager.withdrawalSubtreeRoot(),
       items: [60n, 60n, 1n].map((amount, index) => ({ recipient: recipient.address, token: token.address,
-        amount, nonce: BigInt(0xc1 + index), destinationChainIndex: 0 })) });
+        amount, nonce: BigInt(0xc1 + index), destinationChainIndex: 0, tokenContractId: 1 })) });
     await bridge.batchClaimWithdrawal(new Array(8).fill(0n), batch.publicInputs, batch.slotData);
     expect(await token.balanceOf(recipient.address)).to.equal(60);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(121);
     for (const nonce of ["0xc2", "0xc3"]) {
-      const key = ethers.utils.hexZeroPad(nonce, 32);
+      const key = withdrawalIdOf({ recipient: recipient.address, token: token.address, amount: nonce === "0xc2" ? 60n : 1n, nonce: BigInt(nonce), destinationChainIndex: 0, tokenContractId: 1 });
       expect(await bridge.withdrawalRequiresGovernance(key)).to.equal(true);
       expect((await bridge.pendingWithdrawals(key)).claimableAt)
         .to.equal((await ethers.provider.getBlock("latest")).timestamp + 604800);
@@ -234,17 +240,18 @@ describe("Bridge per-token flow limits", function () {
 
   it("blocks all withdrawal callbacks while a small native payout is executing", async function () {
     const [owner, recipient] = await ethers.getSigners();
-    const { bridge, stateManager, weth } = await deployCoreSystem(owner.address, owner.address);
+    const { bridge, stateManager, weth, router } = await deployCoreSystem(owner.address, owner.address);
     await configureFlowToken(bridge, ethers.constants.AddressZero, { smallWithdrawalMax: 100, mediumWithdrawalMax: 200,
       totalWithdrawalCap: 1000, mediumWithdrawalDelay: 0 });
+    await router.setTokenMapping(ethers.constants.AddressZero, ethers.utils.hexZeroPad("0x01", 32));
     await weth.deposit({ value: 210 });
     await weth.transfer(bridge.address, 210);
     const medium = await registerWithdrawal({ bridge, stateManager, recipient: recipient.address,
-      token: ethers.constants.AddressZero, amount: 150n, nonce: 0xd1n });
+      token: ethers.constants.AddressZero, tokenContractId: 1, amount: 150n, nonce: 0xd1n });
     const callback = await (await ethers.getContractFactory("ReentrantWithdrawalRecipient")).deploy(bridge.address, medium);
     await callback.deployed();
     const prepared = await prepareWithdrawal({ bridge, stateManager, recipient: callback.address,
-      token: ethers.constants.AddressZero, amount: 60n, nonce: 0xd2n });
+      token: ethers.constants.AddressZero, tokenContractId: 1, amount: 60n, nonce: 0xd2n });
     await callback.setBatchCallData(bridge.interface.encodeFunctionData("batchClaimWithdrawal", [
       new Array(8).fill(0n), prepared.publicInputs, prepared.slotData]));
     await bridge.batchClaimWithdrawal(new Array(8).fill(0n), prepared.publicInputs, prepared.slotData);
@@ -270,24 +277,24 @@ describe("Bridge per-token flow limits", function () {
       mediumWithdrawalDelay: 0,
       largeWithdrawalDelay: 3_600,
     });
-    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     await token.mint(bridge.address, 601);
 
     const firstNonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: token.address, amount: 300n, nonce: 9001n,
+      bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 300n, nonce: 9001n,
     });
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(300);
     await bridge.connect(keeper).claimPendingWithdrawal(firstNonce);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(300);
 
     const secondNonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: token.address, amount: 200n, nonce: 9002n,
+      bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 200n, nonce: 9002n,
     });
     expect((await bridge.pendingWithdrawals(secondNonce)).amount).to.equal(200);
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(500);
 
     const crossingNonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: token.address, amount: 1n, nonce: 9003n,
+      bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 1n, nonce: 9003n,
     });
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(501);
     expect((await bridge.pendingWithdrawals(crossingNonce)).claimableAt).to.be.gt(
@@ -300,7 +307,7 @@ describe("Bridge per-token flow limits", function () {
     const { bridge, stateManager, router } = await deployCoreSystem(owner.address, owner.address);
     const token = await (await ethers.getContractFactory("MockERC20")).deploy("Token", "TOK");
     await token.deployed();
-    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
     const config = await configureFlowToken(bridge, token.address, {
       smallWithdrawalMax: 10,
       mediumWithdrawalMax: 20,
@@ -318,7 +325,7 @@ describe("Bridge per-token flow limits", function () {
     expect(await bridge.withdrawalTotalsTokenSetHash()).to.equal(tokenSetHash([token.address]));
     await token.mint(bridge.address, 30);
     const nonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: token.address, amount: 30n, nonce: 0xa1n,
+      bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount: 30n, nonce: 0xa1n,
     });
 
     for (const caller of [owner, other]) {
@@ -362,7 +369,7 @@ describe("Bridge per-token flow limits", function () {
     const tokenB = await factory.deploy("Token B", "B");
     await tokenA.deployed();
     await tokenB.deployed();
-    for (const token of [tokenA, tokenB]) {
+    for (const [index, token] of [tokenA, tokenB].entries()) {
       await token.mint(bridge.address, 1000);
       await configureFlowToken(bridge, token.address, {
         smallWithdrawalMax: 100,
@@ -372,25 +379,25 @@ describe("Bridge per-token flow limits", function () {
         mediumWithdrawalDelay: 0,
         largeWithdrawalDelay: 3_600,
       });
-      await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+      await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad(ethers.utils.hexlify(index + 1), 32));
     }
 
     await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: tokenA.address, amount: 100n, nonce: 0x11n,
+      bridge, stateManager, recipient: recipient.address, token: tokenA.address, tokenContractId: 1, amount: 100n, nonce: 0x11n,
     });
     const atCap = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: tokenA.address, amount: 100n, nonce: 0x22n,
+      bridge, stateManager, recipient: recipient.address, token: tokenA.address, tokenContractId: 1, amount: 100n, nonce: 0x22n,
     });
     expect((await bridge.pendingWithdrawals(atCap)).amount).to.equal(0);
     expect(await tokenA.balanceOf(recipient.address)).to.equal(200);
     const crossingNonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: tokenA.address, amount: 1n, nonce: 0x33n,
+      bridge, stateManager, recipient: recipient.address, token: tokenA.address, tokenContractId: 1, amount: 1n, nonce: 0x33n,
     });
     expect((await bridge.pendingWithdrawals(crossingNonce)).claimableAt).to.be.gt(
       (await ethers.provider.getBlock("latest")).timestamp,
     );
     const tokenBNonce = await registerWithdrawal({
-      bridge, stateManager, recipient: recipient.address, token: tokenB.address, amount: 1n, nonce: 0x44n,
+      bridge, stateManager, recipient: recipient.address, token: tokenB.address, tokenContractId: 2, amount: 1n, nonce: 0x44n,
     });
     expect((await bridge.pendingWithdrawals(tokenBNonce)).amount).to.equal(0);
     expect(await tokenB.balanceOf(recipient.address)).to.equal(1);
@@ -454,13 +461,13 @@ describe("Bridge per-token flow limits", function () {
     const nonce = 0x77n;
     const calldata = buildWithdrawalBatchClaimSingle({
       withdrawalRoot: withdrawal.proof[0], recipient: recipient.address, token: token.address,
-      amount: 123n, nonce, destinationChainIndex: 0,
+      amount: 123n, nonce, destinationChainIndex: 0, tokenContractId: 0,
     });
     calldata.publicInputs[10] ^= 1n;
     await expect(bridge.batchClaimWithdrawal(new Array(8).fill(0n), calldata.publicInputs, calldata.slotData))
       .to.be.revertedWithCustomError(bridge, "InvalidWithdrawalProof");
     expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(0);
-    expect(await bridge.claimedNullifiers(ethers.utils.hexZeroPad(`0x${nonce.toString(16)}`, 32))).to.equal(false);
+    expect(await bridge.claimedNullifiers(withdrawalIdOf({ recipient: recipient.address, token: token.address, amount: 123n, nonce, destinationChainIndex: 0, tokenContractId: 0 }))).to.equal(false);
   });
 
 
@@ -475,40 +482,48 @@ describe("Bridge per-token flow limits", function () {
       mediumWithdrawalMax: 10,
       totalWithdrawalCap: 10,
     });
-    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    await router.connect(owner).setTokenMapping(token.address, ethers.utils.hexZeroPad("0x01", 32));
+    const timelock = await (await ethers.getContractFactory("ExecutorWithTimelock")).deploy(owner.address, 1, 100, 1, 100);
+    await timelock.deployed();
+    await bridge.initializeWithdrawalTotals(
+      [token.address], [await bridge.getTokenFlowConfig(token.address)], [0], tokenSetHash([token.address]), timelock.address,
+    );
 
     // Amounts at and above the Goldilocks prime, and beyond 2^64, register:
     // the withdrawal slot carries the full uint256, so reason 8 is only the
     // zero-amount classification.
     const amounts = [GOLDILOCKS_PRIME - 1n, GOLDILOCKS_PRIME, GOLDILOCKS_PRIME + 1n, 1n << 100n];
     let expectedTotal = 0n;
-    const nonceHexes: string[] = [];
+    const withdrawalIds: string[] = [];
     for (const amount of amounts) {
-      const nonce = 0x90n + BigInt(nonceHexes.length);
-      const { publicInputs, slotData, nonceHex } = await prepareWithdrawal({
-        bridge, stateManager, recipient: recipient.address, token: token.address, amount, nonce,
+      const nonce = 0x90n + BigInt(withdrawalIds.length);
+      const { publicInputs, slotData, withdrawalId } = await prepareWithdrawal({
+        bridge, stateManager, recipient: recipient.address, token: token.address, tokenContractId: 1, amount, nonce,
       });
       await bridge.batchClaimWithdrawal(new Array(8).fill(0n), publicInputs, slotData);
-      expect(await bridge.claimedNullifiers(nonceHex)).to.equal(true);
+      expect(await bridge.claimedNullifiers(withdrawalId)).to.equal(true);
       expectedTotal += amount;
       expect(await bridge.totalWithdrawalAmount(token.address)).to.equal(expectedTotal);
-      const [, pendingRecipient, pendingAmount] = await bridge.pendingWithdrawals(nonceHex);
+      const [, pendingRecipient, pendingAmount] = await bridge.pendingWithdrawals(withdrawalId);
       expect(pendingRecipient).to.equal(recipient.address);
       expect(pendingAmount).to.equal(amount);
-      nonceHexes.push(nonceHex);
+      withdrawalIds.push(withdrawalId);
     }
 
     // Pay out: fund custody, wait out the classification delay, claim each.
     await token.mint(bridge.address, expectedTotal);
     let paid = 0n;
     for (const [index, amount] of amounts.entries()) {
-      const nonceHex = nonceHexes[index];
-      const claimableAt: bigint = (await bridge.pendingWithdrawals(nonceHex))[3];
-      await network.provider.send("evm_setNextBlockTimestamp", [Number(claimableAt)]);
-      await bridge.connect(recipient).claimPendingWithdrawal(nonceHex);
+      const withdrawalId = withdrawalIds[index];
+      const claimableAt: bigint = (await bridge.pendingWithdrawals(withdrawalId))[3];
+      const data = bridge.interface.encodeFunctionData("forceClaimWithdrawal", [withdrawalId]);
+      const executionTime = Math.max(Number(claimableAt), (await ethers.provider.getBlock("latest")).timestamp + 2);
+      await timelock.queueTransaction(bridge.address, 0, "", data, executionTime);
+      await network.provider.send("evm_setNextBlockTimestamp", [executionTime]);
+      await timelock.executeTransaction(bridge.address, 0, "", data, executionTime);
       paid += amount;
       expect(await token.balanceOf(recipient.address)).to.equal(paid);
-      const [, , pendingAmount] = await bridge.pendingWithdrawals(nonceHex);
+      const [, , pendingAmount] = await bridge.pendingWithdrawals(withdrawalId);
       expect(pendingAmount).to.equal(0);
     }
   });

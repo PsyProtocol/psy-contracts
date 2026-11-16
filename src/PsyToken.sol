@@ -14,7 +14,6 @@ interface IStateManagerCheckpointTreeRoot {
     function addressesProvider() external view returns (address);
     function lastFinalizedCheckpointId() external view returns (uint64);
     function checkpointTreeRootCheckpointId(bytes32 checkpointTreeRoot) external view returns (uint64);
-    function checkpointTreeRootsClean() external view returns (bool);
 }
 
 interface IZKVerifierProof {
@@ -88,7 +87,7 @@ contract PsyToken is ERC20, Ownable {
         if (IStateManagerCheckpointTreeRoot(stateManager).addressesProvider() != addressesProvider) revert ProviderMismatch();
 
         uint64 registeredCheckpointId = IStateManagerCheckpointTreeRoot(stateManager).checkpointTreeRootCheckpointId(checkpointRoot);
-        if (!IStateManagerCheckpointTreeRoot(stateManager).checkpointTreeRootsClean() || registeredCheckpointId == 0
+        if (registeredCheckpointId == 0
             || registeredCheckpointId > IStateManagerCheckpointTreeRoot(stateManager).lastFinalizedCheckpointId()) {
             revert UnrecognizedRewardRoot();
         }

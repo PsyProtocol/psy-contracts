@@ -44,4 +44,11 @@ contract PsyAddressesProvider is Initializable, OwnableUpgradeable {
         _addresses[id] = newAddress;
         emit AddressSet(id, oldAddress, newAddress);
     }
+
+    function setZkVerifier(address newVerifier) external onlyOwner {
+        if (newVerifier == address(0)) revert ZeroAddress();
+        address oldVerifier = _addresses[ZK_VERIFIER_ID];
+        _addresses[ZK_VERIFIER_ID] = newVerifier;
+        emit AddressSet(ZK_VERIFIER_ID, oldVerifier, newVerifier);
+    }
 }

@@ -22,6 +22,7 @@ interface IStateManager {
     function knownWithdrawalSubtreeRoots(bytes32 root) external view returns (bool);
     function l1ChainIndex() external view returns (uint8);
     function BRIDGE_USER_ID() external view returns (uint64);
+    function registerDepositSubtreeRoot(bytes32 root) external;
 }
 
 interface IRouterView {
@@ -125,6 +126,11 @@ contract Bridge is Initializable, OwnableUpgradeable {
         address recipient;
         uint256 amount;
         uint64 claimableAt;
+        /// Withdrawal subtree root that authenticated the registering proof.
+        /// Claims and force-claims fail closed unless it is still in the
+        /// StateManager's knownWithdrawalSubtreeRoots registry; zero is the
+        /// pre-upgrade placeholder and is never claimable.
+        bytes32 sourceRoot;
     }
 
     address public addressesProvider;
@@ -179,6 +185,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
     event WithdrawalClaimItemFailed(bytes32 indexed withdrawalId, uint8 indexed slotIndex, uint8 reason);
     event WithdrawalClaimBatchResult(bytes32 indexed batchCommit, uint8 realCount, uint8 succeededCount, uint8 failedCount);
     event WithdrawalForceClaimed(bytes32 indexed withdrawalId, address indexed executor);
+    event WithdrawalPendingCancelled(
+        bytes32 indexed withdrawalId,
+        address indexed token,
+        address indexed recipient,
+        uint256 amount
+    );
     event WithdrawalTotalInitialized(address indexed token, uint256 total);
     event TokenFlowConfigUpdated(address indexed token, bytes32 indexed oldHash, bytes32 indexed newHash);
     event TokenPauseFlagsUpdated(address indexed token, uint8 oldFlags, uint8 newFlags);
@@ -241,12 +253,14 @@ contract Bridge is Initializable, OwnableUpgradeable {
     error WithdrawalGovernanceRequired(bytes32 withdrawalId);
     error PendingWithdrawalNotFound(bytes32 withdrawalId);
     error PendingWithdrawalNotClaimable(bytes32 withdrawalId, uint64 claimableAt);
+    error UnknownWithdrawalSourceRoot(bytes32 withdrawalId, bytes32 sourceRoot);
     error PendingClaimsPaused(address token);
     error InvalidPauseFlags(uint8 flags);
     error BridgeNotFullyPaused();
     error UnauthorizedFlowInitializer();
     error TotalWithdrawalAmountOverflow(address token, uint256 currentTotal, uint256 amount);
     error InvalidWithdrawalForceClaimExecutor(address executor);
+    error TotalWithdrawalAmountUnderflow(address token, uint256 currentTotal, uint256 amount);
     error UnauthorizedWithdrawalForceClaimExecutor(address caller);
     error WithdrawalTotalsTokenSetHashMismatch(bytes32 expected, bytes32 actual);
     constructor() {
@@ -450,6 +464,13 @@ contract Bridge is Initializable, OwnableUpgradeable {
             target.pendingDepositCount > expected.pendingDepositCount
         ) revert InvalidForceSetState();
 
+        // Rollback invalidates the abandoned branch's recorded leaves: delete
+        // everything past the retained prefix so stale entries can neither be
+        // read as live deposits nor satisfy a replayed batchAppend.
+        uint256 oldPendingDepositCount = pendingDepositCount;
+        for (uint256 i = target.pendingDepositCount; i < oldPendingDepositCount; ++i) {
+            delete depositLeafHashes[i];
+        }
         depositRoot = target.depositRoot;
         provedDepositCount = target.provedDepositCount;
         pendingDepositCount = target.pendingDepositCount;
@@ -741,6 +762,7 @@ contract Bridge is Initializable, OwnableUpgradeable {
         for (uint256 i = 0; i < 32; ++i) {
             _depositFrontier[i] = _u32x8ToBytes32(publicInputs, newFrontierOffset + i * 8);
         }
+        _stateManager().registerDepositSubtreeRoot(_u32x8ToBytes32Concat(publicInputs, 8));
 
         emit DepositBatchAppended(fromIndex, toIndex, depositRoot, oldFrontier, leafHashes);
     }
@@ -858,10 +880,10 @@ contract Bridge is Initializable, OwnableUpgradeable {
                 if ((_effectivePauseFlags(tokenAddr) & PAUSE_PENDING_CLAIMS) != 0) {
                     revert PendingClaimsPaused(tokenAddr);
                 }
-                _settlePendingWithdrawal(withdrawalId, PendingWithdrawal(tokenAddr, recipientAddr, amount, 0));
+                _settlePendingWithdrawal(withdrawalId, PendingWithdrawal(tokenAddr, recipientAddr, amount, 0, proofRoot));
             } else {
                 _withdrawalSettlementTiers[withdrawalId] = requiresGovernance ? 2 : 1;
-                _registerPendingWithdrawal(withdrawalId, tokenAddr, recipientAddr, amount, nextTotal, delay);
+                _registerPendingWithdrawal(withdrawalId, tokenAddr, recipientAddr, amount, nextTotal, delay, proofRoot);
             }
         }
 
@@ -908,11 +930,31 @@ contract Bridge is Initializable, OwnableUpgradeable {
         emit WithdrawalForceClaimed(withdrawalId, msg.sender);
     }
 
+    function cancelPendingWithdrawal(bytes32 withdrawalId) external onlyBridgeAdmin withdrawalSettlementLock {
+        PendingWithdrawal memory pending = pendingWithdrawals[withdrawalId];
+        if (pending.amount == 0) revert PendingWithdrawalNotFound(withdrawalId);
+        uint256 currentTotal = _totalWithdrawalAmounts[pending.token];
+        if (currentTotal < pending.amount) {
+            revert TotalWithdrawalAmountUnderflow(pending.token, currentTotal, pending.amount);
+        }
+        delete pendingWithdrawals[withdrawalId];
+        delete _withdrawalSettlementTiers[withdrawalId];
+        delete claimedNullifiers[withdrawalId];
+        _totalWithdrawalAmounts[pending.token] = currentTotal - pending.amount;
+        emit WithdrawalPendingCancelled(withdrawalId, pending.token, pending.recipient, pending.amount);
+    }
+
     function _loadPendingWithdrawal(bytes32 withdrawalId) internal view returns (PendingWithdrawal memory pending) {
         pending = pendingWithdrawals[withdrawalId];
         if (pending.amount == 0) revert PendingWithdrawalNotFound(withdrawalId);
         if ((_effectivePauseFlags(pending.token) & PAUSE_PENDING_CLAIMS) != 0) {
             revert PendingClaimsPaused(pending.token);
+        }
+        // Validity follows the StateManager's current registry: a revoked
+        // source root makes the entry unpayable, and a zero source root (a
+        // pre-upgrade entry) fails closed. Cancellation is not gated here.
+        if (pending.sourceRoot == bytes32(0) || !_stateManager().knownWithdrawalSubtreeRoots(pending.sourceRoot)) {
+            revert UnknownWithdrawalSourceRoot(withdrawalId, pending.sourceRoot);
         }
     }
 
@@ -928,7 +970,6 @@ contract Bridge is Initializable, OwnableUpgradeable {
         }
         emit WithdrawalClaimed(withdrawalId, pending.recipient, pending.token, pending.amount);
     }
-
 
 
 
@@ -966,11 +1007,12 @@ contract Bridge is Initializable, OwnableUpgradeable {
         address recipient,
         uint256 amount,
         uint256 nextTotal,
-        uint32 delay
+        uint32 delay,
+        bytes32 sourceRoot
     ) internal {
         _totalWithdrawalAmounts[token] = nextTotal;
         uint256 claimTime = block.timestamp + delay;
-        pendingWithdrawals[withdrawalId] = PendingWithdrawal(token, recipient, amount, uint64(claimTime));
+        pendingWithdrawals[withdrawalId] = PendingWithdrawal(token, recipient, amount, uint64(claimTime), sourceRoot);
         emit WithdrawalPendingCreated(withdrawalId, token, recipient, amount, uint64(claimTime));
     }
 

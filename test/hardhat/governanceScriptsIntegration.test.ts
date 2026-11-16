@@ -8,7 +8,7 @@ import { setBridgeTokenFlowConfig } from "../../scripts/governance/bridgeFlowCon
 import { rescueBridgeFunds } from "../../scripts/upgrade/rescueBridgeFunds";
 import initializeBridgeFlowLimits from "../../deploy/003b_initialize_bridge_flow_limits";
 import { upgradeBridge } from "../../scripts/upgrade/bridge";
-import { forceSetState, revokeCheckpointTreeRoots, revokeKnownSubtreeRoots, setCheckpointTreeRootsClean } from "../../scripts/upgrade/forceSetState";
+import { forceSetState, revokeCheckpointTreeRoots, revokeKnownSubtreeRoots } from "../../scripts/upgrade/forceSetState";
 import { UPGRADEABLE_CONTRACTS, upgradeAllContracts, upgradeContract } from "../../scripts/upgrade/utils";
 import { upgradeStateManager } from "../../scripts/upgrade/stateManager";
 import { getDeployedContract } from "../../helpers/contracts-helpers";
@@ -100,7 +100,7 @@ describe("governance scripts local integration", function () {
     ]) delete process.env[name];
   });
 
-  it("blocks incompatible StateManager upgrades before side effects and retains force-state recovery", async function () {
+  it("upgrades StateManager in place and retains force-state recovery", async function () {
     const token = await getDeployedContract("USDTToken");
     const bridge = await getDeployedContract("Bridge");
     const timelock = await deployments.get("ExecutorWithTimelock");
@@ -117,18 +117,29 @@ describe("governance scripts local integration", function () {
       const proxy = await deployments.get(`${name}_Proxy`);
       before.set(name, await implementationOf(proxy.address));
     }
-    const blocked = "StateManager in-place upgrade is blocked";
-    await expect(upgradeAllContracts(undefined, bridgeInitData)).to.be.rejectedWith(blocked);
-    await expect(upgradeContract("StateManager")).to.be.rejectedWith(blocked);
-    await expect(upgradeStateManager()).to.be.rejectedWith(blocked);
-    await expect(hre.run("upgrade", { contract: "StateManager" })).to.be.rejectedWith(blocked);
-    await expect(hre.run("upgrade:state-manager")).to.be.rejectedWith(blocked);
+    await expect(upgradeAllContracts(undefined, "0x")).to.be.rejectedWith("initializeWithdrawalTotals");
     for (const name of UPGRADEABLE_CONTRACTS) {
       const proxy = await deployments.get(`${name}_Proxy`);
       expect(await implementationOf(proxy.address)).to.equal(before.get(name));
     }
 
+    const upgraded = await upgradeContract("StateManager");
+    const stateProxy = await deployments.get("StateManager_Proxy");
+    expect(upgraded.proxy).to.equal(stateProxy.address);
+    expect(await implementationOf(stateProxy.address)).to.equal(upgraded.implementation);
+    expect(await implementationOf(stateProxy.address)).to.not.equal(before.get("StateManager"));
+    for (const name of UPGRADEABLE_CONTRACTS) {
+      if (name === "StateManager") continue;
+      const proxy = await deployments.get(`${name}_Proxy`);
+      expect(await implementationOf(proxy.address)).to.equal(before.get(name));
+    }
+    await upgradeStateManager();
+    await hre.run("upgrade", { contract: "StateManager" });
+    await hre.run("upgrade:state-manager");
+
     const stateManager = await getDeployedContract("StateManager");
+    expect(await stateManager.knownDepositSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
+    expect(await stateManager.knownWithdrawalSubtreeRoots(ethers.constants.HashZero)).to.equal(true);
     process.env.EXPECTED_LAST_FINALIZED_CHECKPOINT_ID = String(await stateManager.lastFinalizedCheckpointId());
     process.env.EXPECTED_LAST_VERIFIED_CHECKPOINT_ROOT = await stateManager.lastVerifiedCheckpointRoot();
     process.env.EXPECTED_LAST_VERIFIED_DEPOSIT_TREE_ROOT = await stateManager.lastVerifiedDepositTreeRoot();
@@ -142,9 +153,10 @@ describe("governance scripts local integration", function () {
     await forceSetState();
     expect(await stateManager.lastFinalizedCheckpointId()).to.equal(process.env.NEW_LAST_FINALIZED_CHECKPOINT_ID);
     expect(await stateManager.lastVerifiedCheckpointRoot()).to.equal(hexZeroPad("0x11", 32));
+    expect(await stateManager.checkpointTreeRootCheckpointId(hexZeroPad("0x11", 32))).to.equal(0);
   });
 
-  it("revokes named checkpoint tree roots and explicitly re-enables finalization", async function () {
+  it("revokes named checkpoint tree roots without blocking the next finalize", async function () {
     const stateManager = await getDeployedContract("StateManager");
     const provider = await getDeployedContract("PsyAddressesProvider");
     const acl = await getDeployedContract("PsyACLManager");
@@ -165,9 +177,12 @@ describe("governance scripts local integration", function () {
     const replacement = hexZeroPad("0xb5", 32);
     const target = [5, replacement, zero, zero, zero];
     await stateManager.forceSetState(expected, target);
+    expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
+    expect(await stateManager.checkpointTreeRootCheckpointId(nextRoot)).to.equal(11);
+    expect(await stateManager.checkpointTreeRootCheckpointId(replacement)).to.equal(0);
     await hre.run("state-manager:revoke-checkpoint-tree-roots", { rootsJson: JSON.stringify([nextRoot]) });
-    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
     expect(await stateManager.checkpointTreeRootCheckpointId(nextRoot)).to.equal(0);
+    expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
     const cleanup = await revokeCheckpointTreeRoots([nextRoot]);
     expect(cleanup.data).to.equal(stateManager.interface.encodeFunctionData("revokeCheckpointTreeRoots", [[nextRoot]]));
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "psy-checkpoint-roots-"));
@@ -179,17 +194,10 @@ describe("governance scripts local integration", function () {
       fs.rmSync(dir, { recursive: true, force: true });
     }
     expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
-    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
-    await expect(stateManager.finalize(proof, zero, [replacement, nextRoot], zero, chainIndex, 12, merklePath, merklePath))
-      .to.be.revertedWithCustomError(stateManager, "CheckpointTreeRootCleanupRequired");
-    await hre.run("state-manager:set-checkpoint-tree-roots-clean", { clean: true });
-    expect(await stateManager.checkpointTreeRootsClean()).to.equal(true);
     await stateManager.finalize(proof, zero, [replacement, nextRoot], zero, chainIndex, 12, merklePath, merklePath);
     expect(await stateManager.checkpointTreeRootCheckpointId(root)).to.equal(1);
     expect(await stateManager.checkpointTreeRootCheckpointId(nextRoot)).to.equal(12);
-    const paused = await setCheckpointTreeRootsClean(false);
-    expect(paused.data).to.equal(stateManager.interface.encodeFunctionData("setCheckpointTreeRootsClean", [false]));
-    expect(await stateManager.checkpointTreeRootsClean()).to.equal(false);
+    expect(await stateManager.checkpointTreeRootCheckpointId(replacement)).to.equal(0);
   });
 
   it("revokes named subtree memberships through JSON file and inline governance inputs", async function () {
@@ -211,7 +219,6 @@ describe("governance scripts local integration", function () {
       await revokeKnownSubtreeRoots(JSON.stringify([zero]), [zero]);
       expect(await stateManager.knownWithdrawalSubtreeRoots(zero)).to.equal(false);
       expect(await stateManager.withdrawalSubtreeRoot()).to.equal(zero);
-      expect(await stateManager.checkpointTreeRootsClean()).to.equal(true);
       await expect(revokeKnownSubtreeRoots(["0x01"], [])).to.be.rejectedWith("depositRootsJson");
       await expect(revokeKnownSubtreeRoots([], ["0x01"])).to.be.rejectedWith("withdrawalRootsJson");
     } finally {

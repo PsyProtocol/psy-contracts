@@ -138,7 +138,7 @@ const config: HardhatUserConfig = {
     cache: "./cache/hardhat",
     artifacts: "./artifacts/hardhat",
     deploy: "./deploy",
-    deployments: "./deployments",
+    deployments: process.env.PSY_DEPLOYMENTS_DIR || "./deployments",
   },
 };
 

@@ -1,6 +1,6 @@
 import { ethers } from "hardhat";
 
-const WITHDRAWAL_BATCH_SLOT_WORDS = 34;
+const WITHDRAWAL_BATCH_SLOT_WORDS = 35;
 const WITHDRAWAL_BATCH_SLOT_COUNT = 32;
 
 function bytes32ToU32x8(value: string): bigint[] {
@@ -39,6 +39,7 @@ export interface WithdrawalBatchClaimItem {
   amount: bigint;
   nonce: bigint;
   destinationChainIndex: number;
+  tokenContractId: number | bigint;
 }
 
 export function buildWithdrawalBatchClaim(params: {
@@ -67,6 +68,7 @@ export function buildWithdrawalBatchClaim(params: {
     setWords(slotData, offset + 17, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.amount.toString(16)}`, 32)));
     setWords(slotData, offset + 25, bytes32ToU32x8(ethers.utils.hexZeroPad(`0x${item.nonce.toString(16)}`, 32)));
     slotData[offset + 33] = BigInt(item.destinationChainIndex);
+    slotData[offset + 34] = BigInt(item.tokenContractId);
   });
   setWords(publicInputs, 10, bytes32ToU32x8(batchSlotDataCommit(slotData)));
   return { publicInputs, slotData };
@@ -86,6 +88,7 @@ export function buildWithdrawalBatchClaimSingle(params: {
   amount: bigint;
   nonce: bigint;
   destinationChainIndex: number;
+  tokenContractId: number | bigint;
   senderUserId?: number;
   bridgeUserId?: number;
 }): { publicInputs: bigint[]; slotData: bigint[] } {
@@ -100,7 +103,33 @@ export function buildWithdrawalBatchClaimSingle(params: {
         amount: params.amount,
         nonce: params.nonce,
         destinationChainIndex: params.destinationChainIndex,
+        tokenContractId: params.tokenContractId,
       },
     ],
   });
+}
+
+export function withdrawalIdOf(item: {
+  senderUserId?: number;
+  recipient: string;
+  token: string;
+  amount: bigint;
+  nonce: bigint;
+  destinationChainIndex: number;
+  tokenContractId: number | bigint;
+}): string {
+  return ethers.utils.keccak256(
+    ethers.utils.solidityPack(
+      ["uint32", "bytes32", "bytes32", "bytes32", "bytes32", "uint32", "uint32"],
+      [
+        BigInt(item.senderUserId ?? 0),
+        ethers.utils.hexZeroPad(item.recipient, 32),
+        ethers.utils.hexZeroPad(item.token, 32),
+        ethers.utils.hexZeroPad(`0x${item.amount.toString(16)}`, 32),
+        ethers.utils.hexZeroPad(`0x${item.nonce.toString(16)}`, 32),
+        item.destinationChainIndex,
+        BigInt(item.tokenContractId),
+      ],
+    ),
+  );
 }
