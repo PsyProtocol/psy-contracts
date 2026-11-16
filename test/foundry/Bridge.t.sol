@@ -1086,16 +1086,23 @@ contract BridgeTest is Test {
     }
 
     function testBatchClaimWithdrawalStaleRouterMappingIsRejected() public {
-        // The forward entry still says token -> 4, but 4 already rebinds to
+        // The forward entry still says token -> 4, but id 4 already rebinds to
         // another token: only the forward direction agrees, which is exactly
-        // the stale pair the bidirectional guardian check rejects.
+        // the stale pair the bidirectional guardian check rejects. The
+        // upgraded Router's bijection guard refuses to create this pair via
+        // setTokenMapping, so the historical pre-upgrade mapping is written
+        // directly (slot 2 is l1ToL2Token, slot 3 is l2ToL1Token; pre-upgrade
+        // pairs carry no occupancy flag).
         (Bridge bridge,, bytes32 withdrawalRoot) = _setupBatchClaimBridge();
 
         MockERC20 token = new MockERC20("Mock", "MOCK");
         MockERC20 other = new MockERC20("Other", "OTH");
         _configureFlowToken(bridge, address(token));
-        _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
-        _mapClaimToken(bridge, address(other), bytes32(uint256(4)));
+        PsyAddressesProvider provider = PsyAddressesProvider(bridge.addressesProvider());
+        Router router = Router(provider.getAddress(provider.ROUTER_ID()));
+        vm.store(address(router), keccak256(abi.encode(address(token), uint256(2))), bytes32(uint256(4)));
+        vm.store(address(router), keccak256(abi.encode(address(other), uint256(2))), bytes32(uint256(4)));
+        vm.store(address(router), keccak256(abi.encode(bytes32(uint256(4)), uint256(3))), bytes32(uint256(uint160(address(other)))));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xE3));
 

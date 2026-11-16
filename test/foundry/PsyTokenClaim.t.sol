@@ -55,6 +55,7 @@ contract PsyTokenClaimTest is Test {
     address internal holder = address(0xB10C);
     address internal recipient = address(0xBEEF);
     address internal other = address(0xC0DE);
+    address internal bridge = address(0xB21D6E);
 
     function _deployAddressesProvider() internal returns (PsyAddressesProvider provider) {
         PsyAddressesProvider impl = new PsyAddressesProvider();
@@ -169,6 +170,7 @@ contract PsyTokenClaimTest is Test {
         verifier = new RewardClaimMessageHashVerifier(claimMessageHash);
         vm.startPrank(owner);
         provider.setAddress(provider.ACL_MANAGER_ID(), address(_deployACL()));
+        provider.setAddress(provider.BRIDGE_ID(), bridge);
         provider.setAddress(provider.ZK_VERIFIER_ID(), address(new MockGnarkVerifier()));
         provider.setAddress(provider.STATE_MANAGER_ID(), address(sm));
         provider.setAddress(provider.REWARD_CLAIM_VERIFIER_ID(), address(verifier));
@@ -178,6 +180,14 @@ contract PsyTokenClaimTest is Test {
     function _setProviderAddress(PsyAddressesProvider provider, bytes32 id, address value) internal {
         vm.prank(owner);
         provider.setAddress(id, value);
+    }
+
+    /// @dev The Bridge registers every deposit subtree root at batch-append time; finalize
+    /// rejects deposit leaves the Bridge never registered. Mirror that registration step.
+    function _registerDepositSubtreeRoot(StateManager sm, bytes32 depositLeaf) internal {
+        PsyAddressesProvider provider = PsyAddressesProvider(sm.addressesProvider());
+        vm.prank(provider.getAddress(provider.BRIDGE_ID()));
+        sm.registerDepositSubtreeRoot(depositLeaf);
     }
 
 
@@ -191,6 +201,7 @@ contract PsyTokenClaimTest is Test {
         bytes32[9] memory withdrawalProof;
         (withdrawalProof, withdrawalRoot) = _buildTopTreeProof(bytes32(uint256(0x1234)), 0);
         withdrawalLeaf = withdrawalProof[0];
+        _registerDepositSubtreeRoot(sm, depositLeaf);
         vm.prank(proposer);
         sm.finalize(
             _rewardClaimProof(),
@@ -405,9 +416,11 @@ contract PsyTokenClaimTest is Test {
     }
 
     function _advanceRewardRoot(StateManager sm, bytes32 root, uint64 checkpointId) internal {
-        (bytes32[9] memory depositProof, bytes32 depositRoot) = _buildTopTreeProof(sm.withdrawalSubtreeRoot(), 0);
+        bytes32 depositLeaf = sm.withdrawalSubtreeRoot();
+        (bytes32[9] memory depositProof, bytes32 depositRoot) = _buildTopTreeProof(depositLeaf, 0);
         (bytes32[9] memory withdrawalProof, bytes32 withdrawalRoot) = _buildTopTreeProof(bytes32(uint256(0x1234)), 0);
         bytes32[2] memory roots = _checkpointRoots(sm.lastVerifiedCheckpointRoot(), root);
+        _registerDepositSubtreeRoot(sm, depositLeaf);
         vm.prank(proposer);
         sm.finalize(_rewardClaimProof(), depositRoot, roots, withdrawalRoot, 0, checkpointId, depositProof, withdrawalProof);
     }
@@ -597,6 +610,7 @@ contract PsyTokenClaimTest is Test {
         bytes32[9] memory continuedWithdrawal;
         bytes32 continuedWithdrawalRoot;
         (continuedWithdrawal, continuedWithdrawalRoot) = _buildTopTreeProof(bytes32(uint256(0x5678)), 0);
+        _registerDepositSubtreeRoot(sm, withdrawalLeaf);
         vm.prank(proposer);
         sm.finalize(
             _rewardClaimProof(),
