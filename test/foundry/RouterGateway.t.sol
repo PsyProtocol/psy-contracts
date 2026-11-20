@@ -148,6 +148,37 @@ contract RouterGatewayTest is Test {
         assertEq(router.l1ToL2Token(address(token)), widestId);
     }
 
+    /// The Guardians check a deposit's mapping at the append anchor, so re-pointing a mapped token or id would
+    /// strand its unappended deposits at the head of the ordered queue.
+    function testTokenMappingCannotBeRepointed() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 tokenA = new MockERC20("A", "A");
+        MockERC20 tokenB = new MockERC20("B", "B");
+        bytes32 idA = bytes32(uint256(1));
+        bytes32 idB = bytes32(uint256(2));
+        bytes32 ethId = bytes32(uint256(0x8888));
+        vm.startPrank(owner);
+        router.setTokenMapping(address(tokenA), idA);
+        router.setTokenMapping(address(0), ethId);
+        router.setTokenMapping(address(tokenA), idA);
+
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(tokenA), idB));
+        router.setTokenMapping(address(tokenA), idB);
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(tokenB), idA));
+        router.setTokenMapping(address(tokenB), idA);
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(tokenB), ethId));
+        router.setTokenMapping(address(tokenB), ethId);
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(0), idB));
+        router.setTokenMapping(address(0), idB);
+
+        router.setTokenMapping(address(tokenB), idB);
+        vm.stopPrank();
+        assertEq(router.l1ToL2Token(address(tokenA)), idA);
+        assertEq(router.l2ToL1Token(idA), address(tokenA));
+        assertEq(router.l1ToL2Token(address(0)), ethId);
+        assertEq(router.l2ToL1Token(idB), address(tokenB));
+    }
+
     function testRouterETHDepositPath() public {
         (, Bridge bridge, Router router,, ETHGateway ethg, MockWETH weth) = _deployAll();
         _configureFlowToken(bridge, address(0));
@@ -213,21 +244,34 @@ contract RouterGatewayTest is Test {
         _expectUnmappedDeposit(router, erc20g, address(unknown), 0);
         _expectUnmappedDeposit(router, erc20g, address(0), 1 ether);
 
-        // One-way: usdt keeps its forward mapping, but id 4 now resolves back to psy.
+        // setTokenMapping no longer re-points a mapped pair, so the one-way states below can only
+        // predate the upgrade; they are written straight into storage to keep the deposit check covered.
         vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(psy), bytes32(uint256(4))));
         router.setTokenMapping(address(psy), bytes32(uint256(4)));
+
+        // One-way: usdt keeps its forward mapping, but id 4 resolves back to psy.
+        _storeReverseMapping(router, bytes32(uint256(4)), address(psy));
         _expectUnmappedDeposit(router, erc20g, address(usdt), 0);
 
-        // One-way native: forward id 9 is set, then another token takes id 9.
-        vm.startPrank(owner);
+        // One-way native: forward id 9 is set, then another token holds id 9.
+        vm.prank(owner);
         router.setTokenMapping(address(0), bytes32(uint256(9)));
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.TokenMappingAlreadySet.selector, address(unknown), bytes32(uint256(9))));
         router.setTokenMapping(address(unknown), bytes32(uint256(9)));
-        vm.stopPrank();
+        _storeReverseMapping(router, bytes32(uint256(9)), address(unknown));
         _expectUnmappedDeposit(router, erc20g, address(0), 1 ether);
 
         assertEq(bridge.pendingDepositCount(), 0);
         assertEq(weth.balanceOf(address(bridge)), 0);
         assertEq(usdt.balanceOf(user), 1_000);
+    }
+
+    /// Router storage slot 3 is `l2ToL1Token` (forge inspect Router storageLayout).
+    function _storeReverseMapping(Router router, bytes32 l2Token, address l1Token) internal {
+        vm.store(address(router), keccak256(abi.encode(l2Token, uint256(3))), bytes32(uint256(uint160(l1Token))));
+        assertEq(router.l2ToL1Token(l2Token), l1Token);
     }
 
     function _expectUnmappedDeposit(Router router, ERC20Gateway erc20g, address token, uint256 value) internal {

@@ -32,6 +32,7 @@ contract Router is Initializable, OwnableUpgradeable {
     error InvalidMsgValue();
     error OnlyRouterAdmin();
     error L2TokenIdOutOfRange(bytes32 l2Token);
+    error TokenMappingAlreadySet(address l1Token, bytes32 l2Token);
 
     modifier onlyRouterAdmin() {
         IPsyAddressesProviderRouter provider = IPsyAddressesProviderRouter(addressesProvider);
@@ -62,6 +63,12 @@ contract Router is Initializable, OwnableUpgradeable {
     function setTokenMapping(address l1Token, bytes32 l2Token) external onlyRouterAdmin {
         // The L2 deposit leaf and the Guardians carry the token contract id as a u32.
         if (uint256(l2Token) > type(uint32).max) revert L2TokenIdOutOfRange(l2Token);
+        // Guardians check a deposit's mapping at the append anchor, so a mapped pair is never re-pointed.
+        bool isL1TokenMappedElsewhere = isTokenMapped(l1Token) && l1ToL2Token[l1Token] != l2Token;
+        address l2TokenOwner = l2ToL1Token[l2Token];
+        bool isL2TokenMappedElsewhere =
+            l2TokenOwner != l1Token && isTokenMapped(l2TokenOwner) && l1ToL2Token[l2TokenOwner] == l2Token;
+        if (isL1TokenMappedElsewhere || isL2TokenMappedElsewhere) revert TokenMappingAlreadySet(l1Token, l2Token);
         l1ToL2Token[l1Token] = l2Token;
         l2ToL1Token[l2Token] = l1Token;
     }

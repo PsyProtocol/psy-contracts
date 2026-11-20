@@ -1092,7 +1092,7 @@ contract BridgeTest is Test {
         MockERC20 other = new MockERC20("Other", "OTH");
         _configureFlowToken(bridge, address(token));
         _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
-        _mapClaimToken(bridge, address(other), bytes32(uint256(4)));
+        _storePreUpgradeTokenMapping(bridge, address(other), bytes32(uint256(4)));
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xE3));
 
@@ -1211,7 +1211,7 @@ contract BridgeTest is Test {
         MockERC20 token = new MockERC20("Mock", "MOCK");
         _configureFlowToken(bridge, address(token));
         _mapClaimToken(bridge, address(token), bytes32(uint256(4)));
-        _mapClaimToken(bridge, address(token), bytes32(uint256(5)));
+        _storePreUpgradeTokenMapping(bridge, address(token), bytes32(uint256(5)));
         _slotTokenIds[address(token)] = 4;
         uint256 amount = 123;
         bytes32 nonce = bytes32(uint256(0xEA));
@@ -1318,6 +1318,16 @@ contract BridgeTest is Test {
         vm.prank(user);
         vm.expectRevert(Bridge.InvalidPublicInputs.selector);
         bridge.batchClaimWithdrawal(proof, publicInputs, slotData);
+    }
+
+    /// A re-pointed mapping can only predate the Router's re-point guard, so it is written straight into
+    /// storage the way the old setTokenMapping wrote it (Router slots 2 and 3, forge inspect storageLayout).
+    function _storePreUpgradeTokenMapping(Bridge bridge, address token, bytes32 l2TokenId) internal {
+        PsyAddressesProvider provider = PsyAddressesProvider(bridge.addressesProvider());
+        address router = provider.getAddress(provider.ROUTER_ID());
+        vm.store(router, keccak256(abi.encode(token, uint256(2))), l2TokenId);
+        vm.store(router, keccak256(abi.encode(l2TokenId, uint256(3))), bytes32(uint256(uint160(token))));
+        _slotTokenIds[token] = uint32(uint256(l2TokenId));
     }
 
     function _mapClaimToken(Bridge bridge, address token, bytes32 l2TokenId) internal {

@@ -6,6 +6,16 @@ function u32ToBytes32(value: number): string {
   return ethers.utils.hexZeroPad(ethers.utils.hexlify(value), 32);
 }
 
+// A re-pointed mapping can only predate the Router's re-point guard, so it is written straight into storage
+// the way the old setTokenMapping wrote it (Router slots 2 and 3, forge inspect Router storageLayout).
+async function storePreUpgradeTokenMapping(router: string, l1Token: string, l2Token: string): Promise<void> {
+  const coder = ethers.utils.defaultAbiCoder;
+  const forwardSlot = ethers.utils.keccak256(coder.encode(["address", "uint256"], [l1Token, 2]));
+  const reverseSlot = ethers.utils.keccak256(coder.encode(["bytes32", "uint256"], [l2Token, 3]));
+  await ethers.provider.send("hardhat_setStorageAt", [router, forwardSlot, l2Token]);
+  await ethers.provider.send("hardhat_setStorageAt", [router, reverseSlot, ethers.utils.hexZeroPad(l1Token, 32)]);
+}
+
 describe("Router + Gateways", function () {
   it("routes ERC20 and ETH deposits through gateways", async function () {
     const [owner, user] = await ethers.getSigners();
@@ -112,7 +122,9 @@ describe("Router + Gateways", function () {
     });
 
     it("rejects a stale forward mapping after another token takes its id", async function () {
-      await router.setTokenMapping(psy.address, u32ToBytes32(4));
+      await expect(router.setTokenMapping(psy.address, u32ToBytes32(4)))
+        .to.be.revertedWithCustomError(router, "TokenMappingAlreadySet");
+      await storePreUpgradeTokenMapping(router.address, psy.address, u32ToBytes32(4));
       await expect(router.connect(user).deposit(
         usdt.address, 100, shieldAddress, noteCommitment
       )).to.be.reverted;
@@ -121,7 +133,9 @@ describe("Router + Gateways", function () {
     });
 
     it("rejects the all-zero native mapping even when its reverse is also zero", async function () {
-      await router.setTokenMapping(ethers.constants.AddressZero, u32ToBytes32(0));
+      await expect(router.setTokenMapping(ethers.constants.AddressZero, u32ToBytes32(0)))
+        .to.be.revertedWithCustomError(router, "TokenMappingAlreadySet");
+      await storePreUpgradeTokenMapping(router.address, ethers.constants.AddressZero, u32ToBytes32(0));
       await expect(router.connect(user).deposit(
         ethers.constants.AddressZero, 100, shieldAddress, noteCommitment, { value: 100 }
       )).to.be.reverted;
@@ -131,7 +145,9 @@ describe("Router + Gateways", function () {
 
     it("rejects a stale native mapping after another token takes its id", async function () {
       await router.setTokenMapping(ethers.constants.AddressZero, u32ToBytes32(9));
-      await router.setTokenMapping(usdt.address, u32ToBytes32(9));
+      await expect(router.setTokenMapping(usdt.address, u32ToBytes32(9)))
+        .to.be.revertedWithCustomError(router, "TokenMappingAlreadySet");
+      await storePreUpgradeTokenMapping(router.address, usdt.address, u32ToBytes32(9));
       await expect(router.connect(user).deposit(
         ethers.constants.AddressZero, 100, shieldAddress, noteCommitment, { value: 100 }
       )).to.be.revertedWithCustomError(router, "UnmappedL1Token");

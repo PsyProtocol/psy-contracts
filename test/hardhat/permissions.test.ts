@@ -75,13 +75,14 @@ describe("Permission Matrix", function () {
     ]);
     await provider.connect(owner).setAddress(await provider.ACL_MANAGER_ID(), newAcl.address);
 
-    // routerAdmin role existed only on old acl, should now fail
-    await expect(router.connect(routerAdmin).setTokenMapping(token, ethers.utils.hexZeroPad("0x02", 32)))
+    // routerAdmin role existed only on old acl, should now fail; a mapped token is never re-pointed, so use a fresh one
+    const unmappedToken = ethers.Wallet.createRandom().address;
+    await expect(router.connect(routerAdmin).setTokenMapping(unmappedToken, ethers.utils.hexZeroPad("0x02", 32)))
       .to.be.revertedWithCustomError(router, "OnlyRouterAdmin");
 
     // grant role on new ACL, now it works again
     await newAcl.connect(owner).grantRole(await newAcl.ROUTER_ADMIN_ROLE(), routerAdmin.address);
-    await expect(router.connect(routerAdmin).setTokenMapping(token, ethers.utils.hexZeroPad("0x03", 32))).to.not.be.reverted;
+    await expect(router.connect(routerAdmin).setTokenMapping(unmappedToken, ethers.utils.hexZeroPad("0x03", 32))).to.not.be.reverted;
 
     // 7) Wiring sanity: critical addresses are non-zero
     expect(await provider["getAddress(bytes32)"](await provider.ACL_MANAGER_ID())).to.equal(newAcl.address);
