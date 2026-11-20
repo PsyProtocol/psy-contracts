@@ -31,6 +31,7 @@ contract Router is Initializable, OwnableUpgradeable {
     error GatewayNotConfigured();
     error InvalidMsgValue();
     error OnlyRouterAdmin();
+    error L2TokenIdOutOfRange(bytes32 l2Token);
 
     modifier onlyRouterAdmin() {
         IPsyAddressesProviderRouter provider = IPsyAddressesProviderRouter(addressesProvider);
@@ -59,6 +60,8 @@ contract Router is Initializable, OwnableUpgradeable {
     }
 
     function setTokenMapping(address l1Token, bytes32 l2Token) external onlyRouterAdmin {
+        // The L2 deposit leaf and the Guardians carry the token contract id as a u32.
+        if (uint256(l2Token) > type(uint32).max) revert L2TokenIdOutOfRange(l2Token);
         l1ToL2Token[l1Token] = l2Token;
         l2ToL1Token[l2Token] = l1Token;
     }

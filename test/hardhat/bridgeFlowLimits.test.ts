@@ -33,6 +33,11 @@ function mkTopProof(leaf: string, index: number): { proof: string[]; root: strin
 
 const CLAIM_REASON = { AMOUNT_OUT_OF_RANGE: 8 } as const;
 
+// L2 token contract ids are u32, so derive a distinct one from the token address's low four bytes.
+function l2TokenIdFor(tokenAddress: string): string {
+  return ethers.utils.hexZeroPad(ethers.utils.hexDataSlice(tokenAddress, 16), 32);
+}
+
 
 async function prepareWithdrawal(params: {
   bridge: any;
@@ -100,7 +105,7 @@ describe("Bridge per-token flow limits", function () {
     await tokenB.deployed();
 
     for (const token of [tokenA, tokenB]) {
-      await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+      await router.setTokenMapping(token.address, l2TokenIdFor(token.address));
       await configureFlowToken(bridge, token.address, {
         minDepositAmount: 100,
         depositCap: 500,
@@ -146,7 +151,7 @@ describe("Bridge per-token flow limits", function () {
     const factory = await ethers.getContractFactory("MockFeeOnTransferERC20");
     const token = await factory.deploy();
     await token.deployed();
-    await router.setTokenMapping(token.address, ethers.utils.hexZeroPad(token.address, 32));
+    await router.setTokenMapping(token.address, l2TokenIdFor(token.address));
     await configureFlowToken(bridge, token.address);
     await token.mint(user.address, 1_000);
     await token.connect(user).approve(erc20Gateway.address, 1_000);

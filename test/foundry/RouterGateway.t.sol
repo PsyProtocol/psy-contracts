@@ -132,6 +132,22 @@ contract RouterGatewayTest is Test {
         assertEq(bridge.pendingDepositCount(), 1);
     }
 
+    /// Guardians and the L2 deposit leaf carry the token id as a u32, so a wider id could never be appended.
+    function testTokenMappingRejectsAnL2TokenIdWiderThanU32() public {
+        (,, Router router,,,) = _deployAll();
+        MockERC20 token = new MockERC20("Wide", "WIDE");
+        bytes32 wideId = bytes32(uint256(type(uint32).max) + 1);
+        vm.prank(owner);
+        vm.expectRevert(abi.encodeWithSelector(Router.L2TokenIdOutOfRange.selector, wideId));
+        router.setTokenMapping(address(token), wideId);
+        assertFalse(router.isTokenMapped(address(token)));
+
+        bytes32 widestId = bytes32(uint256(type(uint32).max));
+        vm.prank(owner);
+        router.setTokenMapping(address(token), widestId);
+        assertEq(router.l1ToL2Token(address(token)), widestId);
+    }
+
     function testRouterETHDepositPath() public {
         (, Bridge bridge, Router router,, ETHGateway ethg, MockWETH weth) = _deployAll();
         _configureFlowToken(bridge, address(0));
